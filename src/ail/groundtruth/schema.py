@@ -34,6 +34,7 @@ by mutating expectations in place), so the contract round-trips through JSON
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
 
@@ -201,8 +202,12 @@ class GroundTruthCase(_Frozen):
     task_input: TaskInput
     # REQUIRED provenance — a case must cite where it came from (>= 1 source).
     sources: list[Source] = Field(min_length=1)
-    # REQUIRED field; its *content* is human-authored in the approve stage. A
-    # case is not promotable while this is blank (see promotion_blockers()).
+    # Human-authored at the approve stage, exactly like `expectations`: blank on
+    # a fresh candidate, authored by the reviewer, and enforced non-blank at the
+    # frozen-pool boundary (see `validate_pool_membership` / promotion_blockers).
+    # It is therefore *required to promote*, not required to capture — a base
+    # min_length on a field that legitimately starts empty for candidates would
+    # be inconsistent with the candidate lifecycle.
     regression_intent: str = ""
     expectations: Expectations = Field(default_factory=Expectations)  # {} filled by reviewer
     candidate_response: CandidateResponse | None = None
@@ -238,12 +243,59 @@ class GroundTruthCase(_Frozen):
         return not self.promotion_blockers()
 
 
-class GroundTruthSet(_Frozen):
-    """A versioned, named collection of cases belonging to **one** pool.
+def validate_pool_membership(pool: Pool, cases: Sequence[GroundTruthCase]) -> None:
+    """Assert every case may legitimately live in a frozen ``pool`` (or raise).
 
-    The on-disk / persisted unit of a frozen pool. The validator enforces the
-    two invariants that keep the wall intact: every case targets this set's pool
-    (no mixing), and case ids are unique within the set.
+    This is the single definition of "what is allowed in a pool", reused by the
+    :class:`GroundTruthSet` validator *and* the persistence boundary
+    (:meth:`ail.groundtruth.store.GroundTruthStore.save`) so the human gate
+    cannot be sidestepped by constructing a set or writing a file directly. A
+    case is admissible only if it:
+
+    * targets exactly this pool (``target_pool is pool`` — no mixing, and a
+      ``target_pool`` of ``None`` is rejected),
+    * has cleared the human gate (:meth:`GroundTruthCase.is_promotable` — i.e.
+      approved by a named human, with filled expectations and a non-blank
+      regression intent), and
+    * has a case id unique within the pool.
+
+    The held-out :attr:`Pool.TASK_SUITE` is special-cased: a ground-truth pool
+    set for it must be **empty**. The Task Suite is the benchmark the optimizer
+    is judged against and is never populated by this bootstrap loop; populating
+    it is a separate future API (see :mod:`ail.groundtruth.promote`).
+    """
+    if pool is Pool.TASK_SUITE and len(cases) > 0:
+        raise GroundTruthError(
+            "the Task Suite is the held-out benchmark and is never populated by the "
+            "ground-truth bootstrap; a TASK_SUITE pool set must be empty"
+        )
+    seen: set[str] = set()
+    for case in cases:
+        if case.target_pool is not pool:
+            target = None if case.target_pool is None else case.target_pool.value
+            raise GroundTruthError(
+                f"case {case.case_id!r} targets pool {target!r} but would be stored in "
+                f"pool {pool.value!r} (pools are never mixed; a pooled case must target it)"
+            )
+        blockers = case.promotion_blockers()
+        if blockers:
+            raise GroundTruthError(
+                f"case {case.case_id!r} has not cleared the human gate and cannot be "
+                f"pooled: {'; '.join(blockers)}"
+            )
+        if case.case_id in seen:
+            raise GroundTruthError(f"duplicate case_id {case.case_id!r} in pool {pool.value!r}")
+        seen.add(case.case_id)
+
+
+class GroundTruthSet(_Frozen):
+    """A versioned, named collection of **approved** cases for **one** pool.
+
+    The on-disk / persisted unit of a frozen pool. Constructing one runs
+    :func:`validate_pool_membership`, so a ``GroundTruthSet`` can only ever hold
+    cases that target this pool *and* have cleared the human gate — there is no
+    way to build (and therefore no way to persist) a pool set containing an
+    unapproved candidate or a pool-mismatched case.
     """
 
     schema_version: str = SCHEMA_VERSION
@@ -253,17 +305,8 @@ class GroundTruthSet(_Frozen):
     cases: list[GroundTruthCase] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _check_pool_and_ids(self) -> GroundTruthSet:
-        seen: set[str] = set()
-        for case in self.cases:
-            if case.target_pool is not None and case.target_pool is not self.pool:
-                raise GroundTruthError(
-                    f"case {case.case_id!r} targets pool {case.target_pool.value!r} "
-                    f"but belongs to set pool {self.pool.value!r} (pools are never mixed)"
-                )
-            if case.case_id in seen:
-                raise GroundTruthError(f"duplicate case_id {case.case_id!r} in set {self.name!r}")
-            seen.add(case.case_id)
+    def _check_pool_membership(self) -> GroundTruthSet:
+        validate_pool_membership(self.pool, self.cases)
         return self
 
     def case_ids(self) -> set[str]:

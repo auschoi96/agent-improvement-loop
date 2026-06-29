@@ -33,6 +33,18 @@ def _candidate(case_id: str = "gt-1") -> GroundTruthCase:
     )
 
 
+def _approved(case_id: str, pool: Pool) -> GroundTruthCase:
+    """A fully human-approved (promotable) case, for building pool sets."""
+    return _candidate(case_id).model_copy(
+        update={
+            "expectations": Expectations(expected_response="3"),
+            "regression_intent": "guards arithmetic",
+            "target_pool": pool,
+            "review": ReviewRecord(status=ReviewStatus.APPROVED, reviewer="austin"),
+        }
+    )
+
+
 class TestModelConfig:
     def test_extra_fields_forbidden(self) -> None:
         with pytest.raises(ValidationError):
@@ -107,18 +119,37 @@ class TestPromotionGate:
 
 class TestGroundTruthSet:
     def test_rejects_mixed_pools(self) -> None:
-        case = _candidate().model_copy(update={"target_pool": Pool.HUMAN_ANCHOR})
+        case = _approved("c1", Pool.HUMAN_ANCHOR)
         with pytest.raises(GroundTruthError):
             GroundTruthSet(pool=Pool.ALIGNMENT_SET, name="s", cases=[case])
 
     def test_rejects_duplicate_case_ids(self) -> None:
-        a = _candidate("dup").model_copy(update={"target_pool": Pool.ALIGNMENT_SET})
-        b = _candidate("dup").model_copy(update={"target_pool": Pool.ALIGNMENT_SET})
+        a = _approved("dup", Pool.ALIGNMENT_SET)
+        b = _approved("dup", Pool.ALIGNMENT_SET)
         with pytest.raises(GroundTruthError):
             GroundTruthSet(pool=Pool.ALIGNMENT_SET, name="s", cases=[a, b])
 
+    def test_rejects_unapproved_case(self) -> None:
+        # A candidate that has not cleared the human gate cannot be pooled — this
+        # is the schema-level half of closing the store-bypass hole.
+        candidate = _candidate("c1").model_copy(update={"target_pool": Pool.ALIGNMENT_SET})
+        with pytest.raises(GroundTruthError):
+            GroundTruthSet(pool=Pool.ALIGNMENT_SET, name="s", cases=[candidate])
+
+    def test_rejects_target_pool_none(self) -> None:
+        candidate = _candidate("c1")  # target_pool is None
+        with pytest.raises(GroundTruthError):
+            GroundTruthSet(pool=Pool.ALIGNMENT_SET, name="s", cases=[candidate])
+
+    def test_task_suite_set_must_be_empty(self) -> None:
+        case = _approved("c1", Pool.TASK_SUITE)
+        with pytest.raises(GroundTruthError):
+            GroundTruthSet(pool=Pool.TASK_SUITE, name="s", cases=[case])
+        # …but an empty Task Suite set is fine (what the store returns on load).
+        assert GroundTruthSet(pool=Pool.TASK_SUITE, name="s").cases == []
+
     def test_case_ids_helper(self) -> None:
-        case = _candidate("c1").model_copy(update={"target_pool": Pool.ALIGNMENT_SET})
+        case = _approved("c1", Pool.ALIGNMENT_SET)
         gt = GroundTruthSet(pool=Pool.ALIGNMENT_SET, name="s", cases=[case])
         assert gt.case_ids() == {"c1"}
 
