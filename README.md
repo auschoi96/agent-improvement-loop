@@ -13,6 +13,27 @@ Greenfield. Built by harvesting proven pieces from:
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and [`docs/MILESTONE-1.md`](docs/MILESTONE-1.md) for the current build plan. Harvest provenance and license reconciliation are tracked in [`PROVENANCE.md`](PROVENANCE.md).
 
+## L0 deterministic metrics
+
+`ail.metrics` computes the **L0** tier — deterministic, un-gameable metrics
+(tokens, USD cost, latency, tool-call redundancy) straight from normalized
+traces, plus breakdowns by model/producer/status. It is original work (no
+harvested code) and emits a stable, typed, JSON-serializable contract that a
+downstream UI reads — documented in
+[`docs/L0_METRICS_CONTRACT.md`](docs/L0_METRICS_CONTRACT.md).
+
+Reproduce the token-waste baseline (Example 1) on the live corpus from one
+entrypoint:
+
+```bash
+python -m ail.metrics.report --experiment 660599403165942 --out-dir artifacts
+```
+
+It writes `artifacts/l0_baseline_<exp>.json` (the full contract) and
+`artifacts/example1_diagnosis.{md,json}` (the diagnosis). Committed copies under
+[`artifacts/`](artifacts/) capture the current corpus. See the contract doc for
+the Databricks auth note for the reference workspace.
+
 ## Reference deployment
 
 - Workspace: `e2-demo-field-eng` (dais-demo profile) / `fevm-austin-choi-omni-agent`
