@@ -23,7 +23,7 @@ from ail.judges.labeling import (
     to_alignment_set,
     to_human_anchor,
 )
-from ail.judges.pools import PoolOverlapError
+from ail.pools import PoolOverlapError
 
 
 class _RawTrace:

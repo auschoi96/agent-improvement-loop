@@ -1,0 +1,182 @@
+schema_version: ail.task_suite/v1
+version: v1-seed
+pool: task_suite
+created_at: '2026-06-29T00:00:00+00:00'
+frozen: true
+content_hash: 7b444fabb13c5eb81247663e48dfb6dbb1696c428d6aa8fc34a5fe79d9431746
+tasks:
+- task_id: ts-001
+  prompt: 'In the omniagent/agent-framework repository, carry an end-to-end change to completion: update
+    the Databricks governed-demo example config, validate it with repeated shell runs, and produce a written
+    deliverable via the google-docs workflow.'
+  category: heavy_tail_high_token
+  source_trace_id: a9b23c23c1efb90c576cd012f0a70522
+  difficulty: hard
+  notes: 'Reconstructed from L0 profile (largest session in the corpus): 942,929 tokens, 60 tool calls
+    (35 Bash / 6 Write / 3 Edit), ~$6.21. Re-ran `cd .../omniagent/agent-framework` 27x; edited examples/databricks_governed_demo
+    config.yaml 2x. Prompt is a v1-seed abstraction; enrich from trace content later.'
+- task_id: ts-002
+  prompt: In the ail wave0b-l0-metrics worktree, build the L0 deterministic metrics module (src/ail/metrics/l0_deterministic.py)
+    and its report, iterating with tests until the numbers reconcile.
+  category: heavy_tail_high_token
+  source_trace_id: 201506dc57618323b322df3a4c328f0f
+  difficulty: hard
+  notes: 612,820 tokens, 90 tool calls (37 Bash / 12 Edit / 9 Write), ~$5.28. Re-ran `cd .../wave0b-l0-metrics`
+    20x; edited l0_deterministic.py 3x. v1-seed reconstruction.
+- task_id: ts-003
+  prompt: In the emerging-epl project, implement an API route end-to-end (server/routes/epl.ts) with the
+    supporting edits, iterating until it compiles and passes.
+  category: heavy_tail_high_token
+  source_trace_id: 14da0deab1fee461c836a529d9f1e5ae
+  difficulty: hard
+  notes: 549,300 tokens, 57 tool calls (26 Edit / 14 Bash), ~$4.15. Edited server/routes/epl.ts 6x. v1-seed
+    reconstruction from observable targets.
+- task_id: ts-004
+  prompt: 'In the emerging-epl project, deliver a multi-file feature: scaffold new modules, wire an API
+    route (server/routes/epl.ts), and validate via repeated shell runs.'
+  category: heavy_tail_high_token
+  source_trace_id: 680444e7d8a9679489700fb3d2958dc6
+  difficulty: hard
+  notes: 543,910 tokens and 156 tool calls — the highest action count in the corpus (55 Bash / 27 Write
+    / 22 Edit), ~$5.78. Re-ran `cd .../emerging-epl` 15x. v1-seed reconstruction.
+- task_id: ts-005
+  prompt: In the omniagent/agent-framework repository, diagnose and resolve an issue that requires reasoning
+    over a large amount of context, validated with a handful of shell commands.
+  category: heavy_tail_high_token
+  source_trace_id: 0d810f8f550f2c71206b64ba7e174a7c
+  difficulty: hard
+  notes: '486,351 tokens with only 14 tool calls (13 Bash / 1 Read), ~$2.81 — the large-context / low-action
+    shape: the spend is in context, not actions. Re-ran `cd ...` 12x. v1-seed reconstruction.'
+- task_id: ts-006
+  prompt: Carry out a large analysis task that loads substantial context (one file read, a few shell commands)
+    and produces a written result.
+  category: heavy_tail_high_token
+  source_trace_id: 606dc92782af
+  difficulty: hard
+  notes: 347,215 tokens across just 5 tool calls (4 Bash / 1 Read), ~$1.92 — a near-pure context session;
+    no repository identified in the L0 profile. v1-seed reconstruction.
+- task_id: ts-007
+  prompt: In the omniagent/agent-framework repository, run a context-heavy investigation driven almost
+    entirely by shell commands and report the findings.
+  category: heavy_tail_high_token
+  source_trace_id: c950d1d7b9d3
+  difficulty: hard
+  notes: 289,180 tokens across 3 Bash calls, ~$1.56. v1-seed reconstruction from the (minimal) observable
+    tool profile.
+- task_id: ts-008
+  prompt: In the omniagent/agent-framework repository, run a long-lived task that schedules its own follow-ups
+    and tracks progress across steps.
+  category: heavy_tail_high_token
+  source_trace_id: 663a514caa9f
+  difficulty: hard
+  notes: 249,891 tokens (about the corpus p90) across 10 tool calls (6 Bash, 2 ScheduleWakeup), ~$1.58.
+    v1-seed reconstruction.
+- task_id: ts-009
+  prompt: In the ail wave0-scaffold worktree, build the Claude Code ingest adapter (src/ail/ingest/adapters/claude_code.py)
+    against a live Databricks/MLflow workspace, iterating with many short shell probes and edits.
+  category: high_tool_call_volume
+  source_trace_id: 44e3e9921222
+  difficulty: hard
+  notes: 241,872 tokens but 101 tool calls (48 Bash / 13 Read / 13 Write / 10 Edit), ~$2.55 — defining
+    trait is action volume. Edited claude_code.py 3x. v1-seed reconstruction.
+- task_id: ts-010
+  prompt: 'Drive a deployed app end-to-end: probe its serving/app URL repeatedly, exercise the endpoints,
+    and iterate on configuration until it responds correctly.'
+  category: high_tool_call_volume
+  source_trace_id: 123536feb158
+  difficulty: medium
+  notes: 162,262 tokens, 65 tool calls (34 Bash), ~$1.64. Repeatedly curled a self-improving-agents app
+    URL. v1-seed reconstruction.
+- task_id: ts-011
+  prompt: Research a topic across the web (search + fetch), install and run a uv tool, and synthesize
+    the findings into a written plan.
+  category: high_tool_call_volume
+  source_trace_id: 37ed22abfdb1
+  difficulty: medium
+  notes: 202,107 tokens, 61 tool calls (30 Bash / 5 WebFetch / 1 WebSearch), ~$2.07 — a web-research-heavy
+    session. v1-seed reconstruction.
+- task_id: ts-012
+  prompt: Write and iterate on a Databricks tracing-repoint script (repoint_cc_tracing.py), exercising
+    a SQL statements API, until it runs cleanly.
+  category: high_tool_call_volume
+  source_trace_id: e10ee82da241
+  difficulty: medium
+  notes: 162,816 tokens, 45 tool calls (31 Bash / 4 Edit), ~$1.91. Edited repoint_cc_tracing.py 3x. v1-seed
+    reconstruction.
+- task_id: ts-013
+  prompt: Audit a codebase by reading widely across many files before producing a focused summary or change.
+  category: high_tool_call_volume
+  source_trace_id: 1fcf56aeaf92
+  difficulty: medium
+  notes: '130,655 tokens, 39 tool calls of which 34 are Read with ZERO redundancy, ~$1.03 — a legitimately
+    read-heavy, non-wasteful session. Carried as a contrast case: high tool count that the optimizer must
+    NOT ''fix''. v1-seed reconstruction.'
+- task_id: ts-014
+  prompt: In the emerging-epl project, iterate on the logfood sync script (scripts/sync_from_logfood.mjs)
+    until it works, re-establishing the working directory and re-editing the same file across many turns.
+  category: repeated_target_boilerplate
+  source_trace_id: bdb3b11e597555cda869ed7ab5b123dd
+  difficulty: hard
+  notes: 390,077 tokens, 66 tool calls (30 Edit / 14 Bash / 14 Read), ~$2.73. Re-ran `cd .../emerging-epl`
+    13x and edited sync_from_logfood.mjs 8x — the strongest repeated-target boilerplate in the corpus.
+    v1-seed reconstruction.
+- task_id: ts-015
+  prompt: In the emerging-epl project, make a focused fix to the logfood sync script, re-running shell
+    setup repeatedly between edits.
+  category: repeated_target_boilerplate
+  source_trace_id: f9eb702f32e1f531944ecad247a4deea
+  difficulty: medium
+  notes: 84,040 tokens, 19 tool calls (12 Bash / 7 Edit), ~$1.14. Re-ran `cd ...` 12x; edited sync_from_logfood.mjs
+    3x. v1-seed reconstruction.
+- task_id: ts-016
+  prompt: In the emerging-epl project, evolve the database schema (server/db/schema.ts) across several
+    edits, re-establishing the working directory each time.
+  category: repeated_target_boilerplate
+  source_trace_id: acb3925baed7d48deb0ce7441f8cb0de
+  difficulty: medium
+  notes: 93,453 tokens, 24 tool calls (12 Bash / 6 Edit), ~$1.31. Re-ran `cd ...` 8x; edited schema.ts
+    6x. v1-seed reconstruction.
+- task_id: ts-017
+  prompt: In the omniagent/agent-framework repository, adjust the Databricks deploy script (deploy/databricks/deploy.py)
+    and re-run the deploy via uv until it succeeds.
+  category: repeated_target_boilerplate
+  source_trace_id: bb4362c1c8c7
+  difficulty: easy
+  notes: 32,763 tokens, 18 tool calls (12 Bash / 2 Edit / 2 Read), ~$0.48. Repeated `cd ... && uv run
+    ... deploy`; edited deploy.py 2x. v1-seed reconstruction.
+- task_id: ts-018
+  prompt: Draft and revise a deployment guide (markdown), editing the same document across a couple of
+    passes with light shell validation.
+  category: repeated_target_boilerplate
+  source_trace_id: 66ddf223a8b0
+  difficulty: easy
+  notes: 19,149 tokens (the corpus median), 11 tool calls (4 TaskUpdate / 3 Edit / 3 Bash), ~$0.28. Edited
+    omniagents-self-host-deployment.md 2x. v1-seed reconstruction.
+- task_id: ts-019
+  prompt: Answer a focused question and write out a short result file or two — a typical small session.
+  category: typical_short_session
+  source_trace_id: 6ad7ed98e4bc
+  difficulty: easy
+  notes: 18,508 tokens (about the corpus median), 3 tool calls (1 Bash / 2 Write), ~$0.21. Representative
+    of the low-median bulk. v1-seed reconstruction.
+- task_id: ts-020
+  prompt: Check the status of an in-flight task and decide next steps with a few light tool calls.
+  category: typical_short_session
+  source_trace_id: 931c6c12fadc
+  difficulty: easy
+  notes: 16,435 tokens, 7 tool calls (5 Bash), ~$0.22 — a typical short coordination session. v1-seed
+    reconstruction.
+- task_id: ts-021
+  prompt: In the omniagent/agent-framework repository, run a quick two-command check and report the result.
+  category: typical_short_session
+  source_trace_id: 72155b4ab5a3
+  difficulty: easy
+  notes: 12,013 tokens, 2 tool calls, ~$0.17 — a minimal typical session. v1-seed reconstruction.
+- task_id: ts-022
+  prompt: Answer a question directly from context with no tool use — the pure conversational case the
+    suite must not regress.
+  category: typical_short_session
+  source_trace_id: eb44fdd947bd
+  difficulty: easy
+  notes: 19,355 tokens and 0 tool calls — a tool-free Q&A session. Carried so the benchmark covers the
+    no-action case. v1-seed reconstruction.

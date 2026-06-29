@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from mlflow.genai.judges.base import AlignmentOptimizer
     from mlflow.genai.scorers import Scorer
 
-    from ail.judges.pools import AlignmentSet
+    from ail.pools import AlignmentSet
 
 __all__ = [
     "DEFAULT_SAMPLING_RATE",

@@ -15,7 +15,7 @@ Three capabilities, plus the disjoint-pool types that keep them honest:
 * **Agreement** (:mod:`ail.judges.agreement`) — judge-vs-human agreement on the
   Human Anchor as a first-class metric with a configurable floor and a
   ``distrusted`` signal.
-* **Pools** (:mod:`ail.judges.pools`) — typed handles (``AlignmentSet`` /
+* **Pools** (:mod:`ail.pools`) — typed handles (``AlignmentSet`` /
   ``HumanAnchor``) and :func:`assert_pools_disjoint` that make "the three pools
   are never mixed" a property of the types.
 
@@ -55,16 +55,6 @@ from ail.judges.labeling import (
     to_alignment_set,
     to_human_anchor,
 )
-from ail.judges.pools import (
-    AlignmentSet,
-    AnchorItem,
-    HumanAnchor,
-    Pool,
-    PoolOverlapError,
-    ScoreValue,
-    UnresolvedTraceIdError,
-    assert_pools_disjoint,
-)
 from ail.judges.registration import (
     ALIGNED_TAG_PREFIX,
     DEFAULT_SAMPLING_RATE,
@@ -88,6 +78,16 @@ from ail.judges.scorers import (
     make_scorer,
     make_token_efficiency_judge,
     with_rubric,
+)
+from ail.pools import (
+    AlignmentSet,
+    AnchorItem,
+    HumanAnchor,
+    Pool,
+    PoolOverlapError,
+    ScoreValue,
+    UnresolvedTraceIdError,
+    assert_pools_disjoint,
 )
 
 __all__ = [

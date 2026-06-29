@@ -24,6 +24,10 @@ dependencies = [
     # a downstream UI reads. pydantic v2 is the contract surface (already an
     # mlflow transitive dep; pinned here to make the dependency explicit).
     "pydantic>=2.0",
+    # The frozen Task Suite artifact (eval/task_suite/<v>/tasks.yaml) is loaded
+    # and written via PyYAML. Already an mlflow transitive dep; pinned here to
+    # make the direct dependency explicit (ail.task_suite.loader imports yaml).
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -97,6 +101,6 @@ strict_equality = true
 # ``engine.*`` is HALO (the optional ``l3`` extra); ``agents.*`` is the OpenAI
 # Agents SDK it pulls in — neither is installed in CI (core install only), so
 # their imports (lazy, inside the reviewer) must not fail the typecheck.
-module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*", "agents.*"]
+module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*", "agents.*", "yaml"]
 ignore_missing_imports = true
 follow_imports = "skip"

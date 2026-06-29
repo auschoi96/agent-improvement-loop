@@ -10,7 +10,7 @@ returns a better-aligned judge.
 Two guarantees this wrapper enforces, both from ``docs/ARCHITECTURE.md`` §2/§4:
 
 * **Alignment input is strictly the Alignment Set.** :func:`align_judge` takes
-  an :class:`~ail.judges.pools.AlignmentSet` and nothing else, so the pool that
+  an :class:`~ail.pools.AlignmentSet` and nothing else, so the pool that
   trains the judge can never be the Task Suite (which compares agents) or the
   Human Anchor (which audits the judge). Mixing them is what lets the agent and
   judge co-adapt.
@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ail.judges.contract import AlignmentReport
-from ail.judges.pools import AlignmentSet
+from ail.pools import AlignmentSet
 
 if TYPE_CHECKING:
     from mlflow.genai.judges import Judge
@@ -133,7 +133,7 @@ def align_judge(
     ``optimizer=None``, MLflow uses its default MemAlign optimizer; pass a
     :func:`build_memalign_optimizer` result to configure it.
 
-    The signature only accepts an :class:`~ail.judges.pools.AlignmentSet`, so the
+    The signature only accepts an :class:`~ail.pools.AlignmentSet`, so the
     pool that trains the judge is structurally fixed — the Human Anchor and Task
     Suite cannot be passed here.
 
