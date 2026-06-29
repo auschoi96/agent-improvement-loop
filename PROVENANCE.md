@@ -65,6 +65,29 @@ that previously sat atop the two harvested files were removed, since the files
 are now original work and there is no longer an upstream change-notice
 obligation to satisfy for them.
 
+## Original work (NOT harvested — clean-room, Apache-2.0-ready)
+
+These modules are 100% original work authored for this repository. They contain
+**no** code copied from `ai-dev-kit`, `skillforge`, or any other source — they
+only consume this repo's own ingestion types (`ail.ingest.base`) and public OSS
+APIs (pydantic; and, for the live pull, the public `mlflow.search_traces` /
+`get_trace`). They carry no upstream license obligation and are compatible with
+the intended Apache-2.0 release.
+
+| Module | Description |
+|---|---|
+| `src/ail/metrics/contract.py` | L0 metrics output contract (pydantic v2 schema). **Original.** |
+| `src/ail/metrics/l0_deterministic.py` | L0 deterministic metric computation (tokens, cost, latency, tool-call redundancy). **Original.** |
+| `src/ail/metrics/report.py` | Single-entrypoint baseline report + Example 1 reproduction. **Original.** |
+| `docs/L0_METRICS_CONTRACT.md` | Prose spec of the L0 contract. **Original.** |
+| `tests/test_l0_metrics.py`, `tests/test_report.py` | Tests for the above. **Original.** |
+
+Cost prices in `l0_deterministic.py` are *data*, not code: base input/output
+rates are attributed to the Claude API pricing reference (the `claude-api`
+skill's cached model table, dated 2026-06-04) on each `PriceBookEntry.source`,
+cache rates are derived from Anthropic's documented prompt-caching multipliers,
+and any uncovered model is flagged rather than guessed.
+
 ## ⚠️ License flags (resolve before adding a top-level LICENSE)
 
 1. **skillforge has no declared license file.** The repo (private,

@@ -16,5 +16,7 @@ build/
 # MLflow / notebooks
 mlruns/
 .ipynb_checkpoints/
+.claude/mlflow/
+*.log
 # OS
 .DS_Store
