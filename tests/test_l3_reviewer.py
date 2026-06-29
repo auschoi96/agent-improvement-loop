@@ -1,0 +1,374 @@
+"""Tests for the L3 reviewer (:mod:`ail.l3.reviewer`) and selection.
+
+The reviewer's two external dependencies — the HALO engine and a live model, and
+the MLflow assessment/trace APIs — are mocked so the orchestration is exercised
+fully offline: ``run_halo_review`` returns a recorded report, the own-trace
+context yields a fixed reviewer trace id, and ``mlflow.log_feedback`` is captured.
+The pieces that genuinely need ``halo-engine`` (config build, the engine seam)
+are ``importorskip``-guarded, and the end-to-end live review is
+``@pytest.mark.live`` + env-gated.
+"""
+
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from ail.ingest.base import NormalizedTrace, TraceSource
+from ail.ingest.mlflow_source import normalize_trace
+from ail.l3 import reviewer as rv
+from ail.l3.contract import HaloReviewVerdict
+from ail.l3.selection import select_traces_to_review
+
+_REPORT = """\
+The agent re-read the same file many times.
+
+```json
+{
+  "token_efficiency": "poor",
+  "token_waste_score": 60,
+  "estimated_wasted_tokens": 90000,
+  "summary": "Repeated reads dominate the spend.",
+  "redundancy_findings": [
+    {"description": "same file read 34x", "tool": "Read", "repeated_target": "/a",
+     "occurrences": 34, "evidence_span_ids": ["s1"]}
+  ],
+  "failure_modes": [
+    {"title": "re-read loop", "severity": "high", "description": "no caching"}
+  ],
+  "recommendations": ["cache reads"]
+}
+```
+<final/>
+"""
+
+
+class _FakeSource(TraceSource):
+    def __init__(self, trace: NormalizedTrace) -> None:
+        self._trace = trace
+
+    def iter_traces(self, **_: Any) -> Any:
+        yield self._trace
+
+    def get_trace(self, trace_id: str) -> NormalizedTrace | None:
+        return self._trace
+
+
+@pytest.fixture
+def captured_feedback(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Neutralize the workspace + HALO; capture every ``log_feedback`` call."""
+    import mlflow
+
+    monkeypatch.setattr(rv, "_configure_databricks", lambda **kw: None)
+    monkeypatch.setattr(rv, "_resolve_databricks_openai", lambda profile: ("http://fmapi", "tok"))
+    monkeypatch.setattr(rv, "run_halo_review", lambda *a, **k: _REPORT)
+
+    @contextmanager
+    def fake_trace_context(attributes: dict[str, Any]) -> Any:
+        yield "rev-trace-xyz"
+
+    monkeypatch.setattr(rv, "_review_trace_context", fake_trace_context)
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        mlflow,
+        "log_feedback",
+        lambda **kw: calls.append(kw) or SimpleNamespace(assessment_id="a1"),
+    )
+    return calls
+
+
+class TestReviewTrace:
+    def test_returns_parsed_verdict_with_reviewer_trace_id(
+        self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
+    ) -> None:
+        trace = normalize_trace(synthetic_trace)
+        verdict = rv.review_trace(
+            trace.trace_id,
+            experiment_id="660599403165942",
+            model="databricks-claude-sonnet-4-6",
+            source=_FakeSource(trace),
+        )
+        assert isinstance(verdict, HaloReviewVerdict)
+        assert verdict.subject_trace_id == trace.trace_id
+        assert verdict.reviewer_trace_id == "rev-trace-xyz"
+        assert verdict.token_efficiency == "poor"
+        assert verdict.token_waste_score == 60
+        assert verdict.model == "databricks-claude-sonnet-4-6"
+
+    def test_attaches_ai_judge_feedback_to_subject(
+        self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
+    ) -> None:
+        trace = normalize_trace(synthetic_trace)
+        rv.review_trace(
+            trace.trace_id,
+            experiment_id="660599403165942",
+            model="m",
+            source=_FakeSource(trace),
+        )
+        assert len(captured_feedback) == 1
+        call = captured_feedback[0]
+        assert call["trace_id"] == trace.trace_id
+        assert call["name"] == rv.FEEDBACK_NAME == "l3_halo_review"
+        # AI_JUDGE is a deprecated alias of LLM_JUDGE in mlflow>=3; we use the
+        # canonical name so no FutureWarning fires and the stored value is exact.
+        assert call["source"].source_type == "LLM_JUDGE"
+        # The headline value is the scalar waste score (the v4 store rejects structs)...
+        assert call["value"] == 60
+        # ...the grade, back-link, and full verdict live in metadata...
+        assert call["metadata"]["token_efficiency"] == "poor"
+        assert call["metadata"]["reviewer_trace_id"] == "rev-trace-xyz"
+        assert "verdict_json" in call["metadata"]
+        # ...and the rationale carries the summary.
+        assert call["rationale"] == "Repeated reads dominate the spend."
+
+    def test_attach_false_skips_feedback(
+        self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
+    ) -> None:
+        trace = normalize_trace(synthetic_trace)
+        verdict = rv.review_trace(
+            trace.trace_id, model="m", source=_FakeSource(trace), attach=False
+        )
+        assert verdict.reviewer_trace_id == "rev-trace-xyz"
+        assert captured_feedback == []
+
+    def test_parse_failure_raises_and_does_not_attach(
+        self,
+        synthetic_trace: Any,
+        captured_feedback: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A degenerate HALO report (e.g. terminated before emitting a verdict)
+        # must surface as an error and never be recorded as a fake-good assessment.
+        from ail.l3.parser import HaloReportParseError
+
+        trace = normalize_trace(synthetic_trace)
+        monkeypatch.setattr(rv, "run_halo_review", lambda *a, **k: "no JSON verdict here <final/>")
+        with pytest.raises(HaloReportParseError):
+            rv.review_trace(trace.trace_id, model="m", source=_FakeSource(trace))
+        assert captured_feedback == []
+
+    def test_explicit_endpoint_skips_databricks_resolution(
+        self, synthetic_trace: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mlflow
+
+        trace = normalize_trace(synthetic_trace)
+        monkeypatch.setattr(rv, "_configure_databricks", lambda **kw: None)
+        monkeypatch.setattr(rv, "run_halo_review", lambda *a, **k: _REPORT)
+
+        @contextmanager
+        def ctx(attributes: dict[str, Any]) -> Any:
+            yield "rev-1"
+
+        monkeypatch.setattr(rv, "_review_trace_context", ctx)
+        monkeypatch.setattr(mlflow, "log_feedback", lambda **kw: None)
+
+        def boom(profile: str | None) -> Any:  # pragma: no cover - must not run
+            raise AssertionError("should not resolve Databricks when endpoint is explicit")
+
+        monkeypatch.setattr(rv, "_resolve_databricks_openai", boom)
+
+        verdict = rv.review_trace(
+            trace.trace_id,
+            model="m",
+            base_url="http://explicit",
+            api_key="key",
+            source=_FakeSource(trace),
+            attach=False,
+        )
+        assert verdict.subject_trace_id == trace.trace_id
+
+    def test_halo_seam_receives_endpoint_and_path(
+        self, synthetic_trace: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mlflow
+
+        trace = normalize_trace(synthetic_trace)
+        seen: dict[str, Any] = {}
+
+        def fake_runner(prompt: str, trace_path: Any, **kw: Any) -> str:
+            seen["prompt"] = prompt
+            seen["trace_path"] = trace_path
+            seen["model"] = kw.get("model")
+            seen["base_url"] = kw.get("base_url")
+            return _REPORT
+
+        monkeypatch.setattr(rv, "_configure_databricks", lambda **kw: None)
+        monkeypatch.setattr(rv, "_resolve_databricks_openai", lambda p: ("http://fmapi", "tok"))
+        monkeypatch.setattr(rv, "run_halo_review", fake_runner)
+
+        @contextmanager
+        def ctx(attributes: dict[str, Any]) -> Any:
+            yield "rev-1"
+
+        monkeypatch.setattr(rv, "_review_trace_context", ctx)
+        monkeypatch.setattr(mlflow, "log_feedback", lambda **kw: None)
+
+        rv.review_trace(trace.trace_id, model="m", source=_FakeSource(trace), attach=False)
+        assert trace.trace_id in seen["prompt"]
+        assert str(seen["trace_path"]).endswith(".jsonl")
+        assert seen["model"] == "m"
+        assert seen["base_url"] == "http://fmapi"
+
+
+class TestFeedbackProjection:
+    def _verdict(self, **kw: Any) -> HaloReviewVerdict:
+        base: dict[str, Any] = {
+            "subject_trace_id": "t1",
+            "reviewer_trace_id": "rev-1",
+            "model": "m",
+            "token_efficiency": "poor",
+            "token_waste_score": 60,
+            "estimated_wasted_tokens": 90000,
+            "summary": "s",
+        }
+        base.update(kw)
+        return HaloReviewVerdict(**base)
+
+    def test_value_is_scalar_score(self) -> None:
+        # The v4 trace store rejects struct values, so the headline value is the
+        # single numeric waste score.
+        assert rv._feedback_value(self._verdict()) == 60
+        assert isinstance(rv._feedback_value(self._verdict()), int)
+
+    def test_metadata_carries_grade_counts_and_estimate(self) -> None:
+        md = rv._feedback_metadata(self._verdict())
+        assert md["token_efficiency"] == "poor"
+        assert md["token_waste_score"] == "60"
+        assert md["estimated_wasted_tokens"] == "90000"
+        assert md["n_redundancy_findings"] == "0"
+
+    def test_metadata_omits_none_estimate(self) -> None:
+        md = rv._feedback_metadata(self._verdict(estimated_wasted_tokens=None))
+        assert "estimated_wasted_tokens" not in md
+
+    def test_metadata_has_backlink_and_full_verdict(self) -> None:
+        md = rv._feedback_metadata(self._verdict())
+        assert md["reviewer_trace_id"] == "rev-1"
+        assert md["judge_model"] == "m"
+        assert '"subject_trace_id":"t1"' in md["verdict_json"].replace(" ", "")
+        assert all(isinstance(v, str) for v in md.values())
+
+    def test_metadata_records_parse_warnings(self) -> None:
+        md = rv._feedback_metadata(self._verdict(parse_warnings=["w1", "w2"]))
+        assert md["parse_warnings"] == "w1; w2"
+
+
+class TestExtractReportText:
+    def _item(self, role: str, content: str, final: bool) -> Any:
+        return SimpleNamespace(final=final, item=SimpleNamespace(role=role, content=content))
+
+    def test_prefers_final_messages(self) -> None:
+        items = [
+            self._item("assistant", "interim", False),
+            self._item("assistant", "FINAL REPORT", True),
+        ]
+        assert rv._extract_report_text(items) == "FINAL REPORT"
+
+    def test_falls_back_to_last_assistant(self) -> None:
+        items = [
+            self._item("assistant", "first", False),
+            self._item("tool", "tool stuff", False),
+            self._item("assistant", "last", False),
+        ]
+        assert rv._extract_report_text(items) == "last"
+
+    def test_empty_when_no_text(self) -> None:
+        assert rv._extract_report_text([]) == ""
+
+
+class TestSelection:
+    def _trace(self, tid: str, tokens: int, status: Any = None) -> NormalizedTrace:
+        from ail.ingest.base import TokenUsage, TraceStatus
+
+        return NormalizedTrace(
+            trace_id=tid,
+            status=status or TraceStatus.OK,
+            token_usage=TokenUsage(input_tokens=tokens, output_tokens=0),
+        )
+
+    def test_ranks_by_tokens_desc_and_caps(self) -> None:
+        traces = [self._trace("a", 10), self._trace("b", 100), self._trace("c", 50)]
+        picked = select_traces_to_review(traces, top_n=2)
+        assert [s.trace_id for s in picked] == ["b", "c"]
+
+    def test_min_tokens_floor(self) -> None:
+        traces = [self._trace("a", 10), self._trace("b", 100)]
+        picked = select_traces_to_review(traces, min_tokens=50)
+        assert [s.trace_id for s in picked] == ["b"]
+
+    def test_filters_non_ok_by_default(self) -> None:
+        from ail.ingest.base import TraceStatus
+
+        traces = [self._trace("ok", 100), self._trace("err", 200, status=TraceStatus.ERROR)]
+        picked = select_traces_to_review(traces)
+        assert [s.trace_id for s in picked] == ["ok"]
+
+
+# --- pieces that genuinely need halo-engine (skipped in CI) -----------------
+
+
+class TestEngineSeam:
+    def test_build_engine_config_uses_model_and_endpoint(self) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        cfg = rv.build_engine_config("my-model", base_url="http://x", api_key="k", max_turns=7)
+        assert cfg.root_agent.model.name == "my-model"
+        assert cfg.synthesis_model.name == "my-model"
+        assert cfg.model_provider.base_url == "http://x"
+        assert cfg.root_agent.maximum_turns == 7
+
+    def test_run_halo_review_wires_messages_to_engine(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        import engine.main as engine_main
+
+        captured: dict[str, Any] = {}
+
+        def fake_run_engine(messages: Any, config: Any, trace_path: Any, **kw: Any) -> list[Any]:
+            captured["messages"] = messages
+            captured["trace_path"] = trace_path
+            return [
+                SimpleNamespace(final=True, item=SimpleNamespace(role="assistant", content=_REPORT))
+            ]
+
+        monkeypatch.setattr(engine_main, "run_engine", fake_run_engine)
+        jsonl = tmp_path / "t.jsonl"
+        jsonl.write_text("{}\n")
+        report = rv.run_halo_review("PROMPT", jsonl, model="m", base_url="http://x", api_key="k")
+        assert "token_efficiency" in report
+        assert captured["messages"][0].content == "PROMPT"
+
+
+@pytest.mark.live
+def test_live_review_trace() -> None:
+    """End-to-end live review of one real trace (read-only: does not attach).
+
+    Gated by ``AIL_LIVE_HALO=1`` plus ``AIL_LIVE_EXPERIMENT_ID`` /
+    ``AIL_LIVE_TRACE_ID`` / ``AIL_LIVE_MODEL``, and requires ``halo-engine`` +
+    a reachable FMAPI endpoint. ``attach=False`` so the live run never mutates
+    the experiment.
+    """
+    if os.environ.get("AIL_LIVE_HALO") != "1":
+        pytest.skip("set AIL_LIVE_HALO=1 to run the live HALO review")
+    pytest.importorskip("engine", reason="live review needs halo-engine")
+    experiment_id = os.environ.get("AIL_LIVE_EXPERIMENT_ID")
+    trace_id = os.environ.get("AIL_LIVE_TRACE_ID")
+    model = os.environ.get("AIL_LIVE_MODEL")
+    if not (experiment_id and trace_id and model):
+        pytest.skip("set AIL_LIVE_EXPERIMENT_ID, AIL_LIVE_TRACE_ID, AIL_LIVE_MODEL")
+
+    verdict = rv.review_trace(
+        trace_id,
+        experiment_id=experiment_id,
+        model=model,
+        profile=os.environ.get("AIL_LIVE_PROFILE"),
+        attach=False,
+    )
+    assert verdict.subject_trace_id
+    assert verdict.token_efficiency in {"poor", "fair", "good", "excellent"}
