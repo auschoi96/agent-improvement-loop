@@ -13,12 +13,13 @@ resources:
         tier: A
         managed_by: dab
 
-      # With no `run_as` set, the Job runs as the deploying identity — for the
-      # verification deploy that is the user (who holds the catalog/warehouse
-      # grants). For production, run as a service principal that has been granted
-      # the data privileges by uncommenting:
-      #   run_as:
-      #     service_principal_name: <sp-application-id>
+      # run_as is set ONCE at the bundle level (databricks.yml -> `run_as:
+      # ${var.job_run_as}`), so this job and every future framework job share a
+      # single identity — and therefore a single warehouse grant. Do NOT set a
+      # per-job run_as here; that would fork the framework onto a second principal.
+      # Default target (dais_demo): runs as the deploying identity. Deploy the
+      # dais_demo_sp target with --var framework_sp_id=<app-sp-id> to run as the
+      # single framework service principal (see docs/DEPLOY.md).
 
       # Defined and live by default (UNPAUSED). Override schedule_pause_status to
       # PAUSED to keep it deployed-but-dormant.

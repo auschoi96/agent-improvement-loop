@@ -3,7 +3,11 @@ bundle:
 
 variables:
   sql_warehouse_id:
-    description: SQL Warehouse ID backing the analytics plugin. Override with --var sql_warehouse_id=... or BUNDLE_VAR_sql_warehouse_id.
+    description: >-
+      SQL Warehouse ID backing the analytics plugin. MUST be the same framework
+      warehouse the publish job + scorers use (root bundle's `warehouse_id`), so a
+      single CAN_USE grant covers the whole framework. Override with
+      --var sql_warehouse_id=... or BUNDLE_VAR_sql_warehouse_id.
     default: 7d1d3dbb3ba65f2a
 
 resources:
@@ -16,7 +20,14 @@ resources:
       # user_api_scopes:
       #   - sql
 
-      # The resources which this app has access to.
+      # The resources which this app has access to. Declaring the warehouse with
+      # `permission: CAN_USE` makes the Apps platform AUTO-GRANT CAN_USE on this
+      # warehouse to the app's auto-provisioned service principal at deploy — no
+      # manual grant needed for the app. This auto-provisioned SP is the recommended
+      # SINGLE framework SP: after first deploy, read its application id
+      # (`databricks apps get ail-self-optimizer -o json` -> service_principal_client_id)
+      # and pass it to the job bundle as framework_sp_id so the jobs run as the SAME
+      # SP — one principal, one grant. See docs/DEPLOY.md.
       resources:
         - name: sql-warehouse
           sql_warehouse:
