@@ -46,10 +46,49 @@ variables:
   token_secret_key:
     description: Secret key within token_secret_scope (only used when the scope is set).
     default: ''
+  framework_sp_id:
+    description: >-
+      Application (client) id of the SINGLE framework service principal that all
+      framework jobs (this publish job + future scheduled scorers / L3 / MemAlign)
+      run as, so ONE warehouse grant covers everything. Empty (the default) => jobs
+      run as the deploying identity, which is what the verification deploy and the
+      default `dais_demo` target use. Set this AND deploy the `dais_demo_sp` target
+      to run every job as the SP. Reuse the ail-self-optimizer App's auto-provisioned
+      SP here so the App and the jobs share one identity and one grant (see
+      docs/DEPLOY.md).
+    default: ''
+  job_run_as:
+    description: >-
+      run_as identity applied to every job in this bundle (bundle-level run_as is
+      the single knob that covers the publish job AND any future jobs added to
+      resources/). Defaults to the deploying user so the verification deploy needs
+      no service principal; the `dais_demo_sp` target overrides it with
+      ${var.framework_sp_id}.
+    type: complex
+    default:
+      user_name: ${workspace.current_user.userName}
+
+# Bundle-level run_as: applies to the publish job and every future job declared
+# under resources/, so a single service principal (and thus a single warehouse
+# CAN_USE grant) covers the whole framework. Override per-target via job_run_as.
+run_as: ${var.job_run_as}
 
 targets:
   # Single workspace target; host + auth resolve from the Databricks CLI profile
   # given at deploy time (e.g. --profile dais-demo). The host is intentionally not
   # hardcoded so the same bundle deploys to any workspace.
+  #
+  # `dais_demo` (default): jobs run as the deploying identity (job_run_as default).
+  # Use this for the admin verification deploy — no service principal required.
   dais_demo:
     default: true
+
+  # `dais_demo_sp`: identical workspace, but every job runs as the single framework
+  # service principal. Deploy turnkey with the SP id as a plain string var, e.g.
+  #   databricks bundle deploy -t dais_demo_sp --var framework_sp_id=<app-sp-id> --profile dais-demo
+  # (Deploying this target without framework_sp_id fails fast with
+  # "run_as section must specify exactly one identity" — that guard is intentional.)
+  dais_demo_sp:
+    variables:
+      job_run_as:
+        service_principal_name: ${var.framework_sp_id}
