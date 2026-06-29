@@ -13,6 +13,7 @@ diagnostic report (Example 1 reproduction) in :mod:`ail.metrics.report`.
 
 from __future__ import annotations
 
+from ail.metrics.cohort import compute_cohort_l0, compute_l0_by_cohort
 from ail.metrics.contract import (
     SCHEMA_VERSION,
     AggregateMetrics,
@@ -53,4 +54,6 @@ __all__ = [
     "compute_l0",
     "compute_redundancy",
     "compute_trace_metrics",
+    "compute_cohort_l0",
+    "compute_l0_by_cohort",
 ]
