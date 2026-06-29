@@ -81,8 +81,16 @@ def apply_review(
     """
     if not reviewer or not reviewer.strip():
         raise ReviewError("a non-empty human reviewer identity is required")
-    if decision not in (ReviewStatus.APPROVED, ReviewStatus.REJECTED):
-        raise ReviewError(f"decision must be APPROVED or REJECTED, not {decision.value!r}")
+    # Coerce to a real ReviewStatus first: a caller may pass the raw string
+    # "approved", which compares equal to the enum (StrEnum) yet fails the later
+    # `is` identity checks — coercing closes that gap so the approval-requirement
+    # block below cannot be skipped by passing a string.
+    try:
+        decision = ReviewStatus(decision)
+    except ValueError as exc:
+        raise ReviewError(f"unknown review decision {decision!r}") from exc
+    if decision is ReviewStatus.CANDIDATE:
+        raise ReviewError("decision must be APPROVED or REJECTED, not 'candidate'")
 
     new_intent = case.regression_intent if regression_intent is None else regression_intent
     new_expectations = case.expectations if expectations is None else expectations
