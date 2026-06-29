@@ -36,12 +36,24 @@ from ail.judges.alignment import (
     MemAlignConfig,
     align_judge,
     build_memalign_optimizer,
+    unaligned_report,
 )
 from ail.judges.contract import (
     SCHEMA_VERSION,
     AgreementItem,
     AgreementReport,
     AlignmentReport,
+)
+from ail.judges.labeling import (
+    DEFAULT_ANCHOR_FRACTION,
+    DEFAULT_LABELER_ID,
+    TraceLabel,
+    assemble_pools,
+    record_label,
+    record_labels,
+    split_labels,
+    to_alignment_set,
+    to_human_anchor,
 )
 from ail.judges.pools import (
     AlignmentSet,
@@ -54,7 +66,10 @@ from ail.judges.pools import (
     assert_pools_disjoint,
 )
 from ail.judges.registration import (
+    ALIGNED_TAG_PREFIX,
     DEFAULT_SAMPLING_RATE,
+    ScorerRegistration,
+    create_aligned_scorer,
     list_registered_scorers,
     register_scorers,
     unregister_scorers,
@@ -64,11 +79,14 @@ from ail.judges.scorers import (
     DEFAULT_SCORERS,
     GROUNDEDNESS,
     MODULARITY,
+    TOKEN_EFFICIENCY,
     ScorerSpec,
+    build_token_efficiency_inputs,
     make_correctness_judge,
     make_groundedness_judge,
     make_modularity_judge,
     make_scorer,
+    make_token_efficiency_judge,
     with_rubric,
 )
 
@@ -92,17 +110,21 @@ __all__ = [
     "CORRECTNESS",
     "MODULARITY",
     "GROUNDEDNESS",
+    "TOKEN_EFFICIENCY",
     "DEFAULT_SCORERS",
     "make_scorer",
     "make_correctness_judge",
     "make_modularity_judge",
     "make_groundedness_judge",
+    "make_token_efficiency_judge",
+    "build_token_efficiency_inputs",
     "with_rubric",
     # alignment (MemAlign)
     "MemAlignConfig",
     "AlignmentOutcome",
     "build_memalign_optimizer",
     "align_judge",
+    "unaligned_report",
     # agreement (anti-co-adaptation)
     "AgreementConfig",
     "ScorePair",
@@ -110,8 +132,21 @@ __all__ = [
     "compute_agreement",
     "score_anchor",
     "log_agreement",
-    # registration (scheduled scorers)
+    # labeling (human labels -> disjoint MemAlign pools)
+    "TraceLabel",
+    "DEFAULT_LABELER_ID",
+    "DEFAULT_ANCHOR_FRACTION",
+    "record_label",
+    "record_labels",
+    "split_labels",
+    "to_alignment_set",
+    "to_human_anchor",
+    "assemble_pools",
+    # registration (scheduled scorers, MemAlign-aware align-then-register)
     "DEFAULT_SAMPLING_RATE",
+    "ALIGNED_TAG_PREFIX",
+    "ScorerRegistration",
+    "create_aligned_scorer",
     "register_scorers",
     "list_registered_scorers",
     "unregister_scorers",

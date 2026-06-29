@@ -48,13 +48,23 @@ Lead with what is irrefutable; gate the subjective behind calibration.
 - **L1 — Programmatic**: tests / lint / typecheck / build pass. Objective, for
   verifiable coding tasks.
 - **L2 — Judged**: LLM-as-judge scorers (correctness, modularity,
-  groundedness) built with MLflow `make_judge`, aligned via MemAlign, and
-  validated against the Human Anchor.
-- **L3 — RLM deep review** (DEFERRED / research): recursive-LM reads full long
-  traces to *discover* failure modes a fixed scorer misses — used to decide
-  *what to fix / what scorer to add*, never to score the leaderboard. The chosen
-  in-platform path is an MLflow `{{ trace }}` judge (`make_judge`), not a Deno
-  RLM runtime — see §11.
+  groundedness, token-efficiency) built with MLflow `make_judge`, aligned via
+  MemAlign, and validated against the Human Anchor. The **token-efficiency**
+  judge is a *hybrid*: it consumes the L0 deterministic signals (it does not
+  recompute them) and adds only the judgement — was the spend justified,
+  conditioned on task success — the Phase-2 partner of the correctness
+  guardrail (tokens down *without* a quality drop). Creating a scorer is
+  MemAlign-aware by construction: the align-then-register pipeline aligns a
+  judge whenever human labels exist, and otherwise registers a base judge
+  flagged not-yet-trusted (see §11).
+- **L3 — RLM deep review** (DEFERRED / research): a **recursive** LM reads long
+  traces in pieces to *discover* failure modes a fixed scorer misses — used to
+  decide *what to fix / what scorer to add*, never to score the leaderboard.
+  This is genuinely separate and still being designed, because the traces here
+  reach 900K+ tokens and **exceed a judge's context window** — a single flat
+  `{{ trace }}` `make_judge` call cannot read them, so it is *not* the L3 path
+  for this corpus. The recursive-review (HALO-style) idea is the L3 direction;
+  the deferred dependency is the *Deno* runtime, not the recursion. See §11.
 
 ## 4. The loop
 
@@ -249,12 +259,22 @@ keep deterministic and un-gameable. Keeping the reviewer's spans in a separate
 trace keeps the agent's L0 cost exactly the agent's, and makes the cost of
 *judging* separately measurable.
 
-**4. Trace-based judges are the chosen RLM path (no Deno).** `make_judge`
-accepts a `{{ trace }}` template, so a judge can read an entire long trace and
-discover failure modes a fixed input/output rubric misses. That is the
-**in-platform equivalent of the deferred RLM / HALO recursive review** (§3 L3,
-§9 Phase 5) — the recursive-review *idea* realized through MLflow trace judges
-rather than a separate Deno runtime. A `{{ trace }}` deep-review judge still
-obeys rules 1–3: it attaches its verdict to the subject trace and runs its own
-review as a separate, linked trace. This is the recorded RLM direction; the
-Deno-based RLM dependency stays deferred.
+**4. A `{{ trace }}` judge is a *small-trace* tool, NOT the RLM equivalent for
+this corpus.** `make_judge` accepts a `{{ trace }}` template, so a judge can read
+an entire trace and discover failure modes a fixed input/output rubric misses —
+**but only for a trace that fits in the judge model's context window.** This
+corpus is bimodal with a heavy tail (median ~18.5K tokens, max 943K; §8): the
+large traces that most need deep review are exactly the ones a single
+`{{ trace }}` call **cannot** read. An earlier version of this section called a
+flat `{{ trace }}` judge "the in-platform equivalent of RLM / HALO recursive
+review"; that is **wrong for large traces** and is corrected here. The L3 deep
+review is **recursive** (HALO-style: read the trace in pieces and combine), is a
+separate path still being designed, and is not the same thing as a one-shot
+`{{ trace }}` judge. What *is* deferred is the **Deno** RLM runtime, not the
+recursion idea. Where a verdict needs trace-derived signal on a large trace
+today, the in-platform answer is to feed a **summary/digest** of the trace, not
+the raw trace — exactly what the token-efficiency judge does with the L0 summary
+(it scores off `build_token_efficiency_inputs(...)`, never `{{ trace }}`), and
+what a future recursive-review *digest* will provide. A `{{ trace }}` judge,
+where the trace fits, still obeys rules 1–3: it attaches its verdict to the
+subject trace and runs its own review as a separate, linked trace.
