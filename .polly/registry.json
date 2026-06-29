@@ -200,9 +200,10 @@
     },
     {
       "id": "ci-merge-safety",
-      "status": "IN_PROGRESS",
+      "status": "IN_REVIEW",
       "branch": "ci-merge-safety",
-      "note": "Harden existing ci.yml (Py version, live marker, AppKit TS gating), add pyproject license metadata + merge-safety doc. ENFORCEMENT via branch protection BLOCKED: private free-tier repo returns 403 (needs Pro or public). Decision pending with user."
+      "note": "PR #5 (Py matrix 3.11/3.12/3.13 + AppKit gate, license metadata, CONTRIBUTING). CI green in real Actions (4 checks). Local gates re-verified by orchestrator. Codex review R1 = CHANGES-REQUIRED but both blockers CONDITIONAL & disproven with full-source evidence: (1) mypy config packages=['ail'] => bare mypy == 'mypy src' (same 11 files); 'mypy src tests' breaks on numpy stub, so chosen scope correct. (2) backend=hatchling (PEP639-native); real wheel build carries License-Expression: Apache-2.0. Awaiting codex R2 confirm; then update branch-protection required contexts to ['Python 3.11','Python 3.12','Python 3.13','AppKit app (ail-self-optimizer)'] (removes stale 'lint-typecheck-test') to unblock PR #5.",
+      "pr": 5
     }
   ],
   "open_decisions": [
