@@ -5,15 +5,15 @@ MemAlign aligns a judge *against human labels* — but the reference experiment 
 it lets a human record labels on a slice of real traces, and assembles those
 labels into the two **disjoint** pools the L2 layer consumes:
 
-* an :class:`~ail.judges.pools.AlignmentSet` — raw MLflow traces (carrying the
+* an :class:`~ail.pools.AlignmentSet` — raw MLflow traces (carrying the
   human assessments) that :func:`ail.judges.alignment.align_judge` /
   :func:`ail.judges.registration.create_aligned_scorer` learn from; and
-* a :class:`~ail.judges.pools.HumanAnchor` — held-out human labels that
+* a :class:`~ail.pools.HumanAnchor` — held-out human labels that
   :func:`ail.judges.agreement.score_anchor` audits the aligned judge against.
 
 The two pools are **never mixed**: :func:`split_labels` partitions by *trace*
 (every label of a trace lands in one pool), and :func:`assemble_pools` re-proves
-disjointness with :func:`~ail.judges.pools.assert_pools_disjoint` (the
+disjointness with :func:`~ail.pools.assert_pools_disjoint` (the
 :class:`ail.pools.Pool`-keyed wall) before returning. Measuring agreement on the
 same labels the judge was aligned against would only report how well alignment
 memorized them, which is the co-adaptation §2 forbids.
@@ -72,7 +72,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ail.judges.pools import (
+from ail.pools import (
     AlignmentSet,
     AnchorItem,
     HumanAnchor,
@@ -240,12 +240,12 @@ def to_alignment_set(source: TraceSource, trace_ids: Sequence[str]) -> Alignment
 def to_human_anchor(labels: Iterable[TraceLabel], *, name: str | None = None) -> HumanAnchor:
     """Build a Human Anchor from labels (optionally filtered to one judge ``name``).
 
-    Each label becomes an :class:`~ail.judges.pools.AnchorItem` keyed by its
+    Each label becomes an :class:`~ail.pools.AnchorItem` keyed by its
     ``trace_id`` with ``human_label=value`` and the ``inputs``/``outputs``/
     ``expectations`` to re-run the judge. The anchor is per-judge: pass ``name``
     to keep only that assessment's labels (so each trace contributes one item).
     A trace labeled twice for the same judge raises (duplicate ``item_id``), the
-    same guard :class:`~ail.judges.pools.HumanAnchor` already enforces.
+    same guard :class:`~ail.pools.HumanAnchor` already enforces.
     """
     selected = [lab for lab in labels if name is None or lab.name == name]
     return HumanAnchor.of(
@@ -273,7 +273,7 @@ def assemble_pools(
     Partitions ``labels`` by trace (:func:`split_labels`), fetches the alignment
     traces as raw MLflow traces (:func:`to_alignment_set`), builds the anchor
     (:func:`to_human_anchor`, filtered to ``judge_name`` when given), then calls
-    :func:`~ail.judges.pools.assert_pools_disjoint` to **prove** no trace id
+    :func:`~ail.pools.assert_pools_disjoint` to **prove** no trace id
     leaked across the two pools before returning — disjointness is guaranteed by
     construction and re-checked by the Pool-keyed wall.
 

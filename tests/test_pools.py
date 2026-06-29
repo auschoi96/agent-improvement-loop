@@ -16,16 +16,16 @@ def test_pool_has_the_three_disjoint_pools() -> None:
 
 def test_groundtruth_and_judges_share_one_pool_identity() -> None:
     # Importing through either layer must yield the *same* object, so the
-    # vocabulary cannot diverge between storage and consumer code.
+    # vocabulary cannot diverge between storage and consumer code. There is now
+    # exactly one Pool definition (``ail.pools``); the judge layer re-exports it
+    # through its package surface, never from a second module.
     from ail.groundtruth import Pool as groundtruth_pool
     from ail.groundtruth.schema import Pool as schema_pool
     from ail.judges import Pool as judges_pool
-    from ail.judges.pools import Pool as judges_pools_pool
 
     assert schema_pool is Pool
     assert groundtruth_pool is Pool
     assert judges_pool is Pool
-    assert judges_pools_pool is Pool
 
 
 def test_pool_values_are_stable_identifiers() -> None:

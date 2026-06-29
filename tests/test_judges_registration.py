@@ -16,8 +16,8 @@ from typing import Any
 import pytest
 
 from ail.judges import registration as reg
-from ail.judges.pools import AlignmentSet
 from ail.judges.scorers import TOKEN_EFFICIENCY
+from ail.pools import AlignmentSet
 
 
 class _FakeScorer:

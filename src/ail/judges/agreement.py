@@ -18,7 +18,7 @@ Two entry points:
 
 * :func:`compute_agreement` — pure function over ``(judge_value, human_value)``
   pairs. No MLflow, no model: fully offline and unit-testable.
-* :func:`score_anchor` — runs a judge over a :class:`~ail.judges.pools.HumanAnchor`
+* :func:`score_anchor` — runs a judge over a :class:`~ail.pools.HumanAnchor`
   slice, then delegates to :func:`compute_agreement`. The judge calls are the
   only model-touching part (mock them offline; gate live with
   ``@pytest.mark.live``).
@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ail.judges.contract import AgreementItem, AgreementReport
-from ail.judges.pools import AnchorItem, HumanAnchor, ScoreValue
+from ail.pools import AnchorItem, HumanAnchor, ScoreValue
 
 if TYPE_CHECKING:
     from mlflow.genai.judges import Judge
@@ -319,7 +319,7 @@ def score_anchor(
 ) -> AgreementReport:
     """Score a judge against a Human-Anchor slice and report agreement.
 
-    For each :class:`~ail.judges.pools.AnchorItem`, calls
+    For each :class:`~ail.pools.AnchorItem`, calls
     ``judge(inputs=, outputs=, expectations=)``, normalizes the result with
     :func:`coerce_score`, pairs it with the item's ``human_label``, and delegates
     to :func:`compute_agreement`. A judge call that raises is captured per-item
