@@ -24,6 +24,7 @@ from ail.judges import (
     DEFAULT_SCORERS,
     GROUNDEDNESS,
     MODULARITY,
+    TOKEN_EFFICIENCY,
     AgreementConfig,
     AlignmentSet,
     AnchorItem,
@@ -35,6 +36,7 @@ from ail.judges import (
     align_judge,
     assert_pools_disjoint,
     build_memalign_optimizer,
+    build_token_efficiency_inputs,
     coerce_score,
     compute_agreement,
     log_agreement,
@@ -42,6 +44,7 @@ from ail.judges import (
     make_groundedness_judge,
     make_modularity_judge,
     make_scorer,
+    make_token_efficiency_judge,
     score_anchor,
     with_rubric,
 )
@@ -114,8 +117,13 @@ class _Trace:
 
 
 class TestScorerFactory:
-    def test_default_set_has_three_scorers(self) -> None:
-        assert set(DEFAULT_SCORERS) == {"correctness", "modularity", "groundedness"}
+    def test_default_set_has_four_scorers(self) -> None:
+        assert set(DEFAULT_SCORERS) == {
+            "correctness",
+            "modularity",
+            "groundedness",
+            "token_efficiency",
+        }
 
     def test_correctness_is_constrained_categorical_guardrail(self) -> None:
         judge = make_correctness_judge(model="openai:/gpt-4.1-mini")
@@ -169,6 +177,135 @@ class TestScorerFactory:
         assert tuned.name == GROUNDEDNESS.name
         assert tuned.instructions != GROUNDEDNESS.instructions
         assert GROUNDEDNESS.instructions  # original unchanged (frozen dataclass)
+
+
+# ---------------------------------------------------------------------------
+# Token-efficiency judge — bounded 1..5, consumes L0 inputs (not the raw trace)
+# ---------------------------------------------------------------------------
+
+
+def _trace_metrics(
+    *,
+    total_tokens: int = 843_000,
+    repeated: list[tuple[str, str, int]] | None = None,
+) -> Any:
+    """A minimal L0 ``TraceMetrics`` for exercising the token-efficiency bridge."""
+    from ail.metrics.contract import (
+        CostBreakdown,
+        RepeatedCall,
+        TokenBreakdown,
+        ToolRedundancy,
+        TraceMetrics,
+    )
+
+    repeats = [
+        RepeatedCall(tool=t, identity=i, count=c, signature_kind="path")
+        for (t, i, c) in (repeated or [("Read", "/repo/foo.py", 34)])
+    ]
+    return TraceMetrics(
+        trace_id="tr-1",
+        model="claude-opus-4-8",
+        tokens=TokenBreakdown(
+            input_tokens=800_000, output_tokens=43_000, total_tokens=total_tokens
+        ),
+        cost=CostBreakdown(total_usd=12.34, priced=True),
+        total_tool_calls=210,
+        redundancy=ToolRedundancy(
+            total_tool_calls=210,
+            distinct_tool_calls=170,
+            redundant_tool_calls=40,
+            redundancy_rate=0.19,
+            repeated_calls=repeats,
+        ),
+        duration_seconds=33_120.0,
+    )
+
+
+class TestTokenEfficiencyJudge:
+    def test_is_bounded_graded_scale_1_to_5(self) -> None:
+        judge = make_token_efficiency_judge(model="openai:/gpt-4.1-mini")
+        assert judge.name == "token_efficiency"
+        # Bounded to the integers 1..5: an out-of-range efficiency score is impossible.
+        assert judge.feedback_value_type == Literal[1, 2, 3, 4, 5]
+        # The bounded Literal would lose make_judge's mean; aggregations restored.
+        assert judge.aggregations == ["mean", "median", "p90"]
+
+    def test_in_default_set(self) -> None:
+        assert DEFAULT_SCORERS["token_efficiency"] is TOKEN_EFFICIENCY
+
+    def test_rubric_reads_l0_summary_not_raw_trace(self) -> None:
+        # Large-trace-safe: the judge reasons over inputs/outputs/expectations
+        # (a small L0 summary), never {{ trace }} (900K-token traces blow context).
+        ins = make_token_efficiency_judge(model="openai:/gpt-4.1-mini").instructions
+        assert "{{ inputs }}" in ins
+        assert "{{ outputs }}" in ins
+        assert "{{ expectations }}" in ins
+        assert "{{ trace }}" not in ins
+
+    def test_rubric_is_quality_conditioned_anti_gaming(self) -> None:
+        # The rubric must explicitly refuse to reward "fewer tokens by doing less".
+        ins = make_token_efficiency_judge(model="openai:/gpt-4.1-mini").instructions.lower()
+        assert "success" in ins
+        assert "correctness" in ins  # documents the Phase-2 guardrail pairing
+
+    def test_build_inputs_consumes_l0_not_raw_trace(self) -> None:
+        # The L0->judge bridge copies already-computed deterministic signals; it
+        # never receives or embeds the raw trace.
+        metrics = _trace_metrics(repeated=[("Read", "/repo/foo.py", 34)])
+        payload = build_token_efficiency_inputs(metrics, task="refactor module X")
+        assert payload["task"] == "refactor module X"
+        sig = payload["l0_signals"]
+        # Copied straight from the L0 record (not recomputed by the judge).
+        assert sig["total_tokens"] == 843_000
+        assert sig["model"] == "claude-opus-4-8"
+        assert sig["redundancy_rate"] == 0.19
+        assert sig["cost_usd"] == 12.34
+        # The actionable signal: the named repeated target the judge can cite.
+        assert sig["repeated_calls"][0] == {
+            "tool": "Read",
+            "identity": "/repo/foo.py",
+            "count": 34,
+            "kind": "path",
+        }
+        # No raw-trace escape hatch leaked into the judge input.
+        assert "raw" not in sig and "spans" not in sig and "trace" not in payload
+
+    def test_build_inputs_is_json_serializable(self) -> None:
+        import json
+
+        payload = build_token_efficiency_inputs(_trace_metrics(), task={"prompt": "x"})
+        json.dumps(payload)  # must not raise
+
+    def test_build_inputs_unpriced_cost_is_none(self) -> None:
+        from ail.metrics.contract import (
+            CostBreakdown,
+            TokenBreakdown,
+            ToolRedundancy,
+            TraceMetrics,
+        )
+
+        metrics = TraceMetrics(
+            trace_id="t",
+            model="mystery-model",
+            tokens=TokenBreakdown(total_tokens=10),
+            cost=CostBreakdown(priced=False),
+            total_tool_calls=0,
+            redundancy=ToolRedundancy(),
+        )
+        sig = build_token_efficiency_inputs(metrics)["l0_signals"]
+        assert sig["cost_priced"] is False
+        assert sig["cost_usd"] is None
+
+    def test_judge_can_only_emit_in_range_via_score_anchor(self) -> None:
+        # A judge wired to the agreement path coerces a bounded score; the
+        # FakeJudge stands in for the constrained make_judge output.
+        anchor = HumanAnchor.of(
+            [AnchorItem(item_id="t1", human_label=4, outputs="resp", inputs={"l0": 1})]
+        )
+        judge = FakeJudge(name="token_efficiency", responses={"resp": _Feedback(4)})
+        report = score_anchor(judge, anchor)
+        assert report.judge_name == "token_efficiency"
+        assert report.n_agreements == 1
 
 
 # ---------------------------------------------------------------------------

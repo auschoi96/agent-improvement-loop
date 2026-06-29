@@ -16,6 +16,8 @@ from typing import Any
 import pytest
 
 from ail.judges import registration as reg
+from ail.judges.pools import AlignmentSet
+from ail.judges.scorers import TOKEN_EFFICIENCY
 
 
 class _FakeScorer:
@@ -45,11 +47,33 @@ class _FakeScorer:
         return self
 
 
+class _FakeAlignableScorer(_FakeScorer):
+    """A fake judge that also records ``align`` calls (for the align-then-register path)."""
+
+    def __init__(self, name: str, *, sample_rate: float | None = None) -> None:
+        super().__init__(name, sample_rate=sample_rate)
+        self.align_calls: list[dict[str, Any]] = []
+
+    def align(self, traces: list[Any], optimizer: Any = None) -> _FakeAlignableScorer:
+        self.align_calls.append({"traces": list(traces), "optimizer": optimizer})
+        return _FakeAlignableScorer(f"{self.name}+aligned")
+
+
+class _Trace:
+    """Minimal MLflow-trace shape (``info.trace_id``) for an AlignmentSet."""
+
+    def __init__(self, trace_id: str) -> None:
+        self.info = type("Info", (), {"trace_id": trace_id})()
+
+
 @pytest.fixture
 def offline(monkeypatch: pytest.MonkeyPatch) -> dict[str, _FakeScorer]:
     """Neutralize the backend so registration runs offline; return built judges."""
     monkeypatch.setattr(reg, "_require_databricks_agents", lambda: None)
     monkeypatch.setattr(reg, "_configure_databricks", lambda **kw: None)
+    # The aligned/unaligned experiment tag is a best-effort MLflow side effect;
+    # neutralize it so offline registration never touches a tracking backend.
+    monkeypatch.setattr(reg, "_tag_alignment", lambda *a, **kw: True)
     built: dict[str, _FakeScorer] = {}
 
     def fake_make_scorer(spec: Any, *, model: str | None = None, **kw: Any) -> _FakeScorer:
@@ -63,9 +87,17 @@ def offline(monkeypatch: pytest.MonkeyPatch) -> dict[str, _FakeScorer]:
 class TestRegisterScorers:
     def test_registers_then_starts_each_scorer(self, offline: dict[str, _FakeScorer]) -> None:
         active = reg.register_scorers("exp1", sampling_rate=0.25)
-        assert {s.name for s in active} == {"correctness", "modularity", "groundedness"}
+        assert {r.scorer.name for r in active} == {
+            "correctness",
+            "modularity",
+            "groundedness",
+            "token_efficiency",
+        }
         # Every active scorer carries the requested sampling rate.
-        assert all(s.sample_rate == 0.25 for s in active)
+        assert all(r.scorer.sample_rate == 0.25 for r in active)
+        # With no alignment_set, every scorer is the base judge, flagged unaligned.
+        assert all(r.aligned is False for r in active)
+        assert all(r.report.aligned is False for r in active)
         # Each built judge was registered *then* started, in that order.
         for judge in offline.values():
             assert [c[0] for c in judge.calls] == ["register", "start"]
@@ -77,7 +109,7 @@ class TestRegisterScorers:
         # The default must be a fraction, never an implicit 100% (cost lever).
         assert 0.0 < reg.DEFAULT_SAMPLING_RATE < 1.0
         active = reg.register_scorers("exp1")
-        assert all(s.sample_rate == reg.DEFAULT_SAMPLING_RATE for s in active)
+        assert all(r.scorer.sample_rate == reg.DEFAULT_SAMPLING_RATE for r in active)
 
     @pytest.mark.parametrize("bad_rate", [0.0, -0.1, 1.5])
     def test_rejects_out_of_range_sampling_rate(
@@ -95,6 +127,109 @@ class TestRegisterScorers:
         judge = next(iter(offline.values()))
         start_call = next(c for c in judge.calls if c[0] == "start")
         assert start_call[2].filter_string == "status = 'OK'"
+
+    def test_alignment_set_aligns_every_scorer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # MemAlign by construction: a labeled set aligns ALL scorers, not just one.
+        monkeypatch.setattr(reg, "_require_databricks_agents", lambda: None)
+        monkeypatch.setattr(reg, "_configure_databricks", lambda **kw: None)
+        monkeypatch.setattr(reg, "_tag_alignment", lambda *a, **kw: True)
+        monkeypatch.setattr(
+            reg, "make_scorer", lambda spec, *, model=None, **kw: _FakeAlignableScorer(spec.name)
+        )
+        sentinel = object()
+        monkeypatch.setattr(reg, "build_memalign_optimizer", lambda *a, **kw: sentinel)
+
+        aset = AlignmentSet.of([_Trace("t1"), _Trace("t2")])
+        active = reg.register_scorers("exp1", alignment_set=aset)
+        assert active  # all four
+        assert all(r.aligned is True for r in active)
+        assert all(r.report.n_alignment_traces == 2 for r in active)
+        assert all(r.scorer.name.endswith("+aligned") for r in active)
+
+
+class TestCreateAlignedScorer:
+    """The MemAlign-aware align-then-register flow (Part 2)."""
+
+    @pytest.fixture
+    def backend(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """Neutralize the backend; capture tag calls and the built base judge."""
+        monkeypatch.setattr(reg, "_require_databricks_agents", lambda: None)
+        monkeypatch.setattr(reg, "_configure_databricks", lambda **kw: None)
+        captured: dict[str, Any] = {"tags": [], "base": None}
+
+        def fake_tag(experiment_id: str, name: str, aligned: bool) -> bool:
+            captured["tags"].append((experiment_id, name, aligned))
+            return True
+
+        def fake_make_scorer(spec: Any, *, model: str | None = None, **kw: Any) -> Any:
+            captured["base"] = _FakeAlignableScorer(spec.name)
+            return captured["base"]
+
+        monkeypatch.setattr(reg, "_tag_alignment", fake_tag)
+        monkeypatch.setattr(reg, "make_scorer", fake_make_scorer)
+        return captured
+
+    def test_aligns_and_registers_aligned_judge_when_labels_present(
+        self, backend: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sentinel_opt = object()
+        monkeypatch.setattr(reg, "build_memalign_optimizer", lambda *a, **kw: sentinel_opt)
+        aset = AlignmentSet.of([_Trace("t1"), _Trace("t2"), _Trace("t3")])
+
+        result = reg.create_aligned_scorer(
+            TOKEN_EFFICIENCY, experiment_id="exp1", alignment_set=aset
+        )
+
+        base = backend["base"]
+        # The judge was aligned with the default MemAlign optimizer ...
+        assert len(base.align_calls) == 1
+        assert base.align_calls[0]["optimizer"] is sentinel_opt
+        assert base.align_calls[0]["traces"] == list(aset.traces)
+        # ... and the ALIGNED judge (not the base) was the one registered.
+        assert result.aligned is True
+        assert result.report.aligned is True
+        assert result.report.n_alignment_traces == 3
+        assert result.judge.name == "token_efficiency+aligned"
+        assert backend["tags"][-1] == ("exp1", "token_efficiency", True)
+
+    def test_explicit_optimizer_is_used_without_building_default(
+        self, backend: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(*a: Any, **k: Any) -> Any:
+            raise AssertionError("build_memalign_optimizer must not be called when one is passed")
+
+        monkeypatch.setattr(reg, "build_memalign_optimizer", boom)
+        my_opt = object()
+        aset = AlignmentSet.of([_Trace("t1")])
+        reg.create_aligned_scorer(
+            TOKEN_EFFICIENCY, experiment_id="exp1", alignment_set=aset, optimizer=my_opt
+        )
+        assert backend["base"].align_calls[0]["optimizer"] is my_opt
+
+    def test_registers_base_unaligned_when_no_labels(self, backend: dict[str, Any]) -> None:
+        result = reg.create_aligned_scorer(
+            TOKEN_EFFICIENCY, experiment_id="exp1", alignment_set=None
+        )
+        base = backend["base"]
+        assert base.align_calls == []  # never aligned
+        assert result.aligned is False
+        assert result.report.aligned is False
+        assert result.report.n_alignment_traces == 0
+        assert result.judge is base  # the base judge was registered as-is
+        # Flagged not-yet-trusted (recorded on the report and best-effort tagged).
+        assert backend["tags"][-1] == ("exp1", "token_efficiency", False)
+        assert any("not-yet-trusted" in n for n in result.report.notes)
+
+    def test_empty_alignment_set_is_treated_as_no_labels(self, backend: dict[str, Any]) -> None:
+        result = reg.create_aligned_scorer(
+            TOKEN_EFFICIENCY, experiment_id="exp1", alignment_set=AlignmentSet.of([])
+        )
+        assert backend["base"].align_calls == []
+        assert result.aligned is False
+
+    def test_rejects_out_of_range_sampling_rate(self, backend: dict[str, Any]) -> None:
+        with pytest.raises(ValueError, match="sampling_rate"):
+            reg.create_aligned_scorer(TOKEN_EFFICIENCY, experiment_id="exp1", sampling_rate=1.5)
 
 
 class TestRequireDatabricksAgents:

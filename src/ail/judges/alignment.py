@@ -47,6 +47,7 @@ __all__ = [
     "AlignmentOutcome",
     "build_memalign_optimizer",
     "align_judge",
+    "unaligned_report",
 ]
 
 
@@ -172,3 +173,29 @@ def align_judge(
         ],
     )
     return AlignmentOutcome(judge=aligned, report=report)
+
+
+def unaligned_report(judge_name: str, *, generated_at: str | None = None) -> AlignmentReport:
+    """Build the provenance record for a judge registered **without** alignment.
+
+    The MemAlign-aware pipeline (:func:`ail.judges.registration.create_aligned_scorer`)
+    aligns a judge when labels exist and otherwise registers the base judge with
+    this report attached. ``aligned=False`` is the authoritative, serializable
+    "not yet trusted" flag: an unaligned judge has learned from no human labels
+    and has not been audited against the Human Anchor, so the agreement floor
+    treats it as distrusted (an unmeasured judge fails closed — see
+    :mod:`ail.judges.agreement`) until labels exist and it is aligned and
+    re-measured.
+    """
+    return AlignmentReport(
+        base_judge_name=judge_name,
+        n_alignment_traces=0,
+        aligned=False,
+        generated_at=generated_at or datetime.now(UTC).isoformat(),
+        notes=[
+            "registered WITHOUT MemAlign alignment: no non-empty labeled Alignment Set "
+            "was available. Flagged aligned=false (not yet trusted) — align and audit "
+            "against the Human Anchor once human labels exist; until then the agreement "
+            "floor / distrusted machinery treats this judge as not-yet-trusted."
+        ],
+    )

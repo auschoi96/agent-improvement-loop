@@ -68,25 +68,29 @@ scorer calls **no model** (the judge calls its model lazily on `__call__`), so
 construction is offline and free.
 
 ```python
-from ail.judges import make_correctness_judge, make_modularity_judge, make_groundedness_judge
+from ail.judges import (
+    make_correctness_judge, make_modularity_judge,
+    make_groundedness_judge, make_token_efficiency_judge,
+)
 
-correctness = make_correctness_judge(model="databricks:/...")   # Literal["yes","no"] — the Phase-2 guardrail
-modularity  = make_modularity_judge(model="databricks:/...")    # Literal[1,2,3,4,5] — bounded graded scale
-groundedness = make_groundedness_judge(model="databricks:/...")  # Literal["yes","no"]
+correctness = make_correctness_judge(model="databricks:/...")     # Literal["yes","no"] — the Phase-2 guardrail
+modularity  = make_modularity_judge(model="databricks:/...")      # Literal[1,2,3,4,5] — bounded graded scale
+groundedness = make_groundedness_judge(model="databricks:/...")   # Literal["yes","no"]
+token_eff   = make_token_efficiency_judge(model="databricks:/...")  # Literal[1,2,3,4,5] — hybrid, L0-conditioned
 
 feedback = correctness(inputs=task, outputs=response, expectations=expected)
 ```
 
-All three use **constrained** structured outputs (an MLflow `Literal[...]`), so a
+All four use **constrained** structured outputs (an MLflow `Literal[...]`), so a
 judge can never emit an out-of-domain value: correctness/groundedness are a true
-categorical `"yes"`/`"no"`, and modularity is bounded to the integers `1..5`. A
-bounded `Literal` scale loses `make_judge`'s default mean aggregation, so the
-modularity spec restores `["mean", "median", "p90"]` to keep the graded metric
-rolling up across traces.
+categorical `"yes"`/`"no"`, and modularity/token-efficiency are bounded to the
+integers `1..5`. A bounded `Literal` scale loses `make_judge`'s default mean
+aggregation, so those specs restore `["mean", "median", "p90"]` to keep the
+graded metric rolling up across traces.
 
 - `ScorerSpec(name, instructions, feedback_value_type, description, aggregations=None)`
   — a reusable scorer definition. The built-in set is `DEFAULT_SCORERS`
-  (`correctness`/`modularity`/`groundedness`).
+  (`correctness`/`modularity`/`groundedness`/`token_efficiency`).
 - `make_scorer(spec, *, model=None, instructions=None, feedback_value_type=..., name=None, inference_params=None)`
   — build a `Judge`, overriding rubric/type/name/model per call.
 - `with_rubric(spec, instructions)` — a `ScorerSpec` copy with a tuned rubric.
@@ -95,6 +99,32 @@ rolling up across traces.
 ship only if correctness does not regress, so it is categorical (clean
 pass/fail). `modularity` is graded because structure quality has gradations.
 `groundedness` is the anti-hallucination check against the provided context.
+
+#### `token_efficiency` — the hybrid, L0-conditioned scorer
+
+`token_efficiency` (graded `1..5`) is the **hybrid** judge and the direct
+Phase-2 partner of `correctness`. It does **not** ask the LLM to count tokens or
+recompute redundancy — those are L0 deterministic facts (`ail.metrics`,
+un-gameable, `docs/ARCHITECTURE.md` §3). Instead it **consumes** the L0 signals
+and adds only the judgement layer.
+
+- `build_token_efficiency_inputs(metrics: TraceMetrics, *, task=None) -> dict`
+  is the L0→L2 bridge: it copies the already-computed per-trace L0 signals
+  (tokens, tool-call count, redundancy rate, the **named** top repeated targets,
+  cost, model, duration) into a compact `{"task": ..., "l0_signals": {...}}`
+  dict. Nothing is re-derived; the judge reads this summary.
+- **Large-trace-safe by design.** It scores off that L0 *summary*, never
+  `{{ trace }}`. The corpus reaches 943K-token traces (§8) that exceed a judge's
+  context window, so a flat `{{ trace }}` judge is not an option here; the L0
+  digest is. (A recursive-review digest, when L3 exists, plugs into the same
+  `inputs` slot.)
+- **Quality-conditioned / anti-gaming.** Efficiency is scored *conditioned on
+  task success*: spending few tokens by doing less or producing a wrong result
+  scores **low**, not high. The rubric refuses to reward "fewer tokens, worse
+  outcome", which is exactly why it is paired with `correctness` as the Phase-2
+  guardrail — tokens may fall only when quality does not. Its rationale names the
+  specific waste (which repeated target / which boilerplate) so the verdict is
+  actionable.
 
 ### Alignment (MemAlign) — `ail.judges.alignment`
 
@@ -154,6 +184,100 @@ log_agreement(report)   # best-effort MLflow logging (metrics + JSON artifact)
   `judge_human_agreement` / `judge_distrusted` (and `judge_human_cohen_kappa`)
   as metrics plus the full report as a JSON artifact; best-effort, returns
   `False` rather than raising when no run/MLflow is available.
+
+### Registration — `ail.judges.registration` (MemAlign-aware by construction)
+
+Creating/registering a scheduled scorer routes through an **align-then-register**
+flow, so MemAlign is the default path whenever labels exist rather than an
+optional afterthought:
+
+```python
+from ail.judges import create_aligned_scorer, register_scorers, TOKEN_EFFICIENCY
+
+# One scorer, MemAlign-aware:
+reg = create_aligned_scorer(
+    TOKEN_EFFICIENCY,
+    experiment_id="660599403165942",
+    alignment_set=alignment_set,   # non-empty -> aligns; None/empty -> base judge
+)
+reg.aligned          # True iff a labeled set aligned it before registration
+reg.report           # serializable AlignmentReport (aligned true/false + notes)
+reg.judge            # the registered judge (aligned or base) — auditable via score_anchor
+
+# All scorers at once, same path (aligns ALL when a labeled set is supplied):
+registrations = register_scorers("660599403165942", alignment_set=alignment_set)
+```
+
+- `create_aligned_scorer(spec, *, experiment_id, alignment_set=None, optimizer=None, model=None, sampling_rate=DEFAULT_SAMPLING_RATE, filter_string=None, profile=None, ...) -> ScorerRegistration`
+  — builds the judge; **if** `alignment_set` is non-empty, aligns it with
+  MemAlign (`align_judge`, using `optimizer` or a default
+  `build_memalign_optimizer()`) and registers the **aligned** judge; **else**
+  registers the base judge and flags it `aligned=false`.
+- `register_scorers(experiment_id, *, alignment_set=None, optimizer=None, ...) -> list[ScorerRegistration]`
+  — routes **every** scorer through `create_aligned_scorer`, so a non-empty
+  `alignment_set` aligns all of them and an absent one registers base judges.
+- `ScorerRegistration(scorer, judge, aligned, report)` — the active scheduled
+  `scorer`, the registered `judge` (auditable), the `aligned` flag, and the
+  `AlignmentReport` provenance.
+
+**Why a base judge is flagged, not silently trusted.** The reference experiment
+has **zero** human labels (`docs/ARCHITECTURE.md` §8), so MemAlign has nothing to
+learn from yet. An unaligned judge is registered with `aligned=false` recorded
+authoritatively on its `AlignmentReport` and, best-effort, as an experiment tag
+`ail.judge.<name>.aligned = "false"` (the scheduled-scorer API exposes no
+per-scorer metadata slot). This dovetails with the agreement floor: an unaligned
+judge has not been measured against the Human Anchor, so it reads as
+`distrusted` (fail-closed, `insufficient_data`) until it is aligned **and**
+audited. It is registered and visible — it scores — but the loop does not trust
+its numbers until the labeling + alignment + agreement cadence has run.
+
+### Labeling — `ail.judges.labeling` (so MemAlign has input)
+
+MemAlign aligns *against human labels*; this module records them and assembles
+the two **disjoint** pools the rest of the layer consumes. It is the input stage
+that unblocks alignment on an experiment with no labels.
+
+```python
+from ail.judges.labeling import TraceLabel, record_labels, assemble_pools
+
+labels = [
+    TraceLabel(trace_id="tr-1", name="token_efficiency", value=2,
+               rationale="re-read foo.py 34x for no gain",
+               inputs=build_token_efficiency_inputs(metrics_1, task="refactor X"),
+               outputs="<agent response>"),
+    # ... ~30-50 human-graded traces ...
+]
+record_labels(labels, labeler_id="austin")                # HUMAN assessments on traces
+alignment_set, anchor = assemble_pools(source, labels, judge_name="token_efficiency")
+```
+
+- `record_label` / `record_labels` — write each label to its subject trace as
+  an MLflow **feedback** assessment (`mlflow.log_feedback`, `source_type=HUMAN`,
+  `name=` the judge name MemAlign will align), plus any `expectations` as
+  **expectation** assessments (`mlflow.log_expectation`, also `HUMAN`). This is
+  the §11 feedback-attachment model: a human `token_efficiency` (`HUMAN`) and a
+  judge `token_efficiency` (`LLM_JUDGE`) coexist on one trace, keyed by
+  `(name, source_type)`.
+- `split_labels(labels, *, anchor_fraction=0.3, seed=0)` — deterministically
+  partitions labels into `(alignment_labels, anchor_labels)` **by trace** (every
+  label of a trace lands in one pool), so a trace can never be in both the
+  Alignment Set and the Human Anchor.
+- `to_alignment_set(source, trace_ids) -> AlignmentSet` — fetches the **raw**
+  MLflow traces (carrying the human assessments MemAlign reads) via the ingest
+  seam.
+- `to_human_anchor(labels, *, name=None) -> HumanAnchor` — builds anchor items
+  (one per trace for a given judge `name`) carrying the human label + the
+  `inputs`/`outputs`/`expectations` to re-run the judge.
+- `assemble_pools(source, labels, *, judge_name=None, anchor_fraction=0.3, seed=0) -> (AlignmentSet, HumanAnchor)`
+  — does the split, builds both pools, and calls `assert_pools_disjoint(...)` to
+  **prove** no trace id leaked across the `Pool`-keyed wall before returning.
+
+Workflow for a human: label ~30–50 traces (`record_labels`), `assemble_pools`,
+`create_aligned_scorer(spec, alignment_set=...)` to align-and-register, then
+`score_anchor(reg.judge, anchor)` to audit the aligned judge against the held-out
+anchor. Mixing the two pools is impossible by construction and re-proven on
+assembly — measuring agreement on the labels the judge was aligned against would
+only report memorization, the co-adaptation §2 forbids.
 
 ## Output contract — `AgreementReport` (`l2.judges/v1`)
 
@@ -224,9 +348,20 @@ returned alongside it on `AlignmentOutcome.judge`):
 }
 ```
 
+The same shape records the **unaligned** case (`unaligned_report`, used by
+`create_aligned_scorer` when no labeled set is supplied): `aligned: false`,
+`n_alignment_traces: 0`, and a note explaining the judge is flagged
+not-yet-trusted until labels exist. This is the authoritative `aligned` flag the
+loop reads (the experiment tag `ail.judge.<name>.aligned` is its best-effort,
+queryable companion).
+
 ## Resolved MLflow version
 
 Built and verified against **MLflow `3.14.0`** (satisfies the `mlflow>=3.14,<4`
-pin; no bump required). All three GenAI APIs used — `make_judge`, `Judge.align`,
-and `MemAlignOptimizer` — are present in 3.14.0.
+pin; no bump required). The GenAI APIs used — `make_judge`, `Judge.align`,
+`MemAlignOptimizer`, the `mlflow.genai.scorers` registration surface
+(`Scorer.register`/`start`, `ScorerSamplingConfig`, backed by
+`databricks-agents` ≥ 1.11), and the assessment-logging API
+(`mlflow.log_feedback` / `mlflow.log_expectation` with an
+`AssessmentSource(source_type=HUMAN)`) — are all present in 3.14.0.
 ```
