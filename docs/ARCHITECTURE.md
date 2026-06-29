@@ -52,7 +52,9 @@ Lead with what is irrefutable; gate the subjective behind calibration.
   validated against the Human Anchor.
 - **L3 — RLM deep review** (DEFERRED / research): recursive-LM reads full long
   traces to *discover* failure modes a fixed scorer misses — used to decide
-  *what to fix / what scorer to add*, never to score the leaderboard.
+  *what to fix / what scorer to add*, never to score the leaderboard. The chosen
+  in-platform path is an MLflow `{{ trace }}` judge (`make_judge`), not a Deno
+  RLM runtime — see §11.
 
 ## 4. The loop
 
@@ -132,8 +134,9 @@ Verified independently by Claude Code and Codex/GPT-5 against
 | Capability | Source | Verdict | Anchor |
 |---|---|---|---|
 | GEPA loop (`optimize_anything`) | ai-dev-kit | HARVEST | `optimize/runner.py:19,871` |
-| `make_judge` scorers | ai-dev-kit | HARVEST | `optimize/judges.py:46,421` |
-| MemAlign `judge.align()` | ai-dev-kit | HARVEST | `optimize/alignment.py:83` |
+| `make_judge` scorers | public mlflow.genai | CLEAN-ROOM (original; see `PROVENANCE.md`) | `src/ail/judges/scorers.py` · public `mlflow.genai.judges.make_judge` |
+| MemAlign `judge.align()` | public mlflow.genai | CLEAN-ROOM (original; see `PROVENANCE.md`) | `src/ail/judges/alignment.py` · public `Judge.align` / `MemAlignOptimizer` |
+| Scheduled scorers (`register`/`start`) | public mlflow.genai + databricks-agents | CLEAN-ROOM (original) | `src/ail/judges/registration.py` · public `mlflow.genai.scorers` |
 | MLflow `search_traces` ingestion | public mlflow | CLEAN-ROOM (original) | `src/ail/ingest/mlflow_source.py` · public `mlflow.search_traces` |
 | GRP capture→approve→**promote** | ai-dev-kit | CLEAN-ROOM (original; see note) | `src/ail/groundtruth/` · separate `promote_approved()` |
 | Claude Code adapter (`ClaudeSDKClient`) | public claude-agent-sdk | CLEAN-ROOM (original) | `src/ail/ingest/adapters/claude_code.py` · public `claude-agent-sdk` |
@@ -210,3 +213,48 @@ Milestone 1 = Phase 0 + Phase 1 + the Phase 2 token slice. See
   reviewer).
 - **License reconciliation** for harvested code is a Wave 0 deliverable (see
   `PROVENANCE.md`); the repo carries no top-level LICENSE until that resolves.
+
+## 11. Feedback-attachment architecture (where a verdict lives)
+
+Once the L2 scorers are registered (`src/ail/judges/registration.py`), MLflow
+evaluates traces and writes verdicts back. **Where** a verdict is written is a
+deliberate design choice, not an MLflow default to accept blindly, because it
+directly governs whether the L0 cost metric stays un-gameable (§3).
+
+**1. A verdict is an assessment *on the subject trace*.** A scheduled scorer
+attaches its `Feedback` to the trace it scored, with `source_type=LLM_JUDGE`.
+That trace is the one record a reviewer, the leaderboard, and a future human all
+look at. Multiple verdicts coexist on the same trace without collision because
+an assessment is keyed by **`(name, source_type)`**: a judge's `correctness`
+(`LLM_JUDGE`) and a human's `correctness` (`HUMAN`) live side by side on one
+trace, and the agreement layer (`ail.judges.agreement`) compares them. This is
+why the Human Anchor pairs a judge value with a human label per item — the two
+are different sources of the *same* assessment name on the *same* subject.
+
+**2. The reviewer's *computation* is its own trace, linked by metadata —
+never nested.** Producing a verdict (a judge model call today, a recursive
+deep-review tomorrow) is itself an LLM workload that emits spans and tokens. It
+runs as its **own** trace and is linked back to the subject by recording the
+subject's id and the reviewer's own trace id in the assessment / trace metadata
+(convention: `reviewer_trace_id`). It is **never** added as child spans of the
+agent's trace.
+
+**3. Why nesting would corrupt L0.** Trace-level token usage is read from
+`mlflow.trace.tokenUsage` (see `ail.ingest.mlflow_source` →
+`_MD_TOKEN_USAGE`), which **sums the token usage of the trace's child LLM
+spans**. If a reviewer's LLM spans were nested inside the agent's trace, the
+agent's trace-level `tokenUsage` would silently include the *judge's* tokens —
+inflating the agent's measured cost and breaking the one metric §2/§3 promise to
+keep deterministic and un-gameable. Keeping the reviewer's spans in a separate
+trace keeps the agent's L0 cost exactly the agent's, and makes the cost of
+*judging* separately measurable.
+
+**4. Trace-based judges are the chosen RLM path (no Deno).** `make_judge`
+accepts a `{{ trace }}` template, so a judge can read an entire long trace and
+discover failure modes a fixed input/output rubric misses. That is the
+**in-platform equivalent of the deferred RLM / HALO recursive review** (§3 L3,
+§9 Phase 5) — the recursive-review *idea* realized through MLflow trace judges
+rather than a separate Deno runtime. A `{{ trace }}` deep-review judge still
+obeys rules 1–3: it attaches its verdict to the subject trace and runs its own
+review as a separate, linked trace. This is the recorded RLM direction; the
+Deno-based RLM dependency stays deferred.

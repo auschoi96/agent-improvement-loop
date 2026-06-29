@@ -31,12 +31,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any, ClassVar
+
+# The Pool identity is the one canonical vocabulary type, shared with
+# ``ail.groundtruth`` so the two layers can never disagree on "which pool".
+# Re-exported here for the judge layer's consumers (``from ail.judges import Pool``).
+from ail.pools import Pool
 
 __all__ = [
     "Pool",
     "PoolOverlapError",
+    "UnresolvedTraceIdError",
     "ScoreValue",
     "AnchorItem",
     "HumanAnchor",
@@ -52,24 +57,26 @@ __all__ = [
 ScoreValue = bool | int | float | str
 
 
-class Pool(StrEnum):
-    """The three disjoint pools of the frozen evaluation wall.
+class PoolOverlapError(ValueError):
+    """Raised when the disjointness guard cannot certify the wall is intact.
 
-    The string values are stable identifiers safe to record on a report or a
-    trace tag.
+    The common case is a non-empty intersection between two pools (the Alignment
+    Set and the Human Anchor, or either of those and the Task Suite) — exactly
+    the co-adaptation leak the frozen wall exists to prevent, so it is an error,
+    never a warning. :class:`UnresolvedTraceIdError` is the fail-closed subtype
+    for the "cannot even check" case.
     """
 
-    TASK_SUITE = "task_suite"
-    ALIGNMENT_SET = "alignment_set"
-    HUMAN_ANCHOR = "human_anchor"
 
+class UnresolvedTraceIdError(PoolOverlapError):
+    """Raised when a pool carries a trace whose id cannot be resolved.
 
-class PoolOverlapError(ValueError):
-    """Raised when two pools that must be disjoint share an id.
-
-    A non-empty intersection between the Alignment Set and the Human Anchor (or
-    either of those and the Task Suite) is exactly the co-adaptation leak the
-    frozen wall exists to prevent, so it is an error, never a warning.
+    Disjointness is *proven* by comparing ids; a trace with no resolvable id
+    cannot be proven disjoint from any other pool. Silently dropping it (the
+    earlier behaviour) would let an unidentifiable trace sit in two pools
+    undetected — the precise leak the wall guards against — so the guard **fails
+    closed** and raises instead. A subtype of :class:`PoolOverlapError` so a
+    caller that already catches the overlap error catches this too.
     """
 
 
@@ -149,8 +156,18 @@ class AlignmentSet:
 
     @property
     def ids(self) -> frozenset[str]:
-        """Trace ids in this set (best-effort, via ``trace.info.trace_id``)."""
+        """Resolvable trace ids in this set (via ``trace.info.trace_id``).
+
+        A trace with no resolvable id is **not** silently included here; it is
+        surfaced by :attr:`unresolved_count` so the disjointness guard can fail
+        closed rather than under-count the wall.
+        """
         return frozenset(tid for tid in (_trace_id(t) for t in self.traces) if tid is not None)
+
+    @property
+    def unresolved_count(self) -> int:
+        """How many traces have no resolvable id (the fail-closed signal)."""
+        return sum(1 for t in self.traces if _trace_id(t) is None)
 
     def __len__(self) -> int:
         return len(self.traces)
@@ -159,10 +176,10 @@ class AlignmentSet:
 def _trace_id(trace: Any) -> str | None:
     """Best-effort id of an MLflow trace (``info.trace_id``/``request_id``).
 
-    Defensive on purpose: an alignment set may carry heterogeneous trace shapes,
-    and a missing id should drop out of the disjointness check rather than crash
-    it. A trace with no resolvable id simply cannot be proven disjoint and is
-    skipped.
+    Returns ``None`` when no id can be resolved. Unlike the earlier behaviour,
+    that ``None`` is **not** quietly dropped from the disjointness check:
+    :func:`assert_pools_disjoint` treats an unresolvable id as a fail-closed
+    error, because a trace that cannot be identified cannot be proven disjoint.
     """
     info = getattr(trace, "info", None)
     for attr in ("trace_id", "request_id"):
@@ -186,11 +203,23 @@ def assert_pools_disjoint(
     is usable with whichever subset a given cadence touches; the Task Suite is
     supplied as a bare id set because its storage is owned by Wave 1b.
 
+    Fails closed: if any Alignment-Set trace has no resolvable id, disjointness
+    cannot be proven, so it raises :class:`UnresolvedTraceIdError` rather than
+    dropping the trace from the comparison.
+
     Raises:
+        UnresolvedTraceIdError: If a checked Alignment Set carries a trace whose
+            id cannot be resolved.
         PoolOverlapError: If any two checked pools intersect.
     """
     named: list[tuple[Pool, frozenset[str]]] = []
     if alignment_set is not None:
+        if alignment_set.unresolved_count:
+            raise UnresolvedTraceIdError(
+                f"the Alignment Set has {alignment_set.unresolved_count} trace(s) with no "
+                "resolvable id; disjointness cannot be proven, so the wall fails closed. "
+                "Give every trace an info.trace_id (or request_id) before checking pools."
+            )
         named.append((Pool.ALIGNMENT_SET, alignment_set.ids))
     if human_anchor is not None:
         named.append((Pool.HUMAN_ANCHOR, human_anchor.ids))

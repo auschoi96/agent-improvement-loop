@@ -50,7 +50,14 @@ from ail.judges.pools import (
     Pool,
     PoolOverlapError,
     ScoreValue,
+    UnresolvedTraceIdError,
     assert_pools_disjoint,
+)
+from ail.judges.registration import (
+    DEFAULT_SAMPLING_RATE,
+    list_registered_scorers,
+    register_scorers,
+    unregister_scorers,
 )
 from ail.judges.scorers import (
     CORRECTNESS,
@@ -74,6 +81,7 @@ __all__ = [
     # pools (frozen evaluation wall)
     "Pool",
     "PoolOverlapError",
+    "UnresolvedTraceIdError",
     "ScoreValue",
     "AnchorItem",
     "HumanAnchor",
@@ -102,4 +110,9 @@ __all__ = [
     "compute_agreement",
     "score_anchor",
     "log_agreement",
+    # registration (scheduled scorers)
+    "DEFAULT_SAMPLING_RATE",
+    "register_scorers",
+    "list_registered_scorers",
+    "unregister_scorers",
 ]

@@ -40,6 +40,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# The Pool identity is the one canonical vocabulary type, shared with
+# ``ail.judges`` so the storage layer and the judge layer can never disagree on
+# "which pool". Re-exported from this schema module (``from
+# ail.groundtruth.schema import Pool``) for the package's existing consumers.
+from ail.pools import Pool
+
 #: Version of the ground-truth contract. Bump the minor for additive,
 #: backward-compatible fields; bump the major for breaking shape changes.
 SCHEMA_VERSION = "ail.groundtruth/v1"
@@ -85,21 +91,6 @@ class Source(_Frozen):
     ref: str  # trace id, URL, file path, dataset id, …
     locator: str | None = None  # span id, line range, cell, session id, …
     note: str = ""
-
-
-class Pool(StrEnum):
-    """The three disjoint evaluation pools (see ``docs/ARCHITECTURE.md`` §2).
-
-    They are **never mixed**: a case lives in exactly one pool. The ground-truth
-    bootstrap produces *labelled* cases (cases carrying human-authored
-    expectations), whose natural homes are the :attr:`ALIGNMENT_SET` and
-    :attr:`HUMAN_ANCHOR`. The :attr:`TASK_SUITE` is frozen separately from task
-    inputs (Wave 1b) and is never fed the optimizer.
-    """
-
-    TASK_SUITE = "task_suite"
-    ALIGNMENT_SET = "alignment_set"
-    HUMAN_ANCHOR = "human_anchor"
 
 
 class ReviewStatus(StrEnum):

@@ -52,11 +52,19 @@ class AgreementReport(_Contract):
     The frozen evaluation wall (``docs/ARCHITECTURE.md`` §2) treats a drifting
     judge as a distrusted judge: when :attr:`agreement_rate` falls below
     :attr:`floor`, :attr:`distrusted` is ``True`` and the loop must stop trusting
-    this judge's scores until it is re-aligned and re-measured. ``cohen_kappa``
-    is the chance-corrected companion to the raw rate (``None`` when it does not
-    apply — e.g. float labels compared with a tolerance, or a degenerate single
-    label space); the floor is applied to the raw rate, which is what the
-    guardrail thresholds on.
+    this judge's scores until it is re-aligned and re-measured.
+
+    :attr:`distrusted` also fires on **insufficient data**: an empty anchor, or
+    fewer scored items than the configured minimum, means the judge is
+    *unmeasured*, and an unmeasured judge must never read as trusted (the
+    anti-co-adaptation fail-closed rule). :attr:`insufficient_data` distinguishes
+    that "we could not measure" case from "we measured and it failed the floor";
+    a consumer that only reads :attr:`distrusted` is still safe either way.
+
+    ``cohen_kappa`` is the chance-corrected companion to the raw rate (``None``
+    when it does not apply — e.g. float labels compared with a tolerance, or a
+    degenerate single label space); the floor is applied to the raw rate, which
+    is what the guardrail thresholds on.
     """
 
     schema_version: str = SCHEMA_VERSION
@@ -68,6 +76,7 @@ class AgreementReport(_Contract):
     agreement_rate: float = 0.0
     floor: float = 0.0
     distrusted: bool = False
+    insufficient_data: bool = False
     cohen_kappa: float | None = None
     numeric_tolerance: float | None = None
     label_space: list[str] = Field(default_factory=list)

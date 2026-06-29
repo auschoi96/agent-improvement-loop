@@ -82,13 +82,21 @@ the intended Apache-2.0 release.
 | `src/ail/metrics/report.py` | Single-entrypoint baseline report + Example 1 reproduction. **Original.** |
 | `docs/L0_METRICS_CONTRACT.md` | Prose spec of the L0 contract. **Original.** |
 | `tests/test_l0_metrics.py`, `tests/test_report.py` | Tests for the above. **Original.** |
-| `src/ail/groundtruth/schema.py` | Our own ground-truth contract (pydantic v2): `Source`/`SourceKind`, `Pool`, `ReviewStatus`, `TaskInput`, `Expectations`, `CandidateResponse`, `ReviewRecord`, `GroundTruthCase`, `GroundTruthSet`. **Clean-room original** — see the Wave 1a note below. |
+| `src/ail/pools.py` | Canonical `Pool` vocabulary (the three disjoint pools), shared by `groundtruth` and `judges` so the identity is defined once. **Original.** |
+| `src/ail/groundtruth/schema.py` | Our own ground-truth contract (pydantic v2): `Source`/`SourceKind`, `ReviewStatus`, `TaskInput`, `Expectations`, `CandidateResponse`, `ReviewRecord`, `GroundTruthCase`, `GroundTruthSet` (the shared `Pool` is imported from `ail.pools`). **Clean-room original** — see the Wave 1a note below. |
 | `src/ail/groundtruth/capture.py` | Stage 1: build candidate cases from normalized traces. **Original.** |
 | `src/ail/groundtruth/execute.py` | Stage 2: run the agent to capture its own candidate response; optional MLflow audit logging. **Original.** |
 | `src/ail/groundtruth/approve.py` | Stage 3: the human gate — a reviewer fills expectations and approves/rejects. **Original.** |
 | `src/ail/groundtruth/promote.py` | Stage 4: separate explicit `promote_approved()` into a frozen, disjoint pool. **Original.** |
 | `src/ail/groundtruth/store.py` | Per-pool persistence + review-queue round-trip. **Original.** |
 | `tests/test_groundtruth_schema.py`, `tests/test_groundtruth_pipeline.py`, `tests/test_groundtruth_mlflow.py` | Tests for the ground-truth package (incl. the no-synthesis assertions). **Original.** |
+| `src/ail/judges/scorers.py` | L2 scorer factory: `ScorerSpec` + the `correctness`/`modularity`/`groundedness` rubrics, thin wrappers over public `mlflow.genai.judges.make_judge`. Rubrics written from scratch. **Original (clean-room).** |
+| `src/ail/judges/alignment.py` | MemAlign wrapper over public `Judge.align` / `MemAlignOptimizer`. **Original (clean-room).** |
+| `src/ail/judges/agreement.py` | Pure judge-vs-human agreement metric (rate, floor, Cohen's kappa, fail-closed insufficient-data) + best-effort MLflow logging. **Original.** |
+| `src/ail/judges/pools.py` | Consumer-side pool handles (`AlignmentSet`/`HumanAnchor`/`AnchorItem`) + `assert_pools_disjoint` (re-exports the shared `ail.pools.Pool`). **Original.** |
+| `src/ail/judges/contract.py` | L2 output contract (pydantic v2): `AgreementReport`, `AlignmentReport`. **Original.** |
+| `src/ail/judges/registration.py` | Scheduled-scorer registration over public `mlflow.genai.scorers` (`Scorer.register`/`start`/`list_scorers`/`delete_scorer`), backed by `databricks-agents`. **Original.** |
+| `tests/test_judges.py`, `tests/test_judges_registration.py`, `tests/test_pools.py` | Tests for the judge layer and the shared pool vocabulary. **Original.** |
 
 ### Wave 1a ground-truth schema — clean-room note
 
@@ -112,6 +120,35 @@ rates are attributed to the Claude API pricing reference (the `claude-api`
 skill's cached model table, dated 2026-06-04) on each `PriceBookEntry.source`,
 cache rates are derived from Anthropic's documented prompt-caching multipliers,
 and any uncovered model is flagged rather than guessed.
+
+### L2 judges layer (`src/ail/judges/`) — clean-room note
+
+The L2 judge layer was authored **without reading, cloning, fetching, browsing,
+or grepping** `ai-dev-kit`'s `optimize/judges.py` / `optimize/alignment.py` (the
+`HARVEST`-tagged sources for `make_judge` scorers and MemAlign in
+`docs/ARCHITECTURE.md` §7) or any other non-permissive source. Despite the §7
+harvest map marking those `HARVEST`, the modules here are **original** and
+re-derived solely from this repository's own interfaces/tests and the **public,
+OSS Apache-2.0 `mlflow.genai` API**:
+
+- `mlflow.genai.judges.make_judge` (name/instructions/`{{ template }}` variables,
+  `feedback_value_type` incl. `Literal[...]` constrained categorical / bounded
+  graded scales, `inference_params`), `Judge.align`, and
+  `mlflow.genai.judges.optimizers.MemAlignOptimizer` (`reflection_lm`,
+  `retrieval_k`, `embedding_model`, `embedding_dim`).
+- `mlflow.genai.scorers` registration API — `Scorer.register` / `Scorer.start` /
+  `Scorer.stop`, `list_scorers` / `delete_scorer`, and `ScorerSamplingConfig`
+  (`sample_rate`, `filter_string`) — for scheduled (ongoing) scorers. The
+  Databricks runtime backend is the public **`databricks-agents`** package
+  (added as the optional `agents` extra), not copied code.
+
+The three rubrics (`correctness`/`modularity`/`groundedness`), the agreement
+metric (rate + floor + Cohen's kappa + the fail-closed insufficient-data rule),
+the disjoint-pool handles, and the registration orchestration are all this
+repository's own design. No upstream judge/alignment code was consulted, so the
+layer carries no upstream license obligation and is Apache-2.0-ready. This note
+makes good on the `docs/L2_JUDGES_CONTRACT.md` claim that provenance is recorded
+here — earlier it was asserted but not actually written down.
 
 ## ⚠️ License flags (resolve before adding a top-level LICENSE)
 

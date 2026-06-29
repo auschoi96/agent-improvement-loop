@@ -15,7 +15,7 @@ The one genuinely-live path (a real MemAlign alignment) is gated behind
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -31,6 +31,7 @@ from ail.judges import (
     Pool,
     PoolOverlapError,
     ScorePair,
+    UnresolvedTraceIdError,
     align_judge,
     assert_pools_disjoint,
     build_memalign_optimizer,
@@ -116,24 +117,29 @@ class TestScorerFactory:
     def test_default_set_has_three_scorers(self) -> None:
         assert set(DEFAULT_SCORERS) == {"correctness", "modularity", "groundedness"}
 
-    def test_correctness_is_categorical_guardrail(self) -> None:
+    def test_correctness_is_constrained_categorical_guardrail(self) -> None:
         judge = make_correctness_judge(model="openai:/gpt-4.1-mini")
         assert judge.name == "correctness"
-        assert judge.feedback_value_type is str
+        # Constrained categorical, not a bare str: the judge can only emit yes/no.
+        assert judge.feedback_value_type == Literal["yes", "no"]
         # The guardrail rubric compares output against the expected result.
         assert "{{ outputs }}" in judge.instructions
         assert "{{ expectations }}" in judge.instructions
 
-    def test_modularity_is_graded_int(self) -> None:
+    def test_modularity_is_bounded_graded_scale(self) -> None:
         judge = make_modularity_judge(model="openai:/gpt-4.1-mini")
         assert judge.name == "modularity"
-        assert judge.feedback_value_type is int
+        # Bounded 1..5, not an unbounded int: out-of-range scores are impossible.
+        assert judge.feedback_value_type == Literal[1, 2, 3, 4, 5]
+        # The bounded Literal would lose make_judge's default mean; aggregations
+        # are restored so the graded scale still rolls up across traces.
+        assert judge.aggregations == ["mean", "median", "p90"]
         assert "{{ outputs }}" in judge.instructions
 
     def test_groundedness_checks_context(self) -> None:
         judge = make_groundedness_judge(model="openai:/gpt-4.1-mini")
         assert judge.name == "groundedness"
-        assert judge.feedback_value_type is str
+        assert judge.feedback_value_type == Literal["yes", "no"]
         assert "{{ inputs }}" in judge.instructions
 
     def test_make_scorer_overrides(self) -> None:
@@ -208,6 +214,22 @@ class TestPools:
         assert Pool.TASK_SUITE.value == "task_suite"
         assert HumanAnchor.pool is Pool.HUMAN_ANCHOR
         assert AlignmentSet.pool is Pool.ALIGNMENT_SET
+
+    def test_unresolvable_trace_id_fails_closed(self) -> None:
+        # A trace with no resolvable id cannot be proven disjoint; the guard must
+        # fail closed and raise rather than silently drop it from the check.
+        class _NoId:
+            info = None
+
+        aset = AlignmentSet.of([_Trace("ok"), _NoId()])
+        assert aset.unresolved_count == 1
+        assert aset.ids == frozenset({"ok"})  # the resolvable one is still surfaced
+        with pytest.raises(UnresolvedTraceIdError, match="resolvable id"):
+            assert_pools_disjoint(alignment_set=aset)
+
+    def test_unresolved_trace_id_error_is_overlap_subtype(self) -> None:
+        # Callers that already catch PoolOverlapError catch the fail-closed case.
+        assert issubclass(UnresolvedTraceIdError, PoolOverlapError)
 
 
 # ---------------------------------------------------------------------------
@@ -316,12 +338,51 @@ class TestComputeAgreement:
         assert errored.agree is False
         assert errored.error == "boom"
 
-    def test_empty_anchor_is_not_distrusted(self) -> None:
+    def test_empty_anchor_is_distrusted_fail_closed(self) -> None:
+        # An unmeasured judge must NOT read as trusted: zero items is
+        # insufficient data, so the judge is flagged distrusted (fail closed).
         report = compute_agreement([], judge_name="j")
         assert report.n_items == 0
+        assert report.n_scored == 0
         assert report.agreement_rate == 0.0
+        assert report.insufficient_data is True
+        assert report.distrusted is True
+        assert any("unmeasured" in n for n in report.notes)
+
+    def test_below_min_samples_is_distrusted_even_with_perfect_rate(self) -> None:
+        # Two perfectly-agreeing items, but a guardrail that demands at least
+        # five scored items: too little evidence to trust, so distrusted fires
+        # despite a 1.0 agreement rate.
+        report = compute_agreement(
+            _pairs(("a", "yes", "yes"), ("b", "no", "no")),
+            judge_name="j",
+            config=AgreementConfig(min_samples=5),
+        )
+        assert report.agreement_rate == 1.0
+        assert report.insufficient_data is True
+        assert report.distrusted is True
+
+    def test_sufficient_samples_clears_insufficient_flag(self) -> None:
+        report = compute_agreement(
+            _pairs(("a", "yes", "yes"), ("b", "no", "no")),
+            judge_name="j",
+            config=AgreementConfig(min_samples=2),
+        )
+        assert report.insufficient_data is False
         assert report.distrusted is False
-        assert any("empty Human Anchor" in n for n in report.notes)
+
+    def test_case_sensitive_kappa_keeps_labels_distinct(self) -> None:
+        # With case_insensitive=False the judge's "Yes" does NOT match the
+        # human "yes" — for the agreement decision AND for kappa's label space.
+        pairs = _pairs(("a", "Yes", "yes"), ("b", "No", "no"))
+        report = compute_agreement(
+            pairs, judge_name="j", config=AgreementConfig(case_insensitive=False, floor=0.0)
+        )
+        assert report.n_agreements == 0  # "Yes" != "yes", "No" != "no"
+        # The reported label_space is the human side; case preserved (not folded).
+        assert set(report.label_space) == {"yes", "no"}
+        # Kappa's internal label space saw 4 distinct labels, so it is defined.
+        assert report.cohen_kappa is not None
 
     def test_kappa_below_rate_under_class_imbalance(self) -> None:
         # Judge always says "yes"; humans mostly "yes". High raw agreement, but

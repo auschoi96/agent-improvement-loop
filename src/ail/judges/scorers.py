@@ -31,7 +31,7 @@ Design notes:
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from mlflow.genai.judges import Judge
@@ -57,15 +57,23 @@ class ScorerSpec:
     ``instructions`` is the judge rubric and **must** reference at least one
     MLflow template variable (``{{ inputs }}``, ``{{ outputs }}``,
     ``{{ expectations }}``, or ``{{ trace }}``) — ``make_judge`` rejects a rubric
-    that references none. ``feedback_value_type`` fixes the structured output
-    type the judge returns (``bool`` / a ``Literal[...]`` of allowed labels /
-    ``int`` for a graded scale).
+    that references none. ``feedback_value_type`` fixes the **constrained**
+    structured output the judge returns: a ``Literal[...]`` of the allowed labels
+    (categorical) or a ``Literal[...]`` of the allowed integers (a bounded graded
+    scale) so the judge can never emit an out-of-domain value.
+
+    ``aggregations`` overrides MLflow's default cross-trace aggregation for the
+    registered scorer. ``make_judge`` only auto-aggregates a bare ``int``/
+    ``float``/``bool`` (``["mean"]``); a bounded ``Literal[...]`` scale gets none
+    by default, so a graded spec restores meaningful aggregations explicitly.
+    ``None`` keeps MLflow's default.
     """
 
     name: str
     instructions: str
     feedback_value_type: Any
     description: str
+    aggregations: tuple[str, ...] | None = None
 
 
 # --- default rubrics -------------------------------------------------------
@@ -78,7 +86,7 @@ class ScorerSpec:
 CORRECTNESS = ScorerSpec(
     name="correctness",
     description="Does the response correctly accomplish the task, per the expected result?",
-    feedback_value_type=str,  # categorical "yes"/"no"
+    feedback_value_type=Literal["yes", "no"],  # constrained categorical guardrail
     instructions=(
         "You are judging whether an agent's response is CORRECT.\n\n"
         "Task / request:\n{{ inputs }}\n\n"
@@ -98,7 +106,10 @@ CORRECTNESS = ScorerSpec(
 MODULARITY = ScorerSpec(
     name="modularity",
     description="How modular and well-structured is the produced code (1=poor, 5=excellent)?",
-    feedback_value_type=int,  # graded 1..5
+    feedback_value_type=Literal[1, 2, 3, 4, 5],  # bounded graded scale
+    # A bounded Literal scale loses make_judge's default mean aggregation, so
+    # restore aggregations meaningful for a graded metric (Phase-4 leaderboard).
+    aggregations=("mean", "median", "p90"),
     instructions=(
         "You are rating the MODULARITY of the code in an agent's response on a "
         "1-to-5 scale.\n\n"
@@ -123,7 +134,7 @@ MODULARITY = ScorerSpec(
 GROUNDEDNESS = ScorerSpec(
     name="groundedness",
     description="Is the response supported by the provided context, with no fabrication?",
-    feedback_value_type=str,  # categorical "yes"/"no"
+    feedback_value_type=Literal["yes", "no"],  # constrained categorical
     instructions=(
         "You are judging whether an agent's response is GROUNDED in the context "
         "it was given.\n\n"
@@ -194,7 +205,7 @@ def make_scorer(
     resolved_type = (
         spec.feedback_value_type if feedback_value_type is _UNSET else feedback_value_type
     )
-    return make_judge(
+    judge = make_judge(
         name=name or spec.name,
         instructions=instructions or spec.instructions,
         model=model,
@@ -202,6 +213,12 @@ def make_scorer(
         feedback_value_type=resolved_type,
         inference_params=inference_params,
     )
+    # ``make_judge`` only auto-aggregates a bare numeric type; a bounded Literal
+    # scale gets none. Restore the spec's aggregations so a graded scorer still
+    # rolls up across traces (the value type stays the constrained Literal).
+    if spec.aggregations is not None:
+        judge = judge.model_copy(update={"aggregations": list(spec.aggregations)})
+    return judge
 
 
 def make_correctness_judge(
