@@ -74,8 +74,8 @@ from ail.metrics.l0_deterministic import compute_trace_metrics
 if TYPE_CHECKING:
     from mlflow.genai.judges import Judge
 
-    from ail.judges.pools import ScoreValue
     from ail.metrics.contract import PriceBookEntry, TraceMetrics
+    from ail.pools import ScoreValue
 
 __all__ = [
     "Intervention",
