@@ -12,16 +12,24 @@ MLflow + Databricks SDK configuration model, the tracking URI is ``databricks``
 and the model-registry URI is ``databricks-uc``; the active Databricks CLI
 profile (``DATABRICKS_CONFIG_PROFILE`` or the ``profile`` argument) selects the
 workspace whose credentials the SDK then resolves.
+
+This module also carries the MLflow integration for **cohorts** (see
+:mod:`ail.cohorts`): the cohort-aware reads
+(:meth:`MLflowTraceSource.iter_cohort_traces` /
+:meth:`~MLflowTraceSource.fetch_cohort_traces`) and the tag-write helper
+(:func:`apply_trace_tags`). Both are strictly additive — the no-cohort
+``iter_traces`` / ``get_trace`` / ``fetch_traces`` behave exactly as before.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from ail.cohorts import Cohort
 from ail.ingest.base import (
     NormalizedSpan,
     NormalizedTrace,
@@ -156,6 +164,64 @@ class MLflowTraceSource(TraceSource):
         self._configure()
         trace = mlflow.get_trace(trace_id)
         return None if trace is None else normalize_trace(trace)
+
+    # -- cohort-aware reads (additive; the no-cohort methods are unchanged) --
+
+    def iter_cohort_traces(
+        self,
+        cohort: Cohort,
+        *,
+        experiment_id: str,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+    ) -> Iterator[NormalizedTrace]:
+        """Yield only the traces in ``cohort`` from an experiment.
+
+        Tag filtering is pushed into ``mlflow.search_traces`` where possible: the
+        cohort's equality clauses (:meth:`Cohort.to_mlflow_filter`) are AND'd onto
+        ``filter_string`` so the backend narrows the scan. That pushdown is a
+        correct *prefilter* but not always complete (presence-only and
+        value-in-set clauses are not pushed), so every trace is additionally
+        checked with :meth:`Cohort.matches` — the in-memory post-filter is the
+        source of truth, guaranteeing the yielded set is exactly the cohort.
+
+        ``max_results`` bounds the traces *scanned* by the backend. When the
+        cohort filter is only partially pushed down, the post-filter may drop
+        some of those, so the number yielded can be fewer than ``max_results``;
+        callers needing a guaranteed count should over-fetch or page.
+
+        The no-argument :meth:`iter_traces` is untouched; this is purely additive.
+        """
+        combined = _combine_filters(filter_string, cohort.to_mlflow_filter())
+        for trace in self.iter_traces(
+            experiment_id=experiment_id,
+            filter_string=combined,
+            max_results=max_results,
+            order_by=order_by,
+        ):
+            if cohort.matches(trace):
+                yield trace
+
+    def fetch_cohort_traces(
+        self,
+        cohort: Cohort,
+        *,
+        experiment_id: str,
+        filter_string: str | None = None,
+        max_results: int | None = None,
+        order_by: list[str] | None = None,
+    ) -> list[NormalizedTrace]:
+        """Materialize :meth:`iter_cohort_traces` into a list (convenience wrapper)."""
+        return list(
+            self.iter_cohort_traces(
+                cohort,
+                experiment_id=experiment_id,
+                filter_string=filter_string,
+                max_results=max_results,
+                order_by=order_by,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -400,3 +466,87 @@ def _epoch_ns_to_dt(ns: Any) -> datetime | None:
     if not isinstance(ns, (int, float)) or ns <= 0:
         return None
     return datetime.fromtimestamp(ns / _NS_PER_SECOND, tz=UTC)
+
+
+def _combine_filters(user: str | None, pushdown: str | None) -> str | None:
+    """AND a user filter with a cohort pushdown filter (either may be ``None``).
+
+    Both are flat ``AND``-joined predicate lists in the MLflow trace-search
+    grammar, so a flat join keeps them valid. Returns ``None`` when neither side
+    contributes a predicate.
+    """
+    parts = [part for part in (user, pushdown) if part]
+    return " AND ".join(parts) if parts else None
+
+
+# ---------------------------------------------------------------------------
+# Tag write path (cohorts). This is the SECONDARY path: the primary way traces
+# get cohort tags is the user tagging them in the MLflow UI. This helper exists
+# for programmatic backfill.
+# ---------------------------------------------------------------------------
+
+
+def apply_trace_tags(
+    trace_ids: Iterable[str],
+    tags: Mapping[str, str],
+    *,
+    client: Any = None,
+    tracking_uri: str = "databricks",
+    registry_uri: str = "databricks-uc",
+    profile: str | None = None,
+) -> int:
+    """Set ``tags`` on each trace in ``trace_ids`` via the MLflow client.
+
+    Cohorts select traces by tag, so this is how traces get *into* a cohort
+    programmatically — e.g. backfilling ``ail.agent`` / ``ail.cohort`` onto an
+    existing run.
+
+    **The primary tagging path is the user, in the MLflow UI.** This write path
+    is a convenience for backfill, and it is the more privileged one: writing
+    trace tags on Databricks-managed MLflow needs workspace/warehouse **write**
+    access (the trace store is UC-backed) that the orchestration identity
+    running the loop may not hold. Expect a ``PermissionDenied`` here even when
+    the read path works; treat a failure as "tag it in the UI instead", not as a
+    loop-blocking error.
+
+    Args:
+        trace_ids: Trace ids to tag.
+        tags: ``{key: value}`` tags applied to every listed trace. Keys may be
+            the ``ail.*`` convention or any user-defined key.
+        client: An object exposing ``set_trace_tag(trace_id, key, value)`` —
+            normally an :class:`mlflow.MlflowClient`. Injectable so callers (and
+            tests) can supply their own; when ``None`` a client is built against
+            the configured Databricks workspace.
+        tracking_uri: MLflow tracking URI used only when ``client`` is ``None``.
+        registry_uri: MLflow registry URI used only when ``client`` is ``None``.
+        profile: Databricks CLI profile used only when ``client`` is ``None``.
+
+    Returns:
+        The number of ``(trace_id, key)`` tag writes performed.
+    """
+    if client is None:
+        client = _new_tag_client(tracking_uri, registry_uri, profile)
+    written = 0
+    for trace_id in trace_ids:
+        for key, value in tags.items():
+            client.set_trace_tag(trace_id, key, str(value))
+            written += 1
+    return written
+
+
+def _new_tag_client(tracking_uri: str, registry_uri: str, profile: str | None) -> Any:
+    """Build an MLflow client pointed at the configured Databricks workspace."""
+    try:
+        import mlflow
+        from mlflow import MlflowClient
+    except ImportError as exc:  # pragma: no cover - import guard
+        raise ImportError(
+            "apply_trace_tags requires mlflow. Install it with: pip install 'mlflow>=3.14,<4'"
+        ) from exc
+
+    if profile:
+        os.environ.setdefault("DATABRICKS_CONFIG_PROFILE", profile)
+    MLflowTraceSource._resolve_workspace_host()
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_registry_uri(registry_uri)
+    return MlflowClient()
