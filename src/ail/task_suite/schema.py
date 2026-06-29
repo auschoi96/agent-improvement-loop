@@ -143,14 +143,16 @@ class Task(_Frozen):
 
 
 def _hash_tasks(version: str, tasks: tuple[Task, ...]) -> str:
-    """A stable sha256 over the *content* of a suite (version + ordered tasks).
+    """A stable sha256 over the *content* of a suite (identity + ordered tasks).
 
-    Excludes the seal fields (``frozen``/``content_hash``/``created_at``) so the
-    hash is a property of what the suite contains, and is canonical (sorted keys,
-    no whitespace) so it is reproducible across processes.
+    Covers the benchmark identity (pool + schema/content version) and the ordered
+    tasks. Excludes the seal fields (``frozen``/``content_hash``/``created_at``)
+    so the hash is a property of what the suite *contains*, and is canonical
+    (sorted keys, no whitespace) so it is reproducible across processes.
     """
     payload = {
         "schema_version": SUITE_SCHEMA_VERSION,
+        "pool": Pool.TASK_SUITE.value,
         "version": version,
         "tasks": [task.model_dump(mode="json") for task in tasks],
     }
@@ -199,6 +201,24 @@ class TaskSuite(_Frozen):
                 )
         return self
 
+    def _rebuild(self, *, tasks: tuple[Task, ...], frozen: bool, content_hash: str) -> TaskSuite:
+        """Construct a fresh, **re-validated** suite from this one's identity.
+
+        Goes through the constructor (not ``model_copy``) so the
+        ``model_validator`` fires — ``model_copy(update=...)`` skips validators in
+        Pydantic v2, which would let a mutation slip an invariant (e.g. a
+        duplicate ``task_id``) past the checks.
+        """
+        return TaskSuite(
+            schema_version=self.schema_version,
+            version=self.version,
+            pool=self.pool,
+            created_at=self.created_at,
+            frozen=frozen,
+            content_hash=content_hash,
+            tasks=tasks,
+        )
+
     def freeze(self) -> TaskSuite:
         """Return a sealed copy: ``frozen=True`` with the content hash computed.
 
@@ -206,8 +226,10 @@ class TaskSuite(_Frozen):
         """
         if self.frozen:
             return self
-        return self.model_copy(
-            update={"frozen": True, "content_hash": _hash_tasks(self.version, self.tasks)}
+        return self._rebuild(
+            tasks=self.tasks,
+            frozen=True,
+            content_hash=_hash_tasks(self.version, self.tasks),
         )
 
     def with_task(self, task: Task) -> TaskSuite:
@@ -221,14 +243,15 @@ class TaskSuite(_Frozen):
         """Return a new (unfrozen) suite with ``tasks`` appended.
 
         Raises :class:`TaskSuiteFrozenError` if this suite is frozen — a frozen
-        benchmark does not grow.
+        benchmark does not grow. The result is re-validated, so appending a
+        duplicate ``task_id`` raises :class:`TaskSuiteError`.
         """
         if self.frozen:
             raise TaskSuiteFrozenError(
                 "the Task Suite is frozen and cannot be added to; the held-out benchmark "
                 "is immutable once sealed. Build a new version instead."
             )
-        return self.model_copy(update={"tasks": (*self.tasks, *tasks), "content_hash": ""})
+        return self._rebuild(tasks=(*self.tasks, *tasks), frozen=False, content_hash="")
 
     def task_ids(self) -> frozenset[str]:
         """The set of task ids in the suite (the Task-Suite side of the wall)."""

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from ail.task_suite.schema import TaskSuite, TaskSuiteFrozenError
+from ail.task_suite.schema import TaskSuite, TaskSuiteFrozenError, TaskSuiteIntegrityError
 
 __all__ = [
     "DEFAULT_ARTIFACT_VERSION",
@@ -75,19 +75,33 @@ def load_task_suite(
 ) -> TaskSuite:
     """Load, validate, and return the Task Suite at artifact ``version``.
 
-    Validation runs the full schema contract, including the frozen-integrity
-    check, so a missing file or a tampered frozen artifact raises rather than
-    returning a silently-wrong benchmark.
+    A *persisted* suite must always be sealed: there is **no** load path that
+    returns a suite whose ``content_hash`` was not verified. The schema's
+    frozen-integrity check verifies the hash when ``frozen`` is set, and this
+    loader additionally rejects any artifact that is **not** frozen — an
+    unfrozen on-disk artifact is itself a tamper/corruption signal (otherwise an
+    editor could mutate the tasks and flip ``frozen: true -> false`` to skip the
+    hash check entirely). Combined, the only artifact that loads is one that is
+    frozen *and* hashes to its stored ``content_hash``.
 
     Raises:
         FileNotFoundError: if the artifact does not exist.
-        TaskSuiteIntegrityError: if a frozen artifact's hash no longer matches.
+        TaskSuiteIntegrityError: if the artifact is not frozen, or a frozen
+            artifact's hash no longer matches its tasks.
     """
     path = task_suite_path(version, root=root)
     if not path.is_file():
         raise FileNotFoundError(f"no Task Suite artifact at {path}")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return TaskSuite.model_validate(data)
+    suite = TaskSuite.model_validate(data)  # frozen path verifies the content hash
+    if not suite.frozen:
+        raise TaskSuiteIntegrityError(
+            f"the Task Suite artifact at {path} is not frozen; a persisted suite must be "
+            "sealed (frozen=true with a matching content_hash). An unfrozen on-disk "
+            "artifact is a tamper/corruption signal — refusing to serve an unverified "
+            "benchmark."
+        )
+    return suite
 
 
 def dump_task_suite_yaml(suite: TaskSuite) -> str:

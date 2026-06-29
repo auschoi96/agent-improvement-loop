@@ -64,9 +64,12 @@ its tasks. The contract enforces immutability two ways:
 
 1. **In memory** — `TaskSuite` is a frozen Pydantic model; the mutation helpers
    (`with_task` / `with_tasks`) raise `TaskSuiteFrozenError` once frozen.
-2. **On disk** — loading recomputes the hash and raises `TaskSuiteIntegrityError`
-   if it disagrees with the stored one, so an edited frozen artifact fails
-   closed instead of serving a silently-mutated benchmark.
+2. **On disk** — `load_task_suite` recomputes the hash and raises
+   `TaskSuiteIntegrityError` if it disagrees with the stored one, so an edited
+   frozen artifact fails closed. It **also** rejects any artifact that is not
+   frozen: a persisted suite must be sealed, so flipping `frozen: true -> false`
+   to dodge the hash check is itself treated as tampering. There is no load path
+   that returns a suite without a verified hash.
 
 The hash is tamper *detection* for accidental drift and an integrity seal, not a
 cryptographic guarantee against a determined committer. The structural guarantee

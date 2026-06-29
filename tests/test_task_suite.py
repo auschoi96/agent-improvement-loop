@@ -118,6 +118,17 @@ def test_frozen_pydantic_model_blocks_attribute_assignment() -> None:
         frozen.version = "v2"  # type: ignore[misc]
 
 
+def test_with_tasks_re_validates_and_rejects_duplicate_ids() -> None:
+    # model_copy(update=...) skips validators in pydantic v2; with_tasks must
+    # construct a fresh, re-validated suite so the unique-id invariant holds.
+    suite = TaskSuite(version="v", tasks=(_task("a"),))
+    with pytest.raises(TaskSuiteError) as ei:
+        suite.with_task(_task("a"))
+    assert "duplicate" in str(ei.value).lower()
+    with pytest.raises(TaskSuiteError):
+        suite.with_tasks([_task("b"), _task("b")])
+
+
 def test_frozen_suite_with_tampered_hash_fails_integrity() -> None:
     frozen = TaskSuite(version="v", tasks=(_task("a"),)).freeze()
     # Reconstructing the frozen suite with edited tasks but the old hash must
@@ -162,6 +173,41 @@ def test_loading_tampered_on_disk_artifact_raises(tmp_path) -> None:
 
     data = yaml.safe_load(path.read_text())
     data["tasks"][0]["prompt"] = "smuggled-in edit"  # tamper, keep the old hash
+    path.write_text(yaml.safe_dump(data))
+
+    with pytest.raises(TaskSuiteIntegrityError):
+        load_task_suite("v1", root=tmp_path)
+
+
+def test_loading_unfrozen_artifact_is_rejected(tmp_path) -> None:
+    # A persisted suite must be sealed; an unfrozen on-disk artifact is a
+    # tamper/corruption signal and must not load (no unverified-hash load path).
+    unfrozen = build_seed_suite()  # not frozen
+    assert not unfrozen.frozen
+    save_task_suite(unfrozen, "v1", root=tmp_path)
+    with pytest.raises(TaskSuiteIntegrityError):
+        load_task_suite("v1", root=tmp_path)
+
+
+def test_tamper_then_flip_frozen_false_is_rejected(tmp_path) -> None:
+    # The exact bypass: edit the tasks AND flip `frozen: true -> false` to dodge
+    # the hash check. The load path rejects the unfrozen artifact regardless.
+    suite = build_seed_suite().freeze()
+    save_task_suite(suite, "v1", root=tmp_path)
+    path = task_suite_path("v1", root=tmp_path)
+
+    data = yaml.safe_load(path.read_text())
+    data["tasks"].append(
+        {
+            "task_id": "smuggled",
+            "prompt": "train me",
+            "category": "typical_short_session",
+            "source_trace_id": "x",
+            "difficulty": "easy",
+            "notes": "",
+        }
+    )
+    data["frozen"] = False  # flip the flag to try to skip integrity
     path.write_text(yaml.safe_dump(data))
 
     with pytest.raises(TaskSuiteIntegrityError):

@@ -3,7 +3,7 @@ version: v1-seed
 pool: task_suite
 created_at: '2026-06-29T00:00:00+00:00'
 frozen: true
-content_hash: db7b6089c25f462cbc3be4575b47134afd87abf896928e49ff2de1fb6620f887
+content_hash: 7b444fabb13c5eb81247663e48dfb6dbb1696c428d6aa8fc34a5fe79d9431746
 tasks:
 - task_id: ts-001
   prompt: 'In the omniagent/agent-framework repository, carry an end-to-end change to completion: update
