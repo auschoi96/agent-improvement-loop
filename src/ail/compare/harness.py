@@ -25,6 +25,14 @@ correctness guardrail is **non-regression** relative to the baseline: a candidat
 is blocked if it makes correctness *worse*, not because the baseline was already
 imperfect.
 
+**Fail closed on execution failure.** Before correctness, an execution-success
+guardrail blocks the promotion unless **both** the baseline and the candidate
+ran to success. This closes a "fake-good" hole: a crashed candidate uses few
+tokens precisely because it did nothing, so its apparent token "reduction" must
+never count as an improvement, and a failed baseline makes the comparison itself
+untrustworthy. A failed run is a first-class fail-closed condition, not a note —
+alongside the un-scorable-guardrail case.
+
 **Interim guardrail (documented, not faked).** The correctness guardrail uses the
 **BASE** correctness judge from :mod:`ail.judges.scorers` (plus any available L1
 programmatic signal) TODAY, because the reference experiment has zero human
@@ -78,6 +86,9 @@ __all__ = [
     "compare_candidate",
 ]
 
+#: Name of the execution-success guardrail check on the result (fails closed when
+#: either agent run did not succeed).
+EXECUTION_GUARDRAIL = "execution"
 #: Name of the correctness guardrail check on the result.
 CORRECTNESS_GUARDRAIL = "correctness"
 #: Name of the (optional) L1 programmatic guardrail check on the result.
@@ -218,22 +229,14 @@ def _build_deltas(
 ) -> tuple[list[MetricDelta], list[str]]:
     """Per-metric baseline-vs-candidate deltas for the L0 tokens/cost/redundancy."""
     notes: list[str] = []
-    deltas = [
-        _delta(
-            "total_tokens", "tokens", baseline.tokens.total_tokens, candidate.tokens.total_tokens
-        ),
-        _delta(
-            "input_tokens", "tokens", baseline.tokens.input_tokens, candidate.tokens.input_tokens
-        ),
-        _delta(
-            "output_tokens", "tokens", baseline.tokens.output_tokens, candidate.tokens.output_tokens
-        ),
-        _delta(
-            "cache_total_tokens",
-            "tokens",
-            baseline.tokens.cache_total_tokens,
-            candidate.tokens.cache_total_tokens,
-        ),
+    # Token deltas iterate the TokenBreakdown fields rather than hardcoding names,
+    # so a future ail.metrics token category is picked up automatically instead of
+    # being silently dropped. (Cost and redundancy are structured, not flat token
+    # counts, so they stay explicit below.)
+    base_tokens = baseline.tokens.model_dump()
+    cand_tokens = candidate.tokens.model_dump()
+    deltas = [_delta(name, "tokens", base_tokens[name], cand_tokens[name]) for name in base_tokens]
+    deltas += [
         _delta("total_tool_calls", "calls", baseline.total_tool_calls, candidate.total_tool_calls),
         _delta(
             "redundancy_rate",
@@ -282,6 +285,52 @@ def _objective_met(delta: MetricDelta, min_reduction_pct: float) -> bool:
 # ---------------------------------------------------------------------------
 # Guardrails (anti-co-adaptation gate)
 # ---------------------------------------------------------------------------
+
+
+def _execution_guardrail(
+    baseline_result: AgentRunResult, candidate_result: AgentRunResult
+) -> GuardrailCheck:
+    """Fail closed unless BOTH agent runs succeeded — the most fundamental guardrail.
+
+    A comparison is only trustworthy when the baseline *and* the candidate
+    actually ran to success. A crashed or failed candidate can post a spurious
+    token "reduction" — it did less work, or nothing — which must **never** count
+    as an improvement; a failed baseline makes the whole comparison untrustworthy.
+    Either way the recommendation must be ``BLOCK``. This sits first in the
+    guardrail list and, like the un-scorable correctness branch, is a first-class
+    fail-closed decision input rather than a mere note. ``regressed`` marks the
+    specific "baseline succeeded, candidate broke" case; a failed baseline is
+    un-comparable, not a measured regression.
+    """
+    baseline_ok = bool(baseline_result.success)
+    candidate_ok = bool(candidate_result.success)
+    passed = baseline_ok and candidate_ok
+    if passed:
+        reason = "both agent runs succeeded"
+    else:
+        failed = []
+        if not baseline_ok:
+            failed.append(f"baseline failed ({baseline_result.error or 'no detail'})")
+        if not candidate_ok:
+            failed.append(f"candidate failed ({candidate_result.error or 'no detail'})")
+        reason = (
+            "agent run failure ("
+            + "; ".join(failed)
+            + "); failing closed — a failed run's token change is not a real improvement, and a "
+            "failed baseline makes the comparison untrustworthy"
+        )
+    return GuardrailCheck(
+        name=EXECUTION_GUARDRAIL,
+        passed=passed,
+        reason=reason,
+        baseline_value=baseline_ok,
+        candidate_value=candidate_ok,
+        regressed=baseline_ok and not candidate_ok,
+        judge_name=None,
+        interim=False,
+        interim_note=None,
+    )
+
 
 # Map a correctness verdict (categorical yes/no, bool, or 0/1) to an order so
 # "did it regress" is a comparison. Anything unrecognized is None (un-scorable),
@@ -506,13 +555,16 @@ def compare_candidate(
     objective_met = _objective_met(objective_delta, cfg.min_token_reduction_pct)
 
     judge = correctness_judge if correctness_judge is not None else _default_correctness_judge()
+    # Execution success is the most fundamental gate (a failed run is untrustworthy
+    # and its token "savings" are not real), so it leads the guardrail list.
     guardrails = [
+        _execution_guardrail(baseline_result, candidate_result),
         _correctness_guardrail(
             judge,
             case=case,
             baseline_result=baseline_result,
             candidate_result=candidate_result,
-        )
+        ),
     ]
     if programmatic_check is not None:
         guardrails.append(
@@ -522,6 +574,8 @@ def compare_candidate(
         )
 
     guardrails_passed = all(g.passed for g in guardrails)
+    # PROMOTE requires the objective met AND every guardrail passed — which now
+    # includes execution success, so a crashed candidate can never be promoted.
     promote = objective_met and guardrails_passed
     recommendation = Recommendation.PROMOTE if promote else Recommendation.BLOCK
 
@@ -531,13 +585,6 @@ def compare_candidate(
         objective_delta=objective_delta,
         guardrails=guardrails,
     )
-
-    if not baseline_result.success or not candidate_result.success:
-        notes.append(
-            f"agent run(s) reported failure (baseline success={baseline_result.success}, "
-            f"candidate success={candidate_result.success}); metrics/guardrails reflect the "
-            "captured traces as-is"
-        )
 
     return ComparisonResult(
         task_id=case.case_id,

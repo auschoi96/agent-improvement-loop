@@ -26,6 +26,7 @@ import pytest
 
 from ail.compare import (
     CORRECTNESS_GUARDRAIL,
+    EXECUTION_GUARDRAIL,
     INTERIM_JUDGE_NOTE,
     PROGRAMMATIC_GUARDRAIL,
     CallableIntervention,
@@ -353,7 +354,67 @@ class TestGuardrails:
             programmatic_check=lambda r: ProgrammaticSignal(name="pytest", passed=True),
         )
         assert result.recommendation is Recommendation.PROMOTE
-        assert len(result.guardrails) == 2
+        # execution + correctness + programmatic
+        assert len(result.guardrails) == 3
+
+    def test_failed_candidate_run_blocks_even_with_token_drop(self) -> None:
+        # A crashed candidate uses few tokens *because it did nothing*; its apparent
+        # token "reduction" must never count as an improvement -> fail closed.
+        baseline = _run(trace_id="base", output="baseline: 42", input_tokens=100_000)
+        candidate = _run(trace_id="cand", output="candidate: 42", input_tokens=1_000, success=False)
+        adapter = ScriptedAdapter(baseline, candidate)
+        judge = FakeJudge({"baseline: 42": "yes", "candidate: 42": "yes"})  # correctness "held"
+
+        result = compare_candidate(
+            _case(), adapter, intervention=use_tool_intervention(), correctness_judge=judge
+        )
+
+        assert result.objective_met is True  # tokens did fall (the agent did nothing)
+        assert result.recommendation is Recommendation.BLOCK
+        execution = result.guardrail_for(EXECUTION_GUARDRAIL)
+        assert execution is not None and execution.passed is False
+        assert execution.regressed is True  # baseline ran, candidate broke
+        assert execution.candidate_value is False and execution.baseline_value is True
+        assert any("guardrail 'execution' failed" in r for r in result.reasons)
+        assert result.guardrails_passed is False
+
+    def test_failed_baseline_run_blocks(self) -> None:
+        # A failed baseline makes the comparison itself untrustworthy -> BLOCK.
+        baseline = _run(trace_id="base", output="baseline: 42", input_tokens=100_000, success=False)
+        candidate = _run(trace_id="cand", output="candidate: 42", input_tokens=60_000)
+        adapter = ScriptedAdapter(baseline, candidate)
+        judge = FakeJudge({"baseline: 42": "yes", "candidate: 42": "yes"})
+
+        result = compare_candidate(
+            _case(), adapter, intervention=use_tool_intervention(), correctness_judge=judge
+        )
+
+        assert result.recommendation is Recommendation.BLOCK
+        execution = result.guardrail_for(EXECUTION_GUARDRAIL)
+        assert execution is not None and execution.passed is False
+        assert execution.regressed is False  # un-comparable, not a measured regression
+        assert execution.baseline_value is False
+
+    def test_crashed_candidate_not_promoted_even_when_baseline_was_wrong(self) -> None:
+        # The exact exploit: baseline is WRONG (rank 0) at 100k tokens; the candidate
+        # crashes (success=False) at near-zero tokens. Token "savings" + correctness
+        # 0 < 0 == False ("not regressed") previously yielded PROMOTE. It must BLOCK.
+        baseline = _run(trace_id="base", output="wrong baseline", input_tokens=100_000)
+        candidate = _run(trace_id="cand", output="crashed", input_tokens=10, success=False)
+        adapter = ScriptedAdapter(baseline, candidate)
+        judge = FakeJudge({"wrong baseline": "no", "crashed": "no"})
+
+        result = compare_candidate(
+            _case(), adapter, intervention=use_tool_intervention(), correctness_judge=judge
+        )
+
+        assert result.objective_met is True
+        correctness = result.guardrail_for(CORRECTNESS_GUARDRAIL)
+        assert correctness is not None and correctness.regressed is False  # 0 vs 0
+        # ...but execution failed, so the broken candidate is BLOCKED, not promoted.
+        assert result.recommendation is Recommendation.BLOCK
+        execution = result.guardrail_for(EXECUTION_GUARDRAIL)
+        assert execution is not None and execution.passed is False
 
 
 # ---------------------------------------------------------------------------
@@ -448,16 +509,6 @@ class TestObjectiveAndDeltas:
         # First run is the baseline (no marker); second is the candidate (marked).
         assert adapter.tasks[0].params.get(_CANDIDATE_MARKER) is None
         assert adapter.tasks[1].params.get(_CANDIDATE_MARKER) == "candidate"
-
-    def test_failed_run_is_noted(self) -> None:
-        baseline = _run(trace_id="base", output="b: 42", input_tokens=100_000)
-        candidate = _run(trace_id="cand", output="c: 42", input_tokens=60_000, success=False)
-        adapter = ScriptedAdapter(baseline, candidate)
-        judge = FakeJudge({"b: 42": "yes", "c: 42": "yes"})
-        result = compare_candidate(
-            _case(), adapter, intervention=use_tool_intervention(), correctness_judge=judge
-        )
-        assert any("reported failure" in n for n in result.notes)
 
 
 # ---------------------------------------------------------------------------

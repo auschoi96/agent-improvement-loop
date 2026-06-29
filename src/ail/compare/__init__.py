@@ -30,6 +30,7 @@ from ail.compare.contract import (
 )
 from ail.compare.harness import (
     CORRECTNESS_GUARDRAIL,
+    EXECUTION_GUARDRAIL,
     PROGRAMMATIC_GUARDRAIL,
     CallableIntervention,
     ComparisonConfig,
@@ -60,6 +61,7 @@ __all__ = [
     "CallableIntervention",
     "ProgrammaticSignal",
     "ProgrammaticCheck",
+    "EXECUTION_GUARDRAIL",
     "CORRECTNESS_GUARDRAIL",
     "PROGRAMMATIC_GUARDRAIL",
     # monitoring warehouse
