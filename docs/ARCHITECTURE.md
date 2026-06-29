@@ -114,7 +114,7 @@ agent-improvement-loop/
 │   │       ├── claude_code.py  # CLEAN-ROOM original (public claude-agent-sdk + mlflow)
 │   │       └── codex.py        # NEW Codex→MLflow capture
 │   ├── pools/                  # frozen wall: task_suite / alignment_set / human_anchor
-│   ├── groundtruth/            # HARVEST ai-dev-kit grp/ + skillforge GroundTruthV5 schema
+│   ├── groundtruth/            # CLEAN-ROOM GRP (capture→execute→approve→promote) + own schema
 │   ├── metrics/                # l0_deterministic (NEW) · l1_programmatic · l2_judged (HARVEST) · l3_rlm (DEFER)
 │   ├── judges/                 # make_judge factory + memalign  (HARVEST)
 │   ├── optimize/               # gepa_runner (HARVEST) + assets/ (metric-view/tool/skill/pipeline generators)
@@ -135,20 +135,24 @@ Verified independently by Claude Code and Codex/GPT-5 against
 | `make_judge` scorers | ai-dev-kit | HARVEST | `optimize/judges.py:46,421` |
 | MemAlign `judge.align()` | ai-dev-kit | HARVEST | `optimize/alignment.py:83` |
 | MLflow `search_traces` ingestion | public mlflow | CLEAN-ROOM (original) | `src/ail/ingest/mlflow_source.py` · public `mlflow.search_traces` |
-| GRP capture→approve→**promote** | ai-dev-kit | HARVEST (see note) | `grp/pipeline.py` + separate `promote_approved()` |
+| GRP capture→approve→**promote** | ai-dev-kit | CLEAN-ROOM (original; see note) | `src/ail/groundtruth/` · separate `promote_approved()` |
 | Claude Code adapter (`ClaudeSDKClient`) | public claude-agent-sdk | CLEAN-ROOM (original) | `src/ail/ingest/adapters/claude_code.py` · public `claude-agent-sdk` |
 | e2e "quality up + tokens down" test | ai-dev-kit | REFERENCE (template for Phase 2) | `tests/test_optimize_e2e.py::test_optimize_improves_quality_and_reduces_tokens` |
-| `GroundTruthV5` schema (`sources`+`regression_intent` required) | SkillForge | HARVEST | `eval/schema.py` |
+| Ground-truth schema (`sources`+`regression_intent` required) | SkillForge `GroundTruthV5` | CLEAN-ROOM (own schema; concept only, not read) | `src/ail/groundtruth/schema.py` |
 | `/forge` Designer⇄Critic case design | SkillForge | REFERENCE | `/forge`, `/forge-author` skills |
 | Claude-Code trace parser, autolog | ai-dev-kit | SKIP/REPLACE (not agent-agnostic) | `trace/source.py`, `trace/parser.py` |
 | RLM deep review | DSPy / HALO | DEFER (experimental, needs Deno runtime) | — |
 
-**GRP note (verified PARTIAL):** `grp_interactive()` generates a candidate and
-*requires* humanreview (`expectations: {}` filled by the reviewer), but does
-**not** itself persist/promote — promotion is a separate `promote_approved()`
-call. No LLM synthesis of expected outputs exists anywhere in the repo (that
-property is exactly why we harvest GRP). When we harvest, the promote step is
-wired explicitly.
+**GRP note (Wave 1a — built clean-room):** the upstream GRP pattern requires
+human review (`expectations: {}` filled by the reviewer) and keeps promotion as
+a separate step, with no LLM synthesis of expected outputs anywhere — that
+property is exactly why the pattern is worth reusing. We **reimplemented it from
+scratch** in `src/ail/groundtruth/` (capture → execute → human-approve →
+`promote_approved`) rather than harvesting code, because the SkillForge schema's
+license is undeclared and the ai-dev-kit `grp/` is under a non-OSI license (see
+`PROVENANCE.md`). The no-synthesis invariant is enforced structurally
+(expectations are written only by the human-gate `approve` stage) and asserted
+by tests.
 
 ## 8. Grounded baseline (reference deployment, experiment 660599403165942)
 
