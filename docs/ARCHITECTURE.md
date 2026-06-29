@@ -50,11 +50,13 @@ Lead with what is irrefutable; gate the subjective behind calibration.
 - **L2 — Judged**: LLM-as-judge scorers (correctness, modularity,
   groundedness) built with MLflow `make_judge`, aligned via MemAlign, and
   validated against the Human Anchor.
-- **L3 — RLM deep review** (DEFERRED / research): recursive-LM reads full long
-  traces to *discover* failure modes a fixed scorer misses — used to decide
-  *what to fix / what scorer to add*, never to score the leaderboard. The chosen
-  in-platform path is an MLflow `{{ trace }}` judge (`make_judge`), not a Deno
-  RLM runtime — see §11.
+- **L3 — RLM deep review** (ADOPTED — HALO): a trace-specialized Recursive LM
+  reads *whole* long traces (this corpus reaches 943K tokens, far past any single
+  judge call's context) to *discover* token waste and failure modes a fixed
+  scorer misses — used to decide *what to fix / what scorer to add*, never to
+  score the leaderboard. Realized by **adopting HALO** (`halo-engine`, MIT) as a
+  dependency behind a thin MLflow adapter (`src/ail/l3/`), **not** by
+  reimplementing an engine — see §11.
 
 ## 4. The loop
 
@@ -117,8 +119,9 @@ agent-improvement-loop/
 │   │       └── codex.py        # NEW Codex→MLflow capture
 │   ├── pools/                  # frozen wall: task_suite / alignment_set / human_anchor
 │   ├── groundtruth/            # CLEAN-ROOM GRP (capture→execute→approve→promote) + own schema
-│   ├── metrics/                # l0_deterministic (NEW) · l1_programmatic · l2_judged (HARVEST) · l3_rlm (DEFER)
+│   ├── metrics/                # l0_deterministic (NEW) · l1_programmatic · l2_judged
 │   ├── judges/                 # make_judge factory + memalign  (HARVEST)
+│   ├── l3/                     # L3 recursive trace reviewer: HALO adapter + verdict + reviewer (ADOPT halo-engine)
 │   ├── optimize/               # gepa_runner (HARVEST) + assets/ (metric-view/tool/skill/pipeline generators)
 │   ├── goals/compiler.py       # NL goal → objective + metrics + guardrails  (NEW)
 │   └── loop/controller.py      # diagnose → intervene → eval-on-frozen-suite → human-gate → promote
@@ -144,7 +147,7 @@ Verified independently by Claude Code and Codex/GPT-5 against
 | Ground-truth schema (`sources`+`regression_intent` required) | SkillForge `GroundTruthV5` | CLEAN-ROOM (own schema; concept only, not read) | `src/ail/groundtruth/schema.py` |
 | `/forge` Designer⇄Critic case design | SkillForge | REFERENCE | `/forge`, `/forge-author` skills |
 | Claude-Code trace parser, autolog | ai-dev-kit | SKIP/REPLACE (not agent-agnostic) | `trace/source.py`, `trace/parser.py` |
-| RLM deep review | DSPy / HALO | DEFER (experimental, needs Deno runtime) | — |
+| RLM deep review (L3 trace reviewer) | HALO (`halo-engine`, MIT) | ADOPT (dependency, not vendored; thin MLflow adapter) | `src/ail/l3/` · `PROVENANCE.md` / `NOTICE` |
 
 **GRP note (Wave 1a — built clean-room):** the upstream GRP pattern requires
 human review (`expectations: {}` filled by the reviewer) and keeps promotion as
@@ -196,9 +199,12 @@ Two consequences:
 - **Phase 4 — Observability product (Databricks App).** Live leaderboard, NL
   goal compiler, judge-human agreement trend + drift alarm, per-intervention
   attribution, per-step human feedback into MemAlign + GEPA.
-- **Phase 5 — RLM deep review (research, optional).** Gated behind
-  demonstrated value, not built early because HALO/RLM were mentioned. Take the
-  recursive-review *idea*, not a Deno dependency.
+- **Phase 5 — RLM deep review (HALO, delivered).** The L3 recursive trace
+  reviewer adopts HALO (`halo-engine`) behind a thin MLflow adapter
+  (`src/ail/l3/`): it reviews arbitrarily-large traces and attaches a structured
+  verdict to the subject trace. Demonstrated end-to-end on a real 549K-token
+  session in experiment 660599403165942. Deno stays a *soft* dependency (only
+  HALO's `run_code` tool); the engine and the reviewer run without it.
 
 Milestone 1 = Phase 0 + Phase 1 + the Phase 2 token slice. See
 [`MILESTONE-1.md`](MILESTONE-1.md).
@@ -207,7 +213,12 @@ Milestone 1 = Phase 0 + Phase 1 + the Phase 2 token slice. See
 
 - **Codex trace capture is net-new** and a hard dependency for the Example 2
   lane. Accepted as core scope.
-- **RLM** is experimental and needs a Deno runtime; deferred.
+- **RLM / L3** is delivered by adopting HALO (`halo-engine`, MIT) as a
+  dependency (`src/ail/l3/`); Deno is a *soft* dep (HALO's `run_code` tool only)
+  and the reviewer runs without it. The remaining live dependency is an
+  OpenAI-compatible chat endpoint for the judge model — Databricks FMAPI works
+  (note: HALO sends `parallel_tool_calls`, which Databricks *Claude* endpoints
+  reject but *GPT* endpoints accept; see §11).
 - **Cross-vendor review** depends on ≥2 vendors being available (Claude +
   Codex confirmed working; `pi` needs a provider login to serve as a third
   reviewer).
@@ -249,12 +260,25 @@ keep deterministic and un-gameable. Keeping the reviewer's spans in a separate
 trace keeps the agent's L0 cost exactly the agent's, and makes the cost of
 *judging* separately measurable.
 
-**4. Trace-based judges are the chosen RLM path (no Deno).** `make_judge`
-accepts a `{{ trace }}` template, so a judge can read an entire long trace and
-discover failure modes a fixed input/output rubric misses. That is the
-**in-platform equivalent of the deferred RLM / HALO recursive review** (§3 L3,
-§9 Phase 5) — the recursive-review *idea* realized through MLflow trace judges
-rather than a separate Deno runtime. A `{{ trace }}` deep-review judge still
-obeys rules 1–3: it attaches its verdict to the subject trace and runs its own
-review as a separate, linked trace. This is the recorded RLM direction; the
-Deno-based RLM dependency stays deferred.
+**4. HALO is the chosen RLM path for L3 (`src/ail/l3/`).** An MLflow `make_judge`
+`{{ trace }}` template lets a judge read a whole trace in one call — fine when
+the trace *fits* a judge call's context, but this corpus has traces of 549K and
+943K tokens that do **not** fit any single call, so a flat `{{ trace }}` judge
+cannot read them. L3 therefore **adopts HALO** (`halo-engine`, MIT): a
+trace-specialized Recursive LM that indexes the trace by byte offset and
+navigates it with bounded tools, recursive subagents, and compaction, so an
+arbitrarily-large trace is reviewed without overflowing context. AIL adds only a
+thin layer, not an engine: `mlflow_trace_to_otlp_jsonl` (MLflow trace →
+OpenInference/OTLP `SpanRecord` JSONL that HALO indexes), `review_trace` (run
+HALO against an OpenAI-compatible Databricks FMAPI endpoint → parse its
+free-text `<final/>` report into a structured `HaloReviewVerdict`), and the
+attachment. HALO obeys rules 1–3 above: its verdict is an `LLM_JUDGE` assessment
+(name `l3_halo_review`) on the **subject** trace, and HALO's own work runs as a
+**separate** MLflow trace linked by `reviewer_trace_id` — never nested, so the
+subject's L0 `tokenUsage` stays exactly the agent's. (Demonstrated on the real
+549K-token trace `…/14da0deab1fee461c836a529d9f1e5ae`: subject `tokenUsage`
+unchanged at 549,300; verdict `token_waste_score=82` attached; HALO's review in
+its own trace.) This **supersedes** the earlier framing that deferred RLM behind
+a Deno runtime and that treated a flat `{{ trace }}` judge as the in-platform RLM
+equivalent — that judge cannot read a 943K-token trace; HALO can. (`make_judge`
+`{{ trace }}` judges remain useful at L2 for traces that *do* fit a single call.)

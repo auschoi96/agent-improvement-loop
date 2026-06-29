@@ -187,7 +187,38 @@ here — earlier it was asserted but not actually written down.
   original work in `src/ail/groundtruth/`.
 - SkillForge `/forge`, `/forge-author` skills — methodology reference only.
 - ai-dev-kit builder app — UI reference only.
-- DSPy `RLM`, HALO — design inspiration only (deferred).
+- DSPy `RLM` — design inspiration only (deferred).
+
+## Adopted third-party dependencies (NOT vendored)
+
+These are used through their published package and public API; their source is
+**not** copied into this repository. Attribution also lives in `NOTICE`.
+
+| Dependency | License | Used by | How |
+|---|---|---|---|
+| **HALO** (`halo-engine`, [context-labs/halo](https://github.com/context-labs/halo)) | **MIT** | `src/ail/l3/` | The L3 recursive trace reviewer **adopts** HALO as the trace-specialized Recursive LM engine (byte-offset index + bounded navigation tools + recursive subagents + compaction) so arbitrarily large traces (this corpus reaches 943K tokens) can be reviewed without exceeding a single judge call's context. We **do not reimplement or vendor the engine**: it is the optional `l3` extra (`pip install 'ail[l3]'`), lazy-imported. AIL contributes only original glue around it — see the L3 row below. |
+
+### L3 recursive trace reviewer (`src/ail/l3/`) — clean-room note
+
+`src/ail/l3/` is 100% original work authored for this repository. It contains
+**no** code copied from `context-labs/halo` (or any other source); it only
+*calls* HALO's published public API (`engine.main.run_engine`, `EngineConfig`,
+`ModelConfig`, `ModelProviderConfig`, `AgentConfig`, `AgentMessage`,
+`AgentOutputItem`, and the `SpanRecord` JSONL input shape) as a dependency, and
+consumes this repo's own ingestion types (`ail.ingest`) and the public
+`mlflow` / `mlflow.genai` assessment APIs (`mlflow.log_feedback`,
+`AssessmentSource`). The OpenInference/OTLP `SpanRecord` mapping, the structured
+verdict contract, the free-text-report parser, the own-trace token isolation,
+and the verdict-on-subject-trace attachment are all this repository's design.
+
+| Module | Description |
+|---|---|
+| `src/ail/l3/contract.py` | L3 verdict output contract (pydantic v2, `extra="forbid"`): `HaloReviewVerdict`, `RedundancyFinding`, `FailureMode`. **Original.** |
+| `src/ail/l3/adapter.py` | MLflow trace -> OpenInference/OTLP `SpanRecord` JSONL adapter (`mlflow_trace_to_otlp_jsonl`, `normalized_trace_to_span_records`). **Original.** |
+| `src/ail/l3/parser.py` | Parse HALO's free-text `<final/>`-terminated report into a `HaloReviewVerdict`. **Original.** |
+| `src/ail/l3/reviewer.py` | `review_trace`: run HALO under its **own** MLflow trace (token isolation), parse, attach the verdict to the subject trace as an `LLM_JUDGE` feedback assessment linked by `reviewer_trace_id`. **Original.** |
+| `src/ail/l3/selection.py` | Pick which traces to review (top-N by tokens / above a token threshold) — L3 is expensive, so review the biggest/most-interesting, not every trace. **Original.** |
+| `tests/test_l3_adapter.py`, `tests/test_l3_parser.py`, `tests/test_l3_reviewer.py` | Tests for the L3 layer (HALO engine + model + feedback logging mocked; the live e2e is `@pytest.mark.live`). **Original.** |
 
 ## Rules
 

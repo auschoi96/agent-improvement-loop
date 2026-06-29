@@ -40,6 +40,14 @@ claude = ["claude-agent-sdk>=0.1.39"]
 # ground truth, judge construction) installs without this heavy dependency
 # (boto3/tiktoken/...); only operators registering scorers need it.
 agents = ["databricks-agents>=1.11,<2"]
+# L3 recursive trace reviewer (src/ail/l3/) ADOPTS HALO (context-labs/halo, MIT)
+# as a dependency — the trace-specialized Recursive LM that reviews arbitrarily
+# large traces (this corpus reaches 943K tokens) without exceeding any single
+# judge call's context. Optional + lazy-imported so core + CI stay lean and
+# importable without it (HALO pulls openai-agents, a pinned deno binary,
+# pandas/numpy); only L3 review needs it. HALO is a DEPENDENCY, never vendored —
+# see PROVENANCE.md / NOTICE.
+l3 = ["halo-engine>=0.1.26,<0.2"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
@@ -86,6 +94,6 @@ strict_equality = true
 # = skip`` keeps mypy from descending into them (and into their transitive deps
 # such as numpy, whose stubs use 3.12-only syntax).
 [[tool.mypy.overrides]]
-module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*"]
+module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*"]
 ignore_missing_imports = true
 follow_imports = "skip"

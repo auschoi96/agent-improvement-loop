@@ -1,0 +1,15 @@
+{
+  "subject_trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/14da0deab1fee461c836a529d9f1e5ae",
+  "subject_tokens_total": 549300,
+  "subject_model": "claude-opus-4-8",
+  "reviewer_trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/995a318a63fee7ed845a2e175e2d357e",
+  "judge_model": "databricks-gpt-5-mini",
+  "experiment_id": "660599403165942",
+  "assessment_id": "a-908f5c1993e2457c9fc15cfd78435181",
+  "assessment_name": "l3_halo_review",
+  "assessment_source_type": "LLM_JUDGE",
+  "assessment_value_token_waste_score": 82.0,
+  "assessment_token_efficiency": "poor",
+  "assessment_schema_version": "l3.halo/v1",
+  "assessment_has_verdict_json": true
+}

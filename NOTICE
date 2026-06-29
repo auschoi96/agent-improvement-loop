@@ -1,0 +1,23 @@
+agent-improvement-loop
+Copyright the agent-improvement-loop authors.
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+------------------------------------------------------------------------------
+Third-party dependencies
+------------------------------------------------------------------------------
+
+This project depends on, but does NOT vendor or copy, the following components.
+Each is installed from its published package and used through its public API;
+its source is not included in this repository.
+
+HALO (halo-engine)
+  - Project:  context-labs/halo  (https://github.com/context-labs/halo)
+  - Package:  halo-engine on PyPI
+  - License:  MIT
+  - Used by:  src/ail/l3/ — the L3 recursive trace reviewer adopts HALO as the
+              trace-specialized Recursive LM engine. AIL adds only a thin MLflow
+              adapter (MLflow trace -> OpenInference/OTLP SpanRecord JSONL), a
+              structured-verdict parser, and the reviewer/attachment glue. The
+              HALO engine itself is an optional dependency (the `l3` extra),
+              lazy-imported, and is neither vendored nor reimplemented here.
