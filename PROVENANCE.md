@@ -81,6 +81,37 @@ the intended Apache-2.0 release.
 | `src/ail/metrics/report.py` | Single-entrypoint baseline report + Example 1 reproduction. **Original.** |
 | `docs/L0_METRICS_CONTRACT.md` | Prose spec of the L0 contract. **Original.** |
 | `tests/test_l0_metrics.py`, `tests/test_report.py` | Tests for the above. **Original.** |
+| `src/ail/judges/pools.py` | Frozen-evaluation-wall pool types (`Pool`, `AlignmentSet`, `HumanAnchor`, `assert_pools_disjoint`). **Original.** |
+| `src/ail/judges/scorers.py` | L2 `make_judge` scorer factory (correctness/modularity/groundedness). **Original.** |
+| `src/ail/judges/alignment.py` | MemAlign `judge.align` wrapper + `build_memalign_optimizer`. **Original.** |
+| `src/ail/judges/agreement.py` | Judge-vs-human agreement metric with a configurable floor. **Original.** |
+| `src/ail/judges/contract.py` | L2 judges output contract (pydantic v2 schema). **Original.** |
+| `docs/L2_JUDGES_CONTRACT.md` | Prose spec of the L2 judges layer. **Original.** |
+| `tests/test_judges.py` | Tests for the L2 judges layer (judge/LLM calls mocked offline). **Original.** |
+
+### L2 judges layer — clean-room against public MLflow GenAI APIs only
+
+The `src/ail/judges/` package (Wave 1c) is **original clean-room work**. It was
+written **without reading, cloning, fetching, browsing, or grepping**
+`databricks-solutions/ai-dev-kit` or `databricks-field-eng/skillforge` in any
+way — their judge/alignment ideas were referenced *conceptually* only (the
+HARVEST entries for `make_judge`/MemAlign in `docs/ARCHITECTURE.md` §7 describe
+those upstreams as inspiration; **no code was harvested** for this package). All
+code was re-derived solely from (a) this repository's own interfaces and (b) the
+**public** OSS MLflow GenAI API:
+
+- **`mlflow`** (OSS, Apache-2.0), pin `mlflow>=3.14,<4`, resolved/verified
+  against **3.14.0**:
+  `mlflow.genai.judges.make_judge` (and its `feedback_value_type` / template-
+  variable contract), `mlflow.genai.judges.Judge.align(traces=, optimizer=)`,
+  `mlflow.genai.judges.optimizers.MemAlignOptimizer`,
+  `mlflow.genai.judges.CategoricalRating`, `mlflow.entities.assessment.Feedback`
+  (its `.value`), and `mlflow.log_metric` / `mlflow.log_dict`.
+- **pydantic v2** for the output contract (`AgreementReport` / `AlignmentReport`).
+
+The scorer rubrics in `scorers.py` are original prose authored for this project.
+MemAlign's `dspy` requirement is isolated behind a lazy import so the package
+imports — and the offline test suite runs — without `dspy` or any live model.
 
 Cost prices in `l0_deterministic.py` are *data*, not code: base input/output
 rates are attributed to the Claude API pricing reference (the `claude-api`
