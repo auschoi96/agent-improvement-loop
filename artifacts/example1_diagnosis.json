@@ -1,0 +1,324 @@
+{
+  "schema_version": "l0.metrics/v1",
+  "experiment_id": "660599403165942",
+  "generated_at": "2026-06-29T08:54:10.927851+00:00",
+  "scenario": "Example 1 \u2014 token waste (ARCHITECTURE.md \u00a78)",
+  "corpus": {
+    "n_traces": 91,
+    "status_counts": {
+      "OK": 91
+    },
+    "by_model": [
+      {
+        "model": "claude-opus-4-8",
+        "n_traces": 85,
+        "total_tokens": 8005403
+      },
+      {
+        "model": "claude-sonnet-4-6",
+        "n_traces": 4,
+        "total_tokens": 247004
+      },
+      {
+        "model": "<unknown-model>",
+        "n_traces": 2,
+        "total_tokens": 0
+      }
+    ],
+    "by_producer": [
+      {
+        "producer": "claude_code",
+        "n_traces": 90
+      },
+      {
+        "producer": "<unknown-producer>",
+        "n_traces": 1
+      }
+    ]
+  },
+  "tokens": {
+    "total": 8252407,
+    "median": 19149.0,
+    "mean": 90685.79,
+    "p90": 249891.0,
+    "max": 942929,
+    "min": 0
+  },
+  "cost": {
+    "total_usd": 66.637559,
+    "priced_traces": 89,
+    "unpriced_traces": 2,
+    "flags": [
+      "Unpriced models (tokens counted, cost omitted): (no model recorded)",
+      "Base input/output prices: claude-api skill model pricing table (cached 2026-06-04). Verify against live pricing before using dollar figures for billing decisions."
+    ]
+  },
+  "high_token_sessions": [
+    {
+      "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/a9b23c23c1efb90c576cd012f0a70522",
+      "session_id": "ddf538aa-79b4-4df8-870e-6c860383c14c",
+      "model": "claude-opus-4-8",
+      "total_tokens": 942929,
+      "input_tokens": 868255,
+      "output_tokens": 74674,
+      "total_tool_calls": 60,
+      "duration_seconds": 33095.088,
+      "cost_usd": 6.208125,
+      "cost_priced": true
+    },
+    {
+      "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+      "session_id": "b50a3d9c-0bca-42a3-b475-eca106759f6b",
+      "model": "claude-opus-4-8",
+      "total_tokens": 612820,
+      "input_tokens": 501987,
+      "output_tokens": 110833,
+      "total_tool_calls": 90,
+      "duration_seconds": 2109.912,
+      "cost_usd": 5.28076,
+      "cost_priced": true
+    },
+    {
+      "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/14da0deab1fee461c836a529d9f1e5ae",
+      "session_id": "38f24fae-66ec-421b-b09e-1d22373a7e20",
+      "model": "claude-opus-4-8",
+      "total_tokens": 549300,
+      "input_tokens": 479341,
+      "output_tokens": 69959,
+      "total_tool_calls": 57,
+      "duration_seconds": 1365.736,
+      "cost_usd": 4.14568,
+      "cost_priced": true
+    },
+    {
+      "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/680444e7d8a9679489700fb3d2958dc6",
+      "session_id": "38f24fae-66ec-421b-b09e-1d22373a7e20",
+      "model": "claude-opus-4-8",
+      "total_tokens": 543910,
+      "input_tokens": 391029,
+      "output_tokens": 152881,
+      "total_tool_calls": 156,
+      "duration_seconds": 3324.787,
+      "cost_usd": 5.77717,
+      "cost_priced": true
+    }
+  ],
+  "tool_redundancy": {
+    "strict_redundancy_rate": 0.006457,
+    "redundant_tool_calls": 8,
+    "total_tool_calls": 1239,
+    "shell_boilerplate_top": [
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/a9b23c23c1efb90c576cd012f0a70522",
+        "tool": "Bash",
+        "count": 27,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/omniagent/agent-framework",
+        "total_tool_calls": 60
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+        "tool": "Bash",
+        "count": 20,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics",
+        "total_tool_calls": 90
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/680444e7d8a9679489700fb3d2958dc6",
+        "tool": "Bash",
+        "count": 15,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl",
+        "total_tool_calls": 156
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/bdb3b11e597555cda869ed7ab5b123dd",
+        "tool": "Bash",
+        "count": 13,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl",
+        "total_tool_calls": 66
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/0d810f8f550f2c71206b64ba7e174a7c",
+        "tool": "Bash",
+        "count": 12,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/omniagent/agent-framework",
+        "total_tool_calls": 14
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/f9eb702f32e1f531944ecad247a4deea",
+        "tool": "Bash",
+        "count": 12,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl",
+        "total_tool_calls": 19
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/acb3925baed7d48deb0ce7441f8cb0de",
+        "tool": "Bash",
+        "count": 8,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl",
+        "total_tool_calls": 24
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/14da0deab1fee461c836a529d9f1e5ae",
+        "tool": "Bash",
+        "count": 7,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl",
+        "total_tool_calls": 57
+      }
+    ],
+    "repeated_file_reads_top": [
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/bdb3b11e597555cda869ed7ab5b123dd",
+        "tool": "Read",
+        "count": 4,
+        "identity": "/Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl/scripts/sync_from_logfood.mjs",
+        "total_tool_calls": 66
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+        "tool": "Read",
+        "count": 3,
+        "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics/src/ail/metrics/report.py",
+        "total_tool_calls": 90
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/8b53ae884b3458d81c3676c7da00aff4",
+        "tool": "Read",
+        "count": 3,
+        "identity": "/private/tmp/claude-502/-Users-austin-choi/b3858653-87fe-470d-b89f-82b0b20bc36a/scratchpad/skillforge/python/skillforge/cli.py",
+        "total_tool_calls": 27
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/44e3e992122283e59710d40aba014134",
+        "tool": "Read",
+        "count": 2,
+        "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0-scaffold/src/ail/ingest/adapters/claude_code.py",
+        "total_tool_calls": 101
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/7d0d978dc6a7f13cdf809a9ce791e44d",
+        "tool": "Read",
+        "count": 2,
+        "identity": "/private/tmp/claude-502/-Users-austin-choi/4c756d53-33f7-4fed-9ff8-ee44d68fc986/tasks/bjsu6ryn1.output",
+        "total_tool_calls": 13
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/092e279971feeb7108a3b48d02e67b3a",
+        "tool": "Read",
+        "count": 2,
+        "identity": "/Users/austin.choi/PycharmProjects2/omniagent/agent-framework/deploy/databricks/deploy.py",
+        "total_tool_calls": 34
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/eae013e4d4a8666d6bf41e8c98294bb8",
+        "tool": "Read",
+        "count": 2,
+        "identity": "/private/tmp/claude-502/-Users-austin-choi/869d1088-8116-4895-a99f-b6310175b2cd/scratchpad/ai-dev-kit/.test/src/skill_test/cli/commands.py",
+        "total_tool_calls": 22
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/2b17a38401c9e85bafa6c8cd5e64104d",
+        "tool": "Read",
+        "count": 2,
+        "identity": "/private/tmp/claude-502/-Users-austin-choi/4c756d53-33f7-4fed-9ff8-ee44d68fc986/tasks/bjsu6ryn1.output",
+        "total_tool_calls": 2
+      }
+    ],
+    "repeated_file_access_top": [
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/bdb3b11e597555cda869ed7ab5b123dd",
+        "tool": "Edit",
+        "count": 8,
+        "identity": "/Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl/scripts/sync_from_logfood.mjs",
+        "total_tool_calls": 66
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/14da0deab1fee461c836a529d9f1e5ae",
+        "tool": "Edit",
+        "count": 6,
+        "identity": "/Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl/server/routes/epl.ts",
+        "total_tool_calls": 57
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/acb3925baed7d48deb0ce7441f8cb0de",
+        "tool": "Edit",
+        "count": 6,
+        "identity": "/Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl/server/db/schema.ts",
+        "total_tool_calls": 24
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/680444e7d8a9679489700fb3d2958dc6",
+        "tool": "Edit",
+        "count": 4,
+        "identity": "/Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl/server/routes/epl.ts",
+        "total_tool_calls": 156
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+        "tool": "Edit",
+        "count": 3,
+        "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics/src/ail/metrics/l0_deterministic.py",
+        "total_tool_calls": 90
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/44e3e992122283e59710d40aba014134",
+        "tool": "Edit",
+        "count": 3,
+        "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0-scaffold/src/ail/ingest/adapters/claude_code.py",
+        "total_tool_calls": 101
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/8b53ae884b3458d81c3676c7da00aff4",
+        "tool": "Read",
+        "count": 3,
+        "identity": "/private/tmp/claude-502/-Users-austin-choi/b3858653-87fe-470d-b89f-82b0b20bc36a/scratchpad/skillforge/python/skillforge/cli.py",
+        "total_tool_calls": 27
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/e10ee82da2412883ea522b81092b472a",
+        "tool": "Edit",
+        "count": 3,
+        "identity": "/private/tmp/claude-502/-Users-austin-choi/b44358b4-b9b7-4782-aea6-a181891c80de/scratchpad/repoint_cc_tracing.py",
+        "total_tool_calls": 45
+      }
+    ]
+  },
+  "reconciliation_with_doc": {
+    "high_token_sessions": {
+      "live": [
+        942929,
+        612820,
+        549300,
+        543910
+      ],
+      "doc": [
+        549000,
+        943000
+      ],
+      "tolerance": 0.15,
+      "status": "match"
+    },
+    "median_tokens": {
+      "live": 19149.0,
+      "doc": 18500,
+      "tolerance": 0.15,
+      "status": "match"
+    },
+    "shell_boilerplate": {
+      "live_max_per_trace": 27,
+      "doc_range": [
+        13,
+        21
+      ],
+      "reproduced": true,
+      "status": "reproduced (max 27\u00d7/trace \u2265 documented floor 13\u00d7)"
+    },
+    "read_same_path": {
+      "live_max_read_same_path": 4,
+      "live_max_same_path_any_file_tool": 8,
+      "doc": 34,
+      "tolerance": 0.15,
+      "reproduced": false,
+      "status": "NOT reproduced \u2014 strongest live re-read of one path is 4\u00d7 (any file tool 8\u00d7) vs documented 34\u00d7; corpus grew 77->91 and rotates, so the 34\u00d7 trace is no longer present"
+    }
+  }
+}
