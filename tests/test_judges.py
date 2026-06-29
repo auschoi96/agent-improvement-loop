@@ -1,0 +1,488 @@
+"""Tests for the L2 judged-metrics layer (:mod:`ail.judges`).
+
+All offline tests avoid live models two ways:
+
+* **Scorer construction** uses the *real* ``make_judge`` — it only builds a
+  judge object and never calls a model, so it runs offline with no network.
+* **Scoring / alignment** use a ``FakeJudge`` (a duck-typed stand-in with a
+  scripted ``__call__`` and ``align``), so the agreement and alignment wrappers
+  are exercised without a model or ``dspy``.
+
+The one genuinely-live path (a real MemAlign alignment) is gated behind
+``@pytest.mark.live`` and self-skips without a workspace + ``dspy``.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import pytest
+
+from ail.judges import (
+    CORRECTNESS,
+    DEFAULT_SCORERS,
+    GROUNDEDNESS,
+    MODULARITY,
+    AgreementConfig,
+    AlignmentSet,
+    AnchorItem,
+    HumanAnchor,
+    Pool,
+    PoolOverlapError,
+    ScorePair,
+    align_judge,
+    assert_pools_disjoint,
+    build_memalign_optimizer,
+    coerce_score,
+    compute_agreement,
+    log_agreement,
+    make_correctness_judge,
+    make_groundedness_judge,
+    make_modularity_judge,
+    make_scorer,
+    score_anchor,
+    with_rubric,
+)
+from ail.judges.contract import SCHEMA_VERSION, AgreementReport
+
+# ---------------------------------------------------------------------------
+# Test doubles
+# ---------------------------------------------------------------------------
+
+
+class _Feedback:
+    """Duck-typed stand-in for an MLflow ``Feedback`` (exposes ``.value``)."""
+
+    def __init__(self, value: Any, rationale: str = "") -> None:
+        self.value = value
+        self.rationale = rationale
+
+
+class FakeJudge:
+    """A scripted judge: maps an item by its ``outputs`` to a score.
+
+    ``responses`` maps an outputs value to whatever the judge "returns" (a raw
+    scalar or a ``_Feedback``). ``raise_on`` names outputs values for which the
+    judge raises, to exercise per-item error capture. ``align`` records its call
+    and returns a fresh aligned judge.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str = "fake",
+        responses: dict[Any, Any] | None = None,
+        default: Any = None,
+        raise_on: frozenset[Any] = frozenset(),
+    ) -> None:
+        self.name = name
+        self.responses = responses or {}
+        self.default = default
+        self.raise_on = raise_on
+        self.align_calls: list[dict[str, Any]] = []
+
+    def __call__(
+        self,
+        *,
+        inputs: Any = None,
+        outputs: Any = None,
+        expectations: Any = None,
+        trace: Any = None,
+        session: Any = None,
+    ) -> Any:
+        if outputs in self.raise_on:
+            raise RuntimeError(f"judge blew up on {outputs!r}")
+        return self.responses.get(outputs, self.default)
+
+    def align(self, traces: list[Any], optimizer: Any = None) -> FakeJudge:
+        self.align_calls.append({"traces": traces, "optimizer": optimizer})
+        return FakeJudge(name=f"{self.name}+aligned", responses=self.responses)
+
+
+class _Trace:
+    """Minimal MLflow-trace shape for AlignmentSet id extraction."""
+
+    def __init__(self, trace_id: str) -> None:
+        self.info = type("Info", (), {"trace_id": trace_id})()
+
+
+# ---------------------------------------------------------------------------
+# Scorer factory — constructs real MLflow judges, offline
+# ---------------------------------------------------------------------------
+
+
+class TestScorerFactory:
+    def test_default_set_has_three_scorers(self) -> None:
+        assert set(DEFAULT_SCORERS) == {"correctness", "modularity", "groundedness"}
+
+    def test_correctness_is_categorical_guardrail(self) -> None:
+        judge = make_correctness_judge(model="openai:/gpt-4.1-mini")
+        assert judge.name == "correctness"
+        assert judge.feedback_value_type is str
+        # The guardrail rubric compares output against the expected result.
+        assert "{{ outputs }}" in judge.instructions
+        assert "{{ expectations }}" in judge.instructions
+
+    def test_modularity_is_graded_int(self) -> None:
+        judge = make_modularity_judge(model="openai:/gpt-4.1-mini")
+        assert judge.name == "modularity"
+        assert judge.feedback_value_type is int
+        assert "{{ outputs }}" in judge.instructions
+
+    def test_groundedness_checks_context(self) -> None:
+        judge = make_groundedness_judge(model="openai:/gpt-4.1-mini")
+        assert judge.name == "groundedness"
+        assert judge.feedback_value_type is str
+        assert "{{ inputs }}" in judge.instructions
+
+    def test_make_scorer_overrides(self) -> None:
+        judge = make_scorer(
+            CORRECTNESS,
+            model="openai:/gpt-4.1-mini",
+            instructions="Custom rubric over {{ outputs }}.",
+            feedback_value_type=bool,
+            name="correctness_v2",
+        )
+        assert judge.name == "correctness_v2"
+        assert judge.feedback_value_type is bool
+        assert "Custom rubric" in judge.instructions
+
+    def test_make_scorer_rejects_rubric_without_template_var(self) -> None:
+        # make_judge enforces that instructions reference a template variable;
+        # the factory does not paper over that.
+        with pytest.raises(Exception):  # noqa: B017 - mlflow raises its own exc type
+            make_scorer(
+                MODULARITY,
+                model="openai:/gpt-4.1-mini",
+                instructions="no template variable here",
+            )
+
+    def test_with_rubric_returns_new_spec(self) -> None:
+        tuned = with_rubric(GROUNDEDNESS, "Judge {{ outputs }} against {{ inputs }}.")
+        assert tuned.name == GROUNDEDNESS.name
+        assert tuned.instructions != GROUNDEDNESS.instructions
+        assert GROUNDEDNESS.instructions  # original unchanged (frozen dataclass)
+
+
+# ---------------------------------------------------------------------------
+# Pools — the frozen evaluation wall as types
+# ---------------------------------------------------------------------------
+
+
+class TestPools:
+    def test_anchor_rejects_duplicate_ids(self) -> None:
+        with pytest.raises(ValueError, match="duplicate item_id"):
+            HumanAnchor.of(
+                [
+                    AnchorItem(item_id="dup", human_label="yes"),
+                    AnchorItem(item_id="dup", human_label="no"),
+                ]
+            )
+
+    def test_alignment_set_reads_trace_ids(self) -> None:
+        aset = AlignmentSet.of([_Trace("t1"), _Trace("t2")])
+        assert aset.ids == frozenset({"t1", "t2"})
+        assert len(aset) == 2
+
+    def test_disjoint_pools_pass(self) -> None:
+        aset = AlignmentSet.of([_Trace("a1"), _Trace("a2")])
+        anchor = HumanAnchor.of([AnchorItem(item_id="h1", human_label="yes")])
+        # Disjoint: no exception.
+        assert_pools_disjoint(alignment_set=aset, human_anchor=anchor, task_suite_ids=["s1", "s2"])
+
+    def test_alignment_anchor_overlap_raises(self) -> None:
+        aset = AlignmentSet.of([_Trace("shared")])
+        anchor = HumanAnchor.of([AnchorItem(item_id="shared", human_label="yes")])
+        with pytest.raises(PoolOverlapError, match="not disjoint"):
+            assert_pools_disjoint(alignment_set=aset, human_anchor=anchor)
+
+    def test_task_suite_overlap_raises(self) -> None:
+        aset = AlignmentSet.of([_Trace("x1")])
+        with pytest.raises(PoolOverlapError):
+            assert_pools_disjoint(alignment_set=aset, task_suite_ids=["x1"])
+
+    def test_pool_labels_are_stable(self) -> None:
+        assert Pool.ALIGNMENT_SET.value == "alignment_set"
+        assert Pool.HUMAN_ANCHOR.value == "human_anchor"
+        assert Pool.TASK_SUITE.value == "task_suite"
+        assert HumanAnchor.pool is Pool.HUMAN_ANCHOR
+        assert AlignmentSet.pool is Pool.ALIGNMENT_SET
+
+
+# ---------------------------------------------------------------------------
+# coerce_score — normalize whatever a judge returns
+# ---------------------------------------------------------------------------
+
+
+class TestCoerceScore:
+    def test_scalars_pass_through(self) -> None:
+        assert coerce_score("yes") == "yes"
+        assert coerce_score(True) is True
+        assert coerce_score(4) == 4
+        assert coerce_score(0.5) == 0.5
+        assert coerce_score(None) is None
+
+    def test_unwraps_feedback(self) -> None:
+        assert coerce_score(_Feedback("no")) == "no"
+        assert coerce_score(_Feedback(5)) == 5
+
+    def test_unwraps_single_element_list(self) -> None:
+        assert coerce_score([_Feedback("yes")]) == "yes"
+
+    def test_multi_element_list_raises(self) -> None:
+        with pytest.raises(ValueError, match="multi-element"):
+            coerce_score([_Feedback("yes"), _Feedback("no")])
+
+    def test_mlflow_categorical_rating_coerces(self) -> None:
+        from mlflow.genai.judges import CategoricalRating
+
+        # A real CategoricalRating is a str enum; it normalizes to its value.
+        assert coerce_score(CategoricalRating.YES) == "yes"
+        assert coerce_score(_Feedback(CategoricalRating.NO)) == "no"
+
+
+# ---------------------------------------------------------------------------
+# compute_agreement — pure metric, no model
+# ---------------------------------------------------------------------------
+
+
+def _pairs(*triples: tuple[str, Any, Any]) -> list[ScorePair]:
+    return [ScorePair(item_id=i, judge_value=j, human_value=h) for i, j, h in triples]
+
+
+class TestComputeAgreement:
+    def test_perfect_agreement(self) -> None:
+        report = compute_agreement(
+            _pairs(("a", "yes", "yes"), ("b", "no", "no"), ("c", "yes", "yes")),
+            judge_name="correctness",
+        )
+        assert report.schema_version == SCHEMA_VERSION
+        assert report.n_items == 3
+        assert report.n_agreements == 3
+        assert report.agreement_rate == 1.0
+        assert report.distrusted is False
+        assert report.cohen_kappa == 1.0
+        assert report.pool == "human_anchor"
+
+    def test_below_floor_is_distrusted(self) -> None:
+        # 1 of 3 agree → 0.333 < default floor 0.7
+        report = compute_agreement(
+            _pairs(("a", "yes", "yes"), ("b", "yes", "no"), ("c", "no", "yes")),
+            judge_name="correctness",
+        )
+        assert report.agreement_rate == pytest.approx(1 / 3, abs=1e-6)
+        assert report.distrusted is True
+
+    def test_floor_is_configurable(self) -> None:
+        pairs = _pairs(("a", "yes", "yes"), ("b", "yes", "no"))  # 0.5
+        strict = compute_agreement(pairs, judge_name="j", config=AgreementConfig(floor=0.9))
+        lenient = compute_agreement(pairs, judge_name="j", config=AgreementConfig(floor=0.4))
+        assert strict.distrusted is True
+        assert lenient.distrusted is False
+
+    def test_case_insensitive_string_match(self) -> None:
+        report = compute_agreement(_pairs(("a", "Yes", "yes")), judge_name="j")
+        assert report.n_agreements == 1
+
+    def test_numeric_tolerance(self) -> None:
+        config = AgreementConfig(numeric_tolerance=0.5)
+        report = compute_agreement(
+            [
+                ScorePair(item_id="a", judge_value=4.2, human_value=4.0),
+                ScorePair(item_id="b", judge_value=1.0, human_value=3.0),
+            ],
+            judge_name="modularity",
+            config=config,
+        )
+        assert report.items[0].agree is True  # within 0.5
+        assert report.items[1].agree is False  # outside 0.5
+        assert report.cohen_kappa is None  # omitted for float-tolerance comparison
+        assert report.numeric_tolerance == 0.5
+
+    def test_errored_item_counts_as_non_agreement(self) -> None:
+        report = compute_agreement(
+            [
+                ScorePair(item_id="a", judge_value="yes", human_value="yes"),
+                ScorePair(item_id="b", human_value="no", error="boom"),
+            ],
+            judge_name="j",
+        )
+        assert report.n_items == 2
+        assert report.n_scored == 1
+        assert report.n_agreements == 1
+        assert report.agreement_rate == 0.5
+        errored = next(i for i in report.items if i.item_id == "b")
+        assert errored.agree is False
+        assert errored.error == "boom"
+
+    def test_empty_anchor_is_not_distrusted(self) -> None:
+        report = compute_agreement([], judge_name="j")
+        assert report.n_items == 0
+        assert report.agreement_rate == 0.0
+        assert report.distrusted is False
+        assert any("empty Human Anchor" in n for n in report.notes)
+
+    def test_kappa_below_rate_under_class_imbalance(self) -> None:
+        # Judge always says "yes"; humans mostly "yes". High raw agreement, but
+        # chance-corrected kappa is lower — exactly why kappa is reported.
+        pairs = _pairs(
+            ("a", "yes", "yes"),
+            ("b", "yes", "yes"),
+            ("c", "yes", "yes"),
+            ("d", "yes", "no"),
+        )
+        report = compute_agreement(pairs, judge_name="j", config=AgreementConfig(floor=0.0))
+        assert report.agreement_rate == 0.75
+        assert report.cohen_kappa is not None
+        assert report.cohen_kappa < report.agreement_rate
+
+    def test_report_round_trips_json(self) -> None:
+        report = compute_agreement(_pairs(("a", "yes", "yes")), judge_name="j")
+        restored = AgreementReport.model_validate_json(report.model_dump_json())
+        assert restored == report
+
+
+# ---------------------------------------------------------------------------
+# score_anchor — judge over a Human-Anchor slice (mocked judge)
+# ---------------------------------------------------------------------------
+
+
+class TestScoreAnchor:
+    def test_scores_each_item_against_human_label(self) -> None:
+        anchor = HumanAnchor.of(
+            [
+                AnchorItem(item_id="a", human_label="yes", outputs="resp-a"),
+                AnchorItem(item_id="b", human_label="no", outputs="resp-b"),
+            ]
+        )
+        # Judge agrees on "a", disagrees on "b".
+        judge = FakeJudge(
+            name="correctness",
+            responses={"resp-a": _Feedback("yes"), "resp-b": _Feedback("yes")},
+        )
+        report = score_anchor(judge, anchor, generated_at="2026-06-29T00:00:00+00:00")
+        assert report.judge_name == "correctness"
+        assert report.n_items == 2
+        assert report.n_agreements == 1
+        assert report.agreement_rate == 0.5
+
+    def test_judge_exception_is_captured_per_item(self) -> None:
+        anchor = HumanAnchor.of(
+            [
+                AnchorItem(item_id="a", human_label="yes", outputs="ok"),
+                AnchorItem(item_id="b", human_label="yes", outputs="bomb"),
+            ]
+        )
+        judge = FakeJudge(responses={"ok": "yes"}, raise_on=frozenset({"bomb"}))
+        report = score_anchor(judge, anchor)
+        bad = next(i for i in report.items if i.item_id == "b")
+        assert bad.error is not None and "blew up" in bad.error
+        assert bad.agree is False
+        assert report.n_agreements == 1  # the good item still scored
+
+
+# ---------------------------------------------------------------------------
+# align_judge — MemAlign wrapper (mocked judge.align)
+# ---------------------------------------------------------------------------
+
+
+class TestAlignJudge:
+    def test_aligns_on_alignment_set_only(self) -> None:
+        judge = FakeJudge(name="correctness")
+        aset = AlignmentSet.of([_Trace("t1"), _Trace("t2")])
+        outcome = align_judge(judge, aset)
+        # The aligned judge is returned, distinct from the base.
+        assert outcome.judge is not judge
+        assert outcome.judge.name == "correctness+aligned"
+        # The whole alignment set is passed through to judge.align.
+        assert judge.align_calls[0]["traces"] == list(aset.traces)
+        # optimizer=None → MLflow's default MemAlign.
+        assert judge.align_calls[0]["optimizer"] is None
+
+    def test_report_records_provenance(self) -> None:
+        judge = FakeJudge(name="groundedness")
+        aset = AlignmentSet.of([_Trace("t1"), _Trace("t2"), _Trace("t3")])
+        outcome = align_judge(judge, aset)
+        report = outcome.report
+        assert report.base_judge_name == "groundedness"
+        assert report.optimizer == "MemAlign"
+        assert report.pool == "alignment_set"
+        assert report.n_alignment_traces == 3
+        assert report.aligned is True
+        assert any("decoupled from agent optimization" in n for n in report.notes)
+
+    def test_custom_optimizer_passed_through(self) -> None:
+        judge = FakeJudge(name="j")
+        aset = AlignmentSet.of([_Trace("t1")])
+        sentinel = object()
+        align_judge(judge, aset, optimizer=sentinel)
+        assert judge.align_calls[0]["optimizer"] is sentinel
+
+    def test_empty_alignment_set_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-empty AlignmentSet"):
+            align_judge(FakeJudge(), AlignmentSet.of([]))
+
+    def test_build_memalign_optimizer_requires_dspy(self) -> None:
+        # dspy is not a CI dependency, so constructing a real MemAlign optimizer
+        # raises a clear ImportError rather than succeeding.
+        with pytest.raises(ImportError, match="dspy"):
+            build_memalign_optimizer()
+
+
+# ---------------------------------------------------------------------------
+# log_agreement — best-effort MLflow logging
+# ---------------------------------------------------------------------------
+
+
+class TestLogAgreement:
+    def test_logs_metrics_and_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mlflow
+
+        metrics: dict[str, float] = {}
+        dicts: dict[str, Any] = {}
+        monkeypatch.setattr(mlflow, "log_metric", lambda k, v, **kw: metrics.__setitem__(k, v))
+        monkeypatch.setattr(mlflow, "log_dict", lambda d, path, **kw: dicts.__setitem__(path, d))
+
+        report = compute_agreement(
+            _pairs(("a", "yes", "yes"), ("b", "yes", "no")),
+            judge_name="correctness",
+            config=AgreementConfig(floor=0.9),
+        )
+        assert log_agreement(report) is True
+        assert metrics["judge_human_agreement"] == report.agreement_rate
+        assert metrics["judge_distrusted"] == 1.0  # 0.5 < 0.9
+        assert "judge_agreement/correctness.json" in dicts
+
+    def test_returns_false_when_logging_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mlflow
+
+        def boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("no active run")
+
+        monkeypatch.setattr(mlflow, "log_metric", boom)
+        report = compute_agreement(_pairs(("a", "yes", "yes")), judge_name="j")
+        assert log_agreement(report) is False
+
+
+# ---------------------------------------------------------------------------
+# Live alignment — gated, self-skips without a workspace + dspy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.live
+def test_live_memalign_alignment() -> None:
+    """Acceptance (live): a real judge aligns from labeled traces via MemAlign.
+
+    Guarded by ``AIL_LIVE_MLFLOW=1`` and the presence of ``dspy`` + a workspace.
+    This exercises the genuine ``judge.align(traces=..., optimizer=...)`` path
+    the offline tests mock.
+    """
+    if os.environ.get("AIL_LIVE_MLFLOW") != "1":
+        pytest.skip("set AIL_LIVE_MLFLOW=1 to run the live MemAlign alignment")
+    pytest.importorskip("dspy", reason="MemAlign requires the dspy optimizer dependency")
+
+    # The optimizer constructs only with dspy present; the trace fixtures + a
+    # workspace are supplied by the live environment.
+    optimizer = build_memalign_optimizer()
+    assert optimizer is not None

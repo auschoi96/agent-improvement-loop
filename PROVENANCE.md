@@ -50,7 +50,8 @@ interfaces were already this repository's own design and were not changed.
 
 | Upstream repo | Module | Upstream license | Status |
 |---|---|---|---|
-| `databricks-field-eng/skillforge` @ `3569232e` | `python/skillforge/eval/schema.py` (`GroundTruthV5`) | **Undeclared** — no `LICENSE` file in repo; `package.json` says `"MIT"` (unverified, no license text) | **NOT incorporated** (Wave 1a) — see flag below |
+| `databricks-field-eng/skillforge` @ `3569232e` | `python/skillforge/eval/schema.py` (`GroundTruthV5`) | **Undeclared** — no `LICENSE` file in repo; `package.json` says `"MIT"` (unverified, no license text) | **NOT incorporated and NOT read.** Wave 1a (`src/ail/groundtruth/`) was resolved by writing our **own** clean-room schema instead of copying `GroundTruthV5`; only the conceptual contract was reimplemented. See the Wave 1a clean-room note above. |
+| `databricks-solutions/ai-dev-kit` | `grp/` (capture → approve → promote pipeline) | Databricks "DB license" (proprietary, non-OSI) | **NOT incorporated and NOT read.** The GRP capture/execute/approve/promote stages in `src/ail/groundtruth/` are original work; only the *pattern* (human-gated, separate promote, no expected-output synthesis) was reimplemented. |
 
 ## History (why this remediation happened)
 
@@ -81,6 +82,30 @@ the intended Apache-2.0 release.
 | `src/ail/metrics/report.py` | Single-entrypoint baseline report + Example 1 reproduction. **Original.** |
 | `docs/L0_METRICS_CONTRACT.md` | Prose spec of the L0 contract. **Original.** |
 | `tests/test_l0_metrics.py`, `tests/test_report.py` | Tests for the above. **Original.** |
+| `src/ail/groundtruth/schema.py` | Our own ground-truth contract (pydantic v2): `Source`/`SourceKind`, `Pool`, `ReviewStatus`, `TaskInput`, `Expectations`, `CandidateResponse`, `ReviewRecord`, `GroundTruthCase`, `GroundTruthSet`. **Clean-room original** — see the Wave 1a note below. |
+| `src/ail/groundtruth/capture.py` | Stage 1: build candidate cases from normalized traces. **Original.** |
+| `src/ail/groundtruth/execute.py` | Stage 2: run the agent to capture its own candidate response; optional MLflow audit logging. **Original.** |
+| `src/ail/groundtruth/approve.py` | Stage 3: the human gate — a reviewer fills expectations and approves/rejects. **Original.** |
+| `src/ail/groundtruth/promote.py` | Stage 4: separate explicit `promote_approved()` into a frozen, disjoint pool. **Original.** |
+| `src/ail/groundtruth/store.py` | Per-pool persistence + review-queue round-trip. **Original.** |
+| `tests/test_groundtruth_schema.py`, `tests/test_groundtruth_pipeline.py`, `tests/test_groundtruth_mlflow.py` | Tests for the ground-truth package (incl. the no-synthesis assertions). **Original.** |
+
+### Wave 1a ground-truth schema — clean-room note
+
+`src/ail/groundtruth/` was authored **without reading, cloning, fetching,
+browsing, or grepping** SkillForge's `eval/schema.py` (`GroundTruthV5`) or any
+`ai-dev-kit` `grp/` code. The package re-derives an *equivalent contract from
+scratch*: it borrows only the **conceptual** properties we admired — every case
+carries required provenance (`sources`), states a `regression_intent`, and is
+approved by a human with **no LLM synthesis of expected outputs** — and
+implements them in this repository's own Pydantic style (`extra="forbid"`,
+frozen models) re-derived from the public `pydantic` v2 API. The
+anti-co-adaptation invariant (`Expectations` is filled only by the human-gate
+`approve` stage) is original to this implementation and asserted by tests
+(`test_no_expected_output_synthesis_surface_in_package`,
+`test_only_the_human_gate_writes_expectations`). MLflow usage is the public
+`mlflow` Tracking API only (`start_run`, `log_params`, `set_tags`, `log_text`),
+resolved/verified against **3.14.0**; no `mlflow.genai`/judge surface is used.
 
 Cost prices in `l0_deterministic.py` are *data*, not code: base input/output
 rates are attributed to the Claude API pricing reference (the `claude-api`
@@ -94,11 +119,14 @@ and any uncovered model is flagged rather than guessed.
    Databricks-Field-Eng-internal) ships **no `LICENSE`/`COPYING`/`NOTICE`** at
    its root; only `package.json` claims `"license": "MIT"`, with no
    accompanying MIT license text and no `license` field in `pyproject.toml`.
-   This is an **ambiguous / undeclared license**. `GroundTruthV5` is **not**
-   incorporated in this PR (it is Wave 1a). **Do not copy SkillForge code until
-   its license is clarified in writing** — a bare `package.json` "MIT" string
-   without license text is not a reliable grant for a Python module copied out
-   of the repo.
+   This is an **ambiguous / undeclared license**. Because of this, Wave 1a did
+   **not** copy `GroundTruthV5`; `src/ail/groundtruth/` is a clean-room original
+   schema written without reading the SkillForge source (see the Wave 1a
+   clean-room note above). The standing rule remains: **do not copy SkillForge
+   code until its license is clarified in writing** — a bare `package.json`
+   "MIT" string without license text is not a reliable grant. A different-vendor
+   review should verify the non-derivation of the ground-truth package, as for
+   the ingestion modules.
 
 2. **Confirm before relicensing.** With the three ingestion modules now
    clean-room, the previously-blocking DB-licensed code is gone from these
@@ -114,6 +142,12 @@ and any uncovered model is flagged rather than guessed.
   Claude-Code-coupled local-JSONL/autolog path. **Deliberately NOT used**: the
   reimplemented `mlflow_source.py` reads only the public MLflow Traces API and
   is producer-agnostic.
+- SkillForge `eval/schema.py` (`GroundTruthV5`) — **conceptual reference only,
+  not read.** The required-provenance + regression-intent + human-approved
+  contract was re-derived from scratch in `src/ail/groundtruth/schema.py`.
+- ai-dev-kit `grp/` capture→approve→promote pipeline — **conceptual reference
+  only, not read.** The four-stage human-gated pipeline was reimplemented as
+  original work in `src/ail/groundtruth/`.
 - SkillForge `/forge`, `/forge-author` skills — methodology reference only.
 - ai-dev-kit builder app — UI reference only.
 - DSPy `RLM`, HALO — design inspiration only (deferred).
