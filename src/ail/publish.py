@@ -33,7 +33,10 @@ Auth mirrors :mod:`ail.metrics.report`: if ``DATABRICKS_HOST`` and
 ``DATABRICKS_TOKEN`` are set they are used for both the MLflow trace pull (the
 reference experiment's v4 trace store rejects OAuth-profile creds for span
 ``batchGet``) and the warehouse writes; otherwise a Databricks CLI ``--profile``
-is used.
+is used. The reference experiment is also UC-table-backed, so the v4 trace store
+reads it *through a SQL warehouse*: ``publish`` exports its ``warehouse_id`` as
+``MLFLOW_TRACING_SQL_WAREHOUSE_ID`` (the same warehouse that backs the writes) so
+the read works without extra configuration.
 
 Run::
 
@@ -447,6 +450,12 @@ def publish(
 
     Returns the computed :class:`~ail.metrics.contract.L0MetricsReport`.
     """
+    # The reference experiment is backed by a UC table; MLflow's v4 trace store
+    # reads those traces through a SQL warehouse and requires its id in the
+    # environment. We already have the warehouse (it backs the Delta writes), so
+    # surface it for the read too. ``setdefault`` respects an explicit override.
+    os.environ.setdefault("MLFLOW_TRACING_SQL_WAREHOUSE_ID", warehouse_id)
+
     source = _build_source(profile)
     traces = source.fetch_traces(experiment_id=experiment_id, max_results=max_results)
     stamp = generated_at or datetime.now(UTC).isoformat()

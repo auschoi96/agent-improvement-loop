@@ -7,9 +7,12 @@ These cover the contract -> flat-row mapping and SQL-literal escaping in
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from databricks.sdk.service.sql import StatementState
 
+import ail.publish as pub
 from ail.ingest.base import NormalizedTrace, TokenUsage, ToolCall, TraceStatus
 from ail.metrics.l0_deterministic import compute_l0
 from ail.publish import (
@@ -197,6 +200,40 @@ def test_atomic_replace_swaps_via_staging_then_replace_where() -> None:
     assert f"REPLACE WHERE experiment_id = '{EXPERIMENT}'" in swap[0]
     assert "SELECT * FROM" in swap[0]
     assert any(s.startswith("DROP TABLE IF EXISTS") for s in stmts)
+
+
+class _FakeSource:
+    def fetch_traces(self, **kwargs):  # type: ignore[no-untyped-def]
+        return []
+
+
+def test_publish_exposes_warehouse_for_uc_trace_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The v4 trace store needs the SQL warehouse id in the env to read UC-table
+    # traces; publish() has the warehouse (it also backs the writes) and must
+    # surface it for the read. Run publish() fully offline via fakes.
+    monkeypatch.delenv("MLFLOW_TRACING_SQL_WAREHOUSE_ID", raising=False)
+    report = _report()
+    monkeypatch.setattr(pub, "_build_source", lambda profile: _FakeSource())
+    monkeypatch.setattr(pub, "compute_l0", lambda traces, **kwargs: report)
+    monkeypatch.setattr(pub, "_build_workspace_client", lambda profile: _FakeClient())
+
+    out = pub.publish(experiment_id=EXPERIMENT, warehouse_id="wh-xyz")
+
+    assert out is report
+    assert os.environ["MLFLOW_TRACING_SQL_WAREHOUSE_ID"] == "wh-xyz"
+
+
+def test_publish_respects_preset_warehouse_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # setdefault: an explicit MLFLOW_TRACING_SQL_WAREHOUSE_ID wins.
+    monkeypatch.setenv("MLFLOW_TRACING_SQL_WAREHOUSE_ID", "preset-wh")
+    report = _report()
+    monkeypatch.setattr(pub, "_build_source", lambda profile: _FakeSource())
+    monkeypatch.setattr(pub, "compute_l0", lambda traces, **kwargs: report)
+    monkeypatch.setattr(pub, "_build_workspace_client", lambda profile: _FakeClient())
+
+    pub.publish(experiment_id=EXPERIMENT, warehouse_id="wh-xyz")
+
+    assert os.environ["MLFLOW_TRACING_SQL_WAREHOUSE_ID"] == "preset-wh"
 
 
 def test_atomic_replace_failure_leaves_live_table_untouched() -> None:

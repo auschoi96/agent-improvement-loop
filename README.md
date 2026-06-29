@@ -40,6 +40,69 @@ It writes `artifacts/l0_baseline_<exp>.json` (the full contract) and
 [`artifacts/`](artifacts/) capture the current corpus. See the contract doc for
 the Databricks auth note for the reference workspace.
 
+## Scheduled refresh (living dashboard)
+
+`ail.publish` (Tier A) computes the L0 contract via `ail.metrics` and writes the
+three UC Delta tables the leaderboard app reads (`l0_session_metrics`,
+`l0_corpus_summary`, `l0_diagnosis`). A Databricks Asset Bundle at the repo root
+([`databricks.yml`](databricks.yml) + [`resources/l0_publish.job.yml`](resources/l0_publish.job.yml))
+runs that step on a **schedule** so the tables track new traces as they arrive —
+turning the dashboard from a one-time snapshot into a living view. No metric
+logic lives in the bundle: the job's wheel-task entrypoint
+([`ail.jobs.publish_job`](src/ail/jobs/publish_job.py)) only resolves auth and
+delegates to `ail.publish.publish`, which keeps the write atomic and idempotent
+(`INSERT … REPLACE WHERE experiment_id`).
+
+- **Compute:** serverless. The `ail` wheel (built locally by `uv` at deploy) is
+  installed into the run environment.
+- **Schedule:** daily at 07:00 UTC by default; the cron is the `publish_cron`
+  bundle variable (`schedule_pause_status` controls live-vs-dormant).
+
+### Deploy & run
+
+```bash
+databricks bundle validate --strict --profile dais-demo
+databricks bundle deploy           --profile dais-demo   # builds the wheel, creates the Job
+databricks bundle run   l0_publish --profile dais-demo   # trigger one run now
+```
+
+Override any default without editing files, e.g. a 6-hour cadence and a
+different warehouse:
+
+```bash
+databricks bundle deploy --profile dais-demo \
+  --var publish_cron='0 0 */6 * * ?' --var warehouse_id=<id>
+```
+
+### Auth (and why it is resolved at runtime)
+
+The reference experiment is UC-table-backed, read through MLflow's v4 trace REST
+store, which **rejects profile-managed OAuth** for span reads — it needs an
+explicit bearer (`DATABRICKS_HOST` + `DATABRICKS_TOKEN`). A serverless Job cannot
+have those injected from the bundle (the serverless environment spec has no
+env-var field), so the bearer is resolved at runtime by `ail.jobs.publish_job`:
+
+1. **Pre-set env** — if `DATABRICKS_HOST`/`DATABRICKS_TOKEN` are already set
+   (local, CI), use them.
+2. **Secret scope** — if `--token-secret-scope`/`--token-secret-key` are given
+   (the `token_secret_scope`/`token_secret_key` bundle variables), read the
+   token from a Databricks **secret scope**. This is the production-hardened
+   service-principal path: store the SP's token in a scope, grant the SP `READ`
+   on it, and point the Job there — nothing sensitive is committed or passed as a
+   Job parameter.
+3. **Mint (default)** — otherwise mint a short-lived OAuth bearer from the Job's
+   own run-as identity (`Config.authenticate()`) and pass it explicitly. This
+   sidesteps the v4 OAuth bug with no stored credential and works the same
+   whether the Job runs as a user or a service principal.
+
+`publish` also exports the SQL warehouse id as `MLFLOW_TRACING_SQL_WAREHOUSE_ID`
+(the v4 store reads UC-table traces through a warehouse).
+
+**Run-as:** the Job runs as the deploying identity by default (so the
+verification run has the catalog/warehouse grants). For production, run it as a
+service principal that has been granted the data privileges — uncomment the
+`run_as.service_principal_name` block in `resources/l0_publish.job.yml`.
+
 ## Reference deployment
 
 - Workspace: `e2-demo-field-eng` (dais-demo profile) / `fevm-austin-choi-omni-agent`
