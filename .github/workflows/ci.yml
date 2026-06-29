@@ -5,15 +5,26 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
 jobs:
-  lint-typecheck-test:
+  python:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Matrix matches `requires-python = ">=3.11"`; the suite is green on each.
+      # 3.13 is the local dev version; 3.11 is the declared floor.
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install
         run: |
@@ -27,8 +38,51 @@ jobs:
         run: ruff format --check src tests
 
       - name: Mypy (typecheck)
-        run: mypy
+        # Explicit path matches the documented local command and the package
+        # layout (src/ail); equivalent to the configured packages = ["ail"].
+        run: mypy src
 
       - name: Pytest
-        # Live tests are marked and deselected here; they require Databricks creds.
+        # `live` is a registered marker (see pyproject [tool.pytest.ini_options])
+        # applied to the 2 MLflow tests that need a Databricks workspace; they are
+        # deselected here. Those tests also self-skip via an AIL_LIVE_MLFLOW guard,
+        # so the suite is green in CI with no credentials.
         run: pytest -m "not live"
+
+  appkit:
+    name: AppKit app (ail-self-optimizer)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ail-self-optimizer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # README requires Node v22+; 24 is the active LTS and matches @types/node.
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ail-self-optimizer/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests (vitest)
+        # `npm test` chains `test:smoke`, which launches a browser via Playwright
+        # and hits a live Databricks SQL warehouse — neither exists in CI. Run only
+        # the headless, offline vitest suite (the smoke test belongs in a
+        # deploy-time/e2e check against a running app).
+        run: npx vitest run

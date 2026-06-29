@@ -34,3 +34,9 @@ pnpm-lock.yaml
 
 # Vendor
 vendor
+
+# Auto-generated AppKit artifacts — owned by `appkit generate-types` and
+# `appkit plugin sync` (the .d.ts is marked "DO NOT EDIT"); formatting them
+# here only fights codegen, which rewrites them on the next build.
+shared/appkit-types/
+appkit.plugins.json
