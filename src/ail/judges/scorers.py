@@ -2,7 +2,7 @@
 
 This is the L2 tier of the layered metrics design (``docs/ARCHITECTURE.md`` §3):
 LLM-as-judge scorers built with the public MLflow GenAI API
-:func:`mlflow.genai.judges.make_judge`. The factory ships three scorers,
+:func:`mlflow.genai.judges.make_judge`. The factory ships four scorers,
 chosen for the Milestone-1 token-reduction lever:
 
 * **correctness** — the key guardrail Phase 2 needs. A token-reduction
@@ -11,6 +11,15 @@ chosen for the Milestone-1 token-reduction lever:
 * **modularity** — graded code-structure quality (1–5), where gradations matter.
 * **groundedness** — whether the response is supported by the provided context
   (``yes``/``no``), the anti-hallucination check.
+* **token_efficiency** — graded (1–5) judgement of whether the token spend was
+  *justified*, conditioned on task success. This is the **hybrid** scorer: it
+  does **not** ask the LLM to count tokens or recompute redundancy — those are
+  L0 deterministic facts (:mod:`ail.metrics`). It feeds the LLM the already-
+  computed L0 signals (via :func:`build_token_efficiency_inputs`) and asks only
+  the judgement layer — was the spend worth it, was redundancy avoidable, is
+  quality-per-token good — naming the specific waste so the rationale is
+  actionable. It is the Phase-2 partner of ``correctness``: tokens may fall only
+  if quality does not (see :func:`build_token_efficiency_inputs` and the rubric).
 
 Each scorer is a :class:`ScorerSpec` (name + instructions/rubric + output type)
 that the factory turns into an MLflow ``Judge``. Instructions and the feedback
@@ -36,16 +45,21 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from mlflow.genai.judges import Judge
 
+    from ail.metrics.contract import TraceMetrics
+
 __all__ = [
     "ScorerSpec",
     "CORRECTNESS",
     "MODULARITY",
     "GROUNDEDNESS",
+    "TOKEN_EFFICIENCY",
     "DEFAULT_SCORERS",
     "make_scorer",
     "make_correctness_judge",
     "make_modularity_judge",
     "make_groundedness_judge",
+    "make_token_efficiency_judge",
+    "build_token_efficiency_inputs",
     "with_rubric",
 ]
 
@@ -153,6 +167,58 @@ GROUNDEDNESS = ScorerSpec(
     ),
 )
 
+TOKEN_EFFICIENCY = ScorerSpec(
+    name="token_efficiency",
+    description=(
+        "Was the token spend justified for the task, conditioned on success "
+        "(1=wasteful, 5=tightly efficient)?"
+    ),
+    feedback_value_type=Literal[1, 2, 3, 4, 5],  # bounded graded scale
+    # As with modularity, a bounded Literal loses make_judge's default mean
+    # aggregation; restore aggregations meaningful for a graded metric.
+    aggregations=("mean", "median", "p90"),
+    instructions=(
+        "You are rating the TOKEN EFFICIENCY of an agent run on a 1-to-5 scale.\n\n"
+        "Task / request, with the run's L0 deterministic measurements:\n"
+        "{{ inputs }}\n\n"
+        "Agent response / outcome to judge:\n{{ outputs }}\n\n"
+        "Expected result / success criteria (ground truth):\n{{ expectations }}\n\n"
+        "The numbers under 'l0_signals' in the input are ALREADY MEASURED facts "
+        "(token counts, tool-call count, redundancy rate, repeated targets, cost, "
+        "model) computed deterministically from the trace. DO NOT recount tokens "
+        "or recompute any of them, and do not reward or penalize small rounding — "
+        "treat them as given and JUDGE them.\n\n"
+        "Your job is the judgement the numbers cannot make on their own:\n"
+        "  - Was the token spend JUSTIFIED by what the task actually required? A "
+        "large spend on a genuinely large task can still be efficient.\n"
+        "  - Was the redundancy AVOIDABLE or NECESSARY? Re-reading the same file "
+        "many times or re-running identical shell setup is usually avoidable "
+        "waste; re-checking a file that legitimately changed is not. Use the "
+        "named 'repeated_calls' targets to decide which.\n"
+        "  - Is QUALITY-PER-TOKEN good — did the spend buy a correspondingly "
+        "complete, correct outcome?\n\n"
+        "CRITICAL — efficiency is conditioned on SUCCESS. Spending few tokens by "
+        "doing less, stopping early, or producing a wrong/incomplete result is "
+        "NOT efficient: judge it harshly. If the response did not accomplish the "
+        "task (per the expected result / success criteria), a low token count "
+        "earns a LOW score, not a high one. Reward fewer tokens only when the "
+        "task was still accomplished. This scorer pairs with the correctness "
+        "guardrail: tokens may fall only when quality does not.\n\n"
+        "Scoring guide:\n"
+        "  1 - large avoidable waste (e.g. the same target hit many times for no "
+        "gain), or tokens burned without accomplishing the task\n"
+        "  2 - clear avoidable waste with some useful work\n"
+        "  3 - acceptable; spend roughly fits the task, minor avoidable overhead\n"
+        "  4 - efficient; little avoidable redundancy, spend tracks the work\n"
+        "  5 - tightly efficient; spend is well justified by the task with no "
+        "meaningful avoidable waste\n\n"
+        "Return the single integer (1-5) that best fits. In the rationale, NAME "
+        "the specific waste you saw (which repeated target, which boilerplate, or "
+        "say there was none) so the call is actionable — do not just restate the "
+        "numbers."
+    ),
+)
+
 #: The built-in scorer set, keyed by name. ``make_scorer`` and the loop
 #: controller look scorers up here; a deployer extends the set by adding a
 #: :class:`ScorerSpec`.
@@ -160,6 +226,7 @@ DEFAULT_SCORERS: dict[str, ScorerSpec] = {
     CORRECTNESS.name: CORRECTNESS,
     MODULARITY.name: MODULARITY,
     GROUNDEDNESS.name: GROUNDEDNESS,
+    TOKEN_EFFICIENCY.name: TOKEN_EFFICIENCY,
 }
 
 # Sentinel distinguishing "feedback_value_type not overridden" from an explicit
@@ -255,6 +322,89 @@ def make_groundedness_judge(
     return make_scorer(
         GROUNDEDNESS, model=model, instructions=instructions, inference_params=inference_params
     )
+
+
+def make_token_efficiency_judge(
+    *,
+    model: str | None = None,
+    instructions: str | None = None,
+    inference_params: dict[str, Any] | None = None,
+) -> Judge:
+    """Build the **token-efficiency** judge (graded 1–5).
+
+    The hybrid scorer. It judges efficiency from the **L0 summary**, never the
+    raw trace: feed its ``inputs`` with :func:`build_token_efficiency_inputs`,
+    which packs the already-computed deterministic signals (tokens, tool-call
+    count, redundancy, named repeated targets, cost, model) into a compact dict.
+    The judge adds only the verdict — was the spend justified, was redundancy
+    avoidable, is quality-per-token good — conditioned on task success. It is
+    deliberately **not** given ``{{ trace }}``: this corpus has 900K-token
+    traces that exceed a judge's context window, and the L0 facts the judge
+    needs are already summarized.
+    """
+    return make_scorer(
+        TOKEN_EFFICIENCY, model=model, instructions=instructions, inference_params=inference_params
+    )
+
+
+#: Cap on how many named repeated-target identities flow into the judge input.
+#: The full L0 ``repeated_calls`` list can be long; the judge only needs the
+#: worst offenders to name the waste, and a compact input keeps the judge call
+#: well inside its context window (the large-trace-safety contract).
+_TOP_REPEATS_FOR_JUDGE = 8
+
+
+def build_token_efficiency_inputs(
+    metrics: TraceMetrics,
+    *,
+    task: Any = None,
+) -> dict[str, Any]:
+    """Build the token-efficiency judge's ``inputs`` from an L0 record.
+
+    This is the L0→L2 bridge: it consumes the **already-computed**
+    :class:`ail.metrics.contract.TraceMetrics` (the deterministic L0 metrics for
+    one trace) and packs the signals the judge reasons over into a small dict.
+    Nothing here re-derives L0 — every number is copied straight from ``metrics``
+    — so the judge never recounts tokens or recomputes redundancy, and it scores
+    off this **summary**, not the raw (possibly 900K-token) trace.
+
+    Args:
+        metrics: The per-trace L0 metrics (from
+            :func:`ail.metrics.l0_deterministic.compute_trace_metrics`).
+        task: Optional task/request description for the run, so the judge can
+            decide whether the spend was justified *for that task*. Passed
+            through verbatim under ``"task"``.
+
+    Returns:
+        A JSON-serializable ``inputs`` dict with a ``"task"`` field and an
+        ``"l0_signals"`` block (tokens, tool calls, redundancy with the top
+        named repeated targets, cost, model, duration).
+    """
+    redundancy = metrics.redundancy
+    repeated = [
+        {
+            "tool": r.tool,
+            "identity": r.identity,
+            "count": r.count,
+            "kind": r.signature_kind,
+        }
+        for r in redundancy.repeated_calls[:_TOP_REPEATS_FOR_JUDGE]
+    ]
+    l0_signals: dict[str, Any] = {
+        "model": metrics.model,
+        "total_tokens": metrics.tokens.total_tokens,
+        "input_tokens": metrics.tokens.input_tokens,
+        "output_tokens": metrics.tokens.output_tokens,
+        "cache_total_tokens": metrics.tokens.cache_total_tokens,
+        "total_tool_calls": metrics.total_tool_calls,
+        "redundancy_rate": redundancy.redundancy_rate,
+        "redundant_tool_calls": redundancy.redundant_tool_calls,
+        "repeated_calls": repeated,
+        "duration_seconds": metrics.duration_seconds,
+        "cost_usd": metrics.cost.total_usd if metrics.cost.priced else None,
+        "cost_priced": metrics.cost.priced,
+    }
+    return {"task": task, "l0_signals": l0_signals}
 
 
 def with_rubric(spec: ScorerSpec, instructions: str) -> ScorerSpec:

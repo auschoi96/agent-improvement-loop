@@ -90,13 +90,14 @@ the intended Apache-2.0 release.
 | `src/ail/groundtruth/promote.py` | Stage 4: separate explicit `promote_approved()` into a frozen, disjoint pool. **Original.** |
 | `src/ail/groundtruth/store.py` | Per-pool persistence + review-queue round-trip. **Original.** |
 | `tests/test_groundtruth_schema.py`, `tests/test_groundtruth_pipeline.py`, `tests/test_groundtruth_mlflow.py` | Tests for the ground-truth package (incl. the no-synthesis assertions). **Original.** |
-| `src/ail/judges/scorers.py` | L2 scorer factory: `ScorerSpec` + the `correctness`/`modularity`/`groundedness` rubrics, thin wrappers over public `mlflow.genai.judges.make_judge`. Rubrics written from scratch. **Original (clean-room).** |
-| `src/ail/judges/alignment.py` | MemAlign wrapper over public `Judge.align` / `MemAlignOptimizer`. **Original (clean-room).** |
+| `src/ail/judges/scorers.py` | L2 scorer factory: `ScorerSpec` + the `correctness`/`modularity`/`groundedness`/`token_efficiency` rubrics, thin wrappers over public `mlflow.genai.judges.make_judge`. The hybrid `token_efficiency` judge + its `build_token_efficiency_inputs` L0→L2 bridge consume the project's own `ail.metrics` L0 contract. Rubrics written from scratch. **Original (clean-room).** |
+| `src/ail/judges/alignment.py` | MemAlign wrapper over public `Judge.align` / `MemAlignOptimizer`, plus the `unaligned_report` provenance helper. **Original (clean-room).** |
 | `src/ail/judges/agreement.py` | Pure judge-vs-human agreement metric (rate, floor, Cohen's kappa, fail-closed insufficient-data) + best-effort MLflow logging. **Original.** |
 | `src/ail/judges/pools.py` | Consumer-side pool handles (`AlignmentSet`/`HumanAnchor`/`AnchorItem`) + `assert_pools_disjoint` (re-exports the shared `ail.pools.Pool`). **Original.** |
 | `src/ail/judges/contract.py` | L2 output contract (pydantic v2): `AgreementReport`, `AlignmentReport`. **Original.** |
-| `src/ail/judges/registration.py` | Scheduled-scorer registration over public `mlflow.genai.scorers` (`Scorer.register`/`start`/`list_scorers`/`delete_scorer`), backed by `databricks-agents`. **Original.** |
-| `tests/test_judges.py`, `tests/test_judges_registration.py`, `tests/test_pools.py` | Tests for the judge layer and the shared pool vocabulary. **Original.** |
+| `src/ail/judges/registration.py` | Scheduled-scorer registration over public `mlflow.genai.scorers` (`Scorer.register`/`start`/`list_scorers`/`delete_scorer`), backed by `databricks-agents`, with the MemAlign-aware **align-then-register** pipeline (`create_aligned_scorer`, `register_scorers(alignment_set=...)`). **Original.** |
+| `src/ail/judges/labeling.py` | Human-label recording over the public assessment API (`mlflow.log_feedback` / `mlflow.log_expectation` with `AssessmentSource(source_type=HUMAN)`) + assembly of disjoint `AlignmentSet`/`HumanAnchor` pools (reuses the `ail.ingest` seam for raw-trace fetch; proves disjointness via `assert_pools_disjoint`). **Original (clean-room).** |
+| `tests/test_judges.py`, `tests/test_judges_registration.py`, `tests/test_judges_labeling.py`, `tests/test_pools.py` | Tests for the judge layer (incl. the token-efficiency judge, align-then-register, and labeling) and the shared pool vocabulary. **Original.** |
 
 ### Wave 1a ground-truth schema — clean-room note
 
@@ -141,6 +142,11 @@ OSS Apache-2.0 `mlflow.genai` API**:
   (`sample_rate`, `filter_string`) — for scheduled (ongoing) scorers. The
   Databricks runtime backend is the public **`databricks-agents`** package
   (added as the optional `agents` extra), not copied code.
+- The public MLflow **assessment-logging** API used by the labeling helper —
+  `mlflow.log_feedback` / `mlflow.log_expectation` and
+  `mlflow.entities.assessment_source.AssessmentSource` /
+  `AssessmentSourceType.HUMAN` — and `MlflowClient.set_experiment_tag` for the
+  best-effort `aligned` provenance tag. Public OSS surface only.
 
 The three rubrics (`correctness`/`modularity`/`groundedness`), the agreement
 metric (rate + floor + Cohen's kappa + the fail-closed insufficient-data rule),
