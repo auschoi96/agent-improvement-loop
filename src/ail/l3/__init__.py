@@ -39,7 +39,7 @@ from ail.l3.contract import (
     HaloReviewVerdict,
     RedundancyFinding,
 )
-from ail.l3.parser import parse_halo_report, strip_final_marker
+from ail.l3.parser import HaloReportParseError, parse_halo_report, strip_final_marker
 from ail.l3.reviewer import (
     FEEDBACK_NAME,
     REVIEW_PROMPT_TEMPLATE,
@@ -65,6 +65,7 @@ __all__ = [
     "write_span_records_jsonl",
     "mlflow_trace_to_otlp_jsonl",
     # parser
+    "HaloReportParseError",
     "parse_halo_report",
     "strip_final_marker",
     # reviewer

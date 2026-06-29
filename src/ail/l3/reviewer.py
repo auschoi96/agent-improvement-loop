@@ -485,14 +485,18 @@ def review_trace(
             temperature=temperature,
             use_responses_api=use_responses_api,
         )
-
-    verdict = parse_halo_report(
-        report,
-        subject_trace_id=export.trace_id,
-        reviewer_trace_id=reviewer_trace_id,
-        model=model,
-        generated_at=datetime.now(UTC).isoformat(),
-    )
+        # Parse INSIDE the reviewer-trace context: a degenerate HALO report
+        # raises HaloReportParseError, which (a) marks the reviewer's own trace
+        # as errored — so the failed review is visible — and (b) propagates out
+        # of review_trace before the attach below, so a broken review is NEVER
+        # recorded as a (fake-good) assessment on the subject trace.
+        verdict = parse_halo_report(
+            report,
+            subject_trace_id=export.trace_id,
+            reviewer_trace_id=reviewer_trace_id,
+            model=model,
+            generated_at=datetime.now(UTC).isoformat(),
+        )
 
     if attach:
         _attach_verdict(verdict, source_id=model or "halo")

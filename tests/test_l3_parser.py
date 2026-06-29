@@ -9,7 +9,9 @@ and the invariant that the parser — not the model's JSON — owns the trace id
 
 from __future__ import annotations
 
-from ail.l3.parser import parse_halo_report, strip_final_marker
+import pytest
+
+from ail.l3.parser import HaloReportParseError, parse_halo_report, strip_final_marker
 
 _GOOD_JSON = """\
 Here is my analysis of the trace. The agent re-read the same file repeatedly.
@@ -115,21 +117,7 @@ class TestParserOwnedFields:
 
 
 class TestDefensiveDegradation:
-    def test_missing_json_degrades_with_warning(self) -> None:
-        v = parse_halo_report("Just prose, no JSON here.<final/>", subject_trace_id="t1")
-        assert v.parse_warnings
-        assert v.raw_report == "Just prose, no JSON here.<final/>"
-        # Defaults are neutral, and the warning makes the degradation explicit.
-        assert v.token_efficiency == "fair"
-        assert v.token_waste_score == 0
-
-    def test_out_of_range_score_clamped(self) -> None:
-        report = (
-            '```json\n{"token_efficiency": "poor", "token_waste_score": 150, "summary": "x"}\n```'
-        )
-        v = parse_halo_report(report, subject_trace_id="t1")
-        assert v.token_waste_score == 100
-        assert any("clamped" in w for w in v.parse_warnings)
+    """Non-fatal normalizations: a real verdict with a real score, plus warnings."""
 
     def test_efficiency_synonyms_coerced(self) -> None:
         report = (
@@ -167,11 +155,45 @@ class TestDefensiveDegradation:
         assert v.redundancy_findings[0].description == "real"
         assert any("non-object" in w for w in v.parse_warnings)
 
-    def test_unparseable_score_defaults_to_zero(self) -> None:
+
+class TestFailLoud:
+    """A degenerate review must raise, never fabricate a (fake-good) verdict.
+
+    ``token_waste_score=0`` is the *best* score, so silently defaulting a broken
+    review to 0 would read as 'perfectly efficient' and poison the loop.
+    """
+
+    def test_missing_json_raises(self) -> None:
+        # HALO terminating without a verdict (the no-tool-call-turn failure mode).
+        with pytest.raises(HaloReportParseError):
+            parse_halo_report("Just prose, no JSON here.<final/>", subject_trace_id="t1")
+
+    def test_unparseable_score_raises(self) -> None:
         report = (
             '```json\n{"token_efficiency": "fair", "token_waste_score": "lots", '
             '"summary": "x"}\n```'
         )
-        v = parse_halo_report(report, subject_trace_id="t1")
-        assert v.token_waste_score == 0
-        assert any("token_waste_score" in w for w in v.parse_warnings)
+        with pytest.raises(HaloReportParseError):
+            parse_halo_report(report, subject_trace_id="t1")
+
+    def test_missing_score_key_raises(self) -> None:
+        report = '```json\n{"token_efficiency": "fair", "summary": "x"}\n```'
+        with pytest.raises(HaloReportParseError):
+            parse_halo_report(report, subject_trace_id="t1")
+
+    @pytest.mark.parametrize("bad", [150, 101, -1, -50])
+    def test_out_of_range_score_raises(self, bad: int) -> None:
+        report = (
+            f'```json\n{{"token_efficiency": "poor", "token_waste_score": {bad}, '
+            '"summary": "x"}\n```'
+        )
+        with pytest.raises(HaloReportParseError):
+            parse_halo_report(report, subject_trace_id="t1")
+
+    @pytest.mark.parametrize("ok", [0, 100, 42])
+    def test_boundary_scores_accepted(self, ok: int) -> None:
+        report = (
+            f'```json\n{{"token_efficiency": "poor", "token_waste_score": {ok}, '
+            '"summary": "x"}\n```'
+        )
+        assert parse_halo_report(report, subject_trace_id="t1").token_waste_score == ok

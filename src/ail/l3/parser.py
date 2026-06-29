@@ -26,7 +26,21 @@ from ail.l3.contract import (
     Severity,
 )
 
-__all__ = ["parse_halo_report", "strip_final_marker"]
+__all__ = ["HaloReportParseError", "parse_halo_report", "strip_final_marker"]
+
+
+class HaloReportParseError(ValueError):
+    """Raised when a HALO report has no usable structured verdict.
+
+    A degenerate report — HALO terminating on a no-tool-call turn without
+    emitting the JSON verdict, an unparseable token-waste score, or a score
+    outside 0–100 — **must fail loudly**. Silently returning a default verdict
+    would record a broken review as a real one, and because
+    ``token_waste_score=0`` is the *best* possible score, a swallowed failure
+    would read as "this trace is perfectly efficient" — a fake-good signal that
+    would poison the optimization loop. Fail closed instead.
+    """
+
 
 # HALO terminates its report with this marker; tolerate ``<final/>``,
 # ``<final />`` and a stray closing ``</final>``.
@@ -89,8 +103,8 @@ def _last_brace_object(text: str) -> str | None:
     return None
 
 
-def _extract_payload(text: str, warnings: list[str]) -> dict[str, Any] | None:
-    """Find and decode the first candidate that parses to a JSON object."""
+def _extract_payload(text: str) -> dict[str, Any] | None:
+    """Find and decode the first candidate that parses to a JSON object, or ``None``."""
     for candidate in _iter_json_candidates(text):
         try:
             decoded = json.loads(candidate)
@@ -98,7 +112,6 @@ def _extract_payload(text: str, warnings: list[str]) -> dict[str, Any] | None:
             continue
         if isinstance(decoded, dict):
             return decoded
-    warnings.append("no JSON verdict object found in HALO report; kept raw_report only")
     return None
 
 
@@ -114,15 +127,25 @@ def _coerce_efficiency(value: Any, warnings: list[str]) -> str:
     return "fair"
 
 
-def _coerce_score(value: Any, warnings: list[str]) -> int:
+def _coerce_score(value: Any) -> int:
+    """Coerce the headline token-waste score to an int in ``0..100``, or fail loud.
+
+    The score is the verdict's required headline signal, so — unlike the optional
+    fields — it never degrades to a default. An unparseable value, or one outside
+    ``0..100``, raises :class:`HaloReportParseError` rather than being silently
+    coerced to ``0`` or clamped (clamping a wildly out-of-range score, e.g.
+    ``150``, would mask a structural hallucination and the clamped value would
+    still read as a real verdict). No tolerance: a well-behaved judge emits an
+    integer in range, so anything else is a broken review.
+    """
     try:
         score = int(round(float(value)))
-    except (TypeError, ValueError):
-        warnings.append(f"unparseable token_waste_score {value!r}; defaulted to 0")
-        return 0
+    except (TypeError, ValueError) as exc:
+        raise HaloReportParseError(
+            f"token_waste_score is required and must be a number in 0-100; got {value!r}"
+        ) from exc
     if score < 0 or score > 100:
-        warnings.append(f"token_waste_score {score} out of range; clamped to 0-100")
-        return max(0, min(100, score))
+        raise HaloReportParseError(f"token_waste_score {score} is outside the valid range 0-100")
     return score
 
 
@@ -216,26 +239,27 @@ def parse_halo_report(
         generated_at: ISO-8601 timestamp to stamp on the verdict.
 
     Returns:
-        A :class:`HaloReviewVerdict`. On a missing/malformed JSON block the
-        verdict still returns, carrying the full ``raw_report`` and a
-        ``parse_warnings`` entry — parsing never raises.
+        A :class:`HaloReviewVerdict` built from the JSON block HALO emitted.
+
+    Raises:
+        HaloReportParseError: If the report has no parseable JSON verdict block,
+            or its required ``token_waste_score`` is missing, unparseable, or
+            outside ``0..100``. A degenerate review must fail loudly, never
+            return a fabricated default (see :class:`HaloReportParseError`).
     """
     warnings: list[str] = []
     body = strip_final_marker(report)
-    payload = _extract_payload(body, warnings)
+    payload = _extract_payload(body)
 
     if payload is None:
-        return HaloReviewVerdict(
-            subject_trace_id=subject_trace_id,
-            reviewer_trace_id=reviewer_trace_id,
-            model=model,
-            token_efficiency="fair",
-            token_waste_score=0,
-            summary="HALO report did not contain a parseable structured verdict.",
-            raw_report=report,
-            parse_warnings=warnings,
-            generated_at=generated_at,
+        raise HaloReportParseError(
+            "HALO report contained no parseable JSON verdict block "
+            "(the review likely terminated before producing a verdict)"
         )
+
+    # The required headline score is coerced first so a malformed score fails the
+    # whole parse loudly before any partial verdict is constructed.
+    token_waste_score = _coerce_score(payload.get("token_waste_score"))
 
     return HaloReviewVerdict(
         subject_trace_id=subject_trace_id,
@@ -244,7 +268,7 @@ def parse_halo_report(
         token_efficiency=_coerce_efficiency(  # type: ignore[arg-type]
             payload.get("token_efficiency", "fair"), warnings
         ),
-        token_waste_score=_coerce_score(payload.get("token_waste_score", 0), warnings),
+        token_waste_score=token_waste_score,
         estimated_wasted_tokens=_opt_int(payload.get("estimated_wasted_tokens")),
         summary=str(payload.get("summary", "")).strip(),
         redundancy_findings=_coerce_redundancy(payload.get("redundancy_findings"), warnings),

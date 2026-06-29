@@ -136,6 +136,22 @@ class TestReviewTrace:
         assert verdict.reviewer_trace_id == "rev-trace-xyz"
         assert captured_feedback == []
 
+    def test_parse_failure_raises_and_does_not_attach(
+        self,
+        synthetic_trace: Any,
+        captured_feedback: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A degenerate HALO report (e.g. terminated before emitting a verdict)
+        # must surface as an error and never be recorded as a fake-good assessment.
+        from ail.l3.parser import HaloReportParseError
+
+        trace = normalize_trace(synthetic_trace)
+        monkeypatch.setattr(rv, "run_halo_review", lambda *a, **k: "no JSON verdict here <final/>")
+        with pytest.raises(HaloReportParseError):
+            rv.review_trace(trace.trace_id, model="m", source=_FakeSource(trace))
+        assert captured_feedback == []
+
     def test_explicit_endpoint_skips_databricks_resolution(
         self, synthetic_trace: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
