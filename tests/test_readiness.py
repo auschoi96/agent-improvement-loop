@@ -128,18 +128,35 @@ class TestReadinessScenarios:
         assert any("human label" in r for r in status.reasons)
 
     def test_healthy_cost_goal_with_enough_traces_is_ready_to_prove(self, cohort: Cohort) -> None:
-        """A healthy token/cost goal with enough traces => READY_TO_PROVE.
+        """A healthy token/cost goal with enough traces + a frozen suite => READY_TO_PROVE.
 
-        A deterministic goal needs no quality gates — trace count alone clears it.
+        A deterministic goal needs no *quality* gates, but a frozen paired
+        benchmark is universal — you cannot prove even a token/cost reduction
+        without comparing candidate vs baseline on the same frozen tasks.
         """
-        status = compute_readiness(cohort, COST_GOAL, ReadinessFacts(trace_count=60))
+        facts = ReadinessFacts(trace_count=60, frozen_suite_present=True)
+        status = compute_readiness(cohort, COST_GOAL, facts)
 
         assert status.tier is ReadinessTier.READY_TO_PROVE
         assert status.can_prove_improvement is True
         assert status.reasons == []
-        # quality gates are not even evaluated for a deterministic goal
+        # quality gates are not evaluated for a deterministic goal...
         assert status.gate_for(GateName.HUMAN_LABELS) is None
         assert status.gate_for(GateName.JUDGE_TRUSTED) is None
+        # ...but the frozen-suite gate is, and it passed
+        frozen = status.gate_for(GateName.FROZEN_SUITE)
+        assert frozen is not None and frozen.passed is True
+
+    def test_cost_goal_without_frozen_suite_cannot_prove(self, cohort: Cohort) -> None:
+        """Even a token/cost goal with ample traces cannot prove without a frozen suite."""
+        facts = ReadinessFacts(trace_count=60, frozen_suite_present=False)
+        status = compute_readiness(cohort, COST_GOAL, facts)
+
+        assert status.tier is ReadinessTier.BASELINE_ONLY
+        assert status.can_prove_improvement is False
+        frozen = status.gate_for(GateName.FROZEN_SUITE)
+        assert frozen is not None and frozen.passed is False
+        assert any("frozen Task Suite" in r for r in status.reasons)
 
     def test_unmeasured_judge_distrusted_and_zero_coverage_not_ready(self, cohort: Cohort) -> None:
         """An unmeasured judge => distrusted, and 0 scored-coverage => not ready."""
@@ -203,7 +220,8 @@ class TestTierLadder:
     def test_thresholds_are_adjustable(self, cohort: Cohort) -> None:
         """The ladder is configurable, not buried constants (doc §2)."""
         lax = ReadinessThresholds(baseline_min_traces=2, prove_min_traces=5)
-        status = compute_readiness(cohort, COST_GOAL, ReadinessFacts(trace_count=6), thresholds=lax)
+        facts = ReadinessFacts(trace_count=6, frozen_suite_present=True)
+        status = compute_readiness(cohort, COST_GOAL, facts, thresholds=lax)
         assert status.tier is ReadinessTier.READY_TO_PROVE
 
 
@@ -254,14 +272,64 @@ class TestJudgeTrust:
         assert gate is not None and gate.passed is False
 
     def test_quality_goal_with_no_judges_fails_closed(self, cohort: Cohort) -> None:
-        """No judges at all => judge-trust gate fails (distrusted by default)."""
+        """The goal's required judge missing from facts => gate fails (no substitution)."""
         facts = ReadinessFacts(
             trace_count=60, label_count=30, frozen_suite_present=True, n_scored_traces=60
         )
         status = compute_readiness(cohort, QUALITY_GOAL, facts)
         gate = status.gate_for(GateName.JUDGE_TRUSTED)
         assert gate is not None and gate.passed is False
-        assert "no calibrated judge" in gate.reason
+        # the required guardrail judge is named as missing, not silently waved through
+        assert "no measurement for required judge" in gate.reason
+        assert "correctness" in gate.reason
+
+    def test_required_judge_not_substituted_by_unrelated_trusted_judge(
+        self, cohort: Cohort
+    ) -> None:
+        """A trusted unrelated judge must NOT let the gate pass (the fail-open fix).
+
+        The goal requires a 'security' judge; the facts carry only a trusted
+        'latency' judge. The gate must FAIL — 'security' was never measured — and
+        the cohort must not be provable.
+        """
+        goal = FakeGoal(
+            objective_metric="total_tokens",
+            requires_quality=True,
+            guardrail_names=("security",),
+        )
+        facts = ReadinessFacts(
+            trace_count=60,
+            label_count=30,
+            frozen_suite_present=True,
+            n_scored_traces=60,
+            judge_runs=60,
+            judge_run_successes=60,
+            judges=(_trusted_judge(name="latency", n_scored=60),),
+        )
+        status = compute_readiness(cohort, goal, facts)
+
+        gate = status.gate_for(GateName.JUDGE_TRUSTED)
+        assert gate is not None and gate.passed is False
+        assert "security" in gate.reason
+        assert "no measurement for required judge" in gate.reason
+        assert status.can_prove_improvement is False
+        assert status.tier is ReadinessTier.BASELINE_ONLY
+
+    def test_quality_goal_naming_no_judge_fails_closed(self, cohort: Cohort) -> None:
+        """A quality goal with empty guardrail_names cannot certify a quality claim."""
+        goal = FakeGoal(objective_metric="total_tokens", requires_quality=True, guardrail_names=())
+        facts = ReadinessFacts(
+            trace_count=60,
+            label_count=30,
+            frozen_suite_present=True,
+            n_scored_traces=60,
+            judges=(_trusted_judge(name="latency", n_scored=60),),
+        )
+        status = compute_readiness(cohort, goal, facts)
+        gate = status.gate_for(GateName.JUDGE_TRUSTED)
+        assert gate is not None and gate.passed is False
+        assert "names no guardrail judge" in gate.reason
+        assert status.tier is ReadinessTier.BASELINE_ONLY
 
 
 # ---------------------------------------------------------------------------
@@ -367,3 +435,27 @@ class TestFactsValidation:
             ReadinessFacts(trace_count=-1)
         with pytest.raises(ValueError, match=">= 0"):
             JudgeFact(judge_name="j", n_scored_traces=-1)
+
+
+# ---------------------------------------------------------------------------
+# Defensive gate-presence (fail loud, not silently green)
+# ---------------------------------------------------------------------------
+
+
+class TestGatePresenceInvariant:
+    def test_tier_derivation_raises_if_a_required_gate_is_dropped(self) -> None:
+        """Tier derivation must not silently pass when a required gate is missing.
+
+        Guards against a future refactor dropping a gate from the built set: the
+        derivation reads gates by name and raises loud rather than treating an
+        absent gate as a pass.
+        """
+        from ail.readiness.compute import _derive_tier
+
+        # a quality goal's gate set is missing FROZEN_SUITE (and the quality gates)
+        partial = [
+            Gate(name=GateName.TRACE_BASELINE, passed=True, reason="ok"),
+            Gate(name=GateName.TRACE_PROVE, passed=True, reason="ok"),
+        ]
+        with pytest.raises(RuntimeError, match="was not evaluated"):
+            _derive_tier(QUALITY_GOAL, partial)

@@ -153,36 +153,40 @@ def compute_readiness(
 ) -> ReadinessStatus:
     """Compute fail-closed readiness for ``cohort`` against ``goal``.
 
-    Evaluates the trace gates (every goal) and, for a goal whose
-    :attr:`~ail.readiness.goal.GoalView.requires_quality` is set, the quality
-    gates (frozen suite, human labels, a trusted judge, scored-coverage). Derives
-    the tier from which gates pass and returns a
-    :class:`~ail.readiness.contract.ReadinessStatus` whose ``reasons`` enumerate
-    every unmet gate. When any gate is unmet the tier is a not-ready tier — the
-    function never returns a ready tier on missing data (the refusal is the
-    feature).
+    Evaluates the universal gates (the trace counts and the **frozen Task Suite** —
+    no improvement, deterministic or judged, can be proven without a paired
+    baseline-vs-candidate benchmark) and, for a goal whose
+    :attr:`~ail.readiness.goal.GoalView.requires_quality` is set, the quality gates
+    (human labels, a trusted judge, scored-coverage). Derives the tier from which
+    gates pass and returns a :class:`~ail.readiness.contract.ReadinessStatus` whose
+    ``reasons`` enumerate every unmet gate. When any gate is unmet the tier is a
+    not-ready tier — the function never returns a ready tier on missing data (the
+    refusal is the feature).
     """
     th = thresholds or ReadinessThresholds()
     eval_health = compute_eval_health(cohort, facts, thresholds=th, generated_at=generated_at)
 
+    # Universal gates apply to every goal: a deterministic token/cost claim is as
+    # dependent on a frozen paired benchmark as a judged one (docs/ARCHITECTURE.md
+    # §4 — comparison runs on the FROZEN Task Suite only).
     gates: list[Gate] = [
         _trace_baseline_gate(facts.trace_count, th),
         _trace_prove_gate(facts.trace_count, th),
+        _frozen_suite_gate(facts.frozen_suite_present),
     ]
     if goal.requires_quality:
-        gates.append(_frozen_suite_gate(facts.frozen_suite_present))
         gates.append(_human_labels_gate(facts.label_count, th))
         gates.append(_judge_trusted_gate(goal, facts))
         gates.append(_scored_coverage_gate(eval_health, th))
 
-    tier = _derive_tier(goal, facts, gates, th)
+    tier = _derive_tier(goal, gates)
     reasons = [g.reason for g in gates if not g.passed]
 
     notes: list[str] = []
     if tier == ReadinessTier.READY_TO_PROVE:
         notes.append(
             "data sufficient to prove an improvement; the comparison harness still "
-            "requires candidate runs on the frozen Task Suite before promoting"
+            "must execute candidate runs against the frozen Task Suite before promoting"
         )
 
     return ReadinessStatus(
@@ -244,36 +248,59 @@ def _human_labels_gate(label_count: int, th: ReadinessThresholds) -> Gate:
     return Gate(name=GateName.HUMAN_LABELS, passed=passed, reason=reason)
 
 
-def _judge_trusted_gate(goal: GoalView, facts: ReadinessFacts) -> Gate:
-    """A quality goal needs at least one relevant, trusted judge.
+def _required_judge_names(goal: GoalView) -> set[str]:
+    """The exact set of judges a quality goal depends on — its named guardrails.
 
-    Relevant judges are those whose name is in the goal's guardrails (if any
-    match); otherwise every judge in the facts. The gate passes only when that set
-    is non-empty **and** none of its judges are distrusted — an unmeasured judge
-    is distrusted by default, so a goal with no judges (or only unmeasured ones)
-    fails closed.
+    Fail-closed by construction: the gate is checked against *exactly* these
+    judges, never any unrelated judge that happens to be present. In this
+    architecture the objective_metric is the deterministic L0 reduction and the
+    guardrails are the judges (``docs/ARCHITECTURE.md`` §3); a deployer whose
+    objective is itself a judged metric must list that judge among
+    ``guardrail_names`` so it is required here. An empty set means the quality
+    goal named no judge at all — which the gate refuses to certify (a quality
+    claim with no calibrated judge is unfounded).
     """
-    guardrails = set(goal.guardrail_names)
-    relevant = [jf for jf in facts.judges if jf.judge_name in guardrails] or list(facts.judges)
-    if not relevant:
+    return set(goal.guardrail_names)
+
+
+def _judge_trusted_gate(goal: GoalView, facts: ReadinessFacts) -> Gate:
+    """A quality goal's required guardrail judges must each be present and trusted.
+
+    Evaluated against *exactly* the goal's required judges (see
+    :func:`_required_judge_names`) — never substituting an unrelated judge. Each
+    required judge must be present in ``facts.judges`` **and** trusted (measured,
+    not distrusted, not below floor). A required judge missing from the facts, or
+    unmeasured/below-floor, fails the gate with a clear reason; a quality goal that
+    names no judge fails closed. This is the wall: a trusted ``latency`` judge can
+    never stand in for an unmeasured ``security`` judge the goal actually needs.
+    """
+    required = _required_judge_names(goal)
+    if not required:
         return Gate(
             name=GateName.JUDGE_TRUSTED,
             passed=False,
-            reason="no calibrated judge: judges are distrusted by default until measured",
+            reason="quality goal names no guardrail judge; a quality claim needs a "
+            "calibrated judge — cannot certify (fail closed)",
         )
-    distrusted = [jf.judge_name for jf in relevant if jf.is_distrusted]
-    if distrusted:
-        return Gate(
-            name=GateName.JUDGE_TRUSTED,
-            passed=False,
-            reason=f"judge(s) {', '.join(distrusted)} distrusted "
-            "(unmeasured against humans or below agreement floor)",
-        )
-    trusted = [jf.judge_name for jf in relevant]
+    by_name = {jf.judge_name: jf for jf in facts.judges}
+    missing = sorted(name for name in required if name not in by_name)
+    distrusted = sorted(
+        name for name in required if name in by_name and by_name[name].is_distrusted
+    )
+    if missing or distrusted:
+        problems: list[str] = []
+        if missing:
+            problems.append(f"no measurement for required judge(s) {', '.join(missing)}")
+        if distrusted:
+            problems.append(
+                f"required judge(s) {', '.join(distrusted)} distrusted "
+                "(unmeasured against humans or below agreement floor)"
+            )
+        return Gate(name=GateName.JUDGE_TRUSTED, passed=False, reason="; ".join(problems))
     return Gate(
         name=GateName.JUDGE_TRUSTED,
         passed=True,
-        reason=f"judge(s) {', '.join(trusted)} measured and trusted",
+        reason=f"required judge(s) {', '.join(sorted(required))} measured and trusted",
     )
 
 
@@ -292,35 +319,57 @@ def _scored_coverage_gate(eval_health: EvalHealth, th: ReadinessThresholds) -> G
 # -- tier derivation -------------------------------------------------------
 
 
-def _derive_tier(
-    goal: GoalView,
-    facts: ReadinessFacts,
-    gates: list[Gate],
-    th: ReadinessThresholds,
-) -> ReadinessTier:
+# Gate names whose passing defines each tier, keyed off the gates actually built.
+# A frozen Task Suite is universal — proving any improvement needs a paired
+# benchmark — so it sits in the prove set for every goal, not just quality ones.
+_PROVE_GATES = (GateName.TRACE_PROVE, GateName.FROZEN_SUITE)
+_QUALITY_GATES = (
+    GateName.FROZEN_SUITE,
+    GateName.HUMAN_LABELS,
+    GateName.JUDGE_TRUSTED,
+    GateName.SCORED_COVERAGE,
+)
+
+
+def _derive_tier(goal: GoalView, gates: list[Gate]) -> ReadinessTier:
     """Map the gate results onto a tier, fail-closed.
 
     Below the baseline trace floor (0 traces is the limiting case) the cohort is
-    always *collecting*. Above it, a token/cost goal climbs to *ready-to-prove* on
-    trace count alone; a quality goal must additionally pass every quality gate to
-    reach *ready-for-quality*, and then clear the prove trace floor to reach
-    *ready-to-prove*.
+    *collecting*. To *prove* an improvement (any goal) the trace-power and frozen-
+    suite gates must pass; a quality goal must additionally clear every quality
+    gate to reach *ready-for-quality*, then the prove floor for *ready-to-prove*.
+
+    Reads gate results by name through :func:`_gate_passed`, which raises if a
+    required gate was never evaluated — so a refactor that drops a gate fails loud
+    rather than silently reading as green.
     """
-    if facts.trace_count < th.baseline_min_traces:
+    by_name = {g.name: g for g in gates}
+
+    if not _gate_passed(by_name, GateName.TRACE_BASELINE):
         return ReadinessTier.COLLECTING
 
-    has_power = facts.trace_count >= th.prove_min_traces
+    quality_gates = _QUALITY_GATES if goal.requires_quality else ()
+    prove_gates = _PROVE_GATES + quality_gates
+    if all(_gate_passed(by_name, name) for name in prove_gates):
+        return ReadinessTier.READY_TO_PROVE
 
-    if not goal.requires_quality:
-        return ReadinessTier.READY_TO_PROVE if has_power else ReadinessTier.BASELINE_ONLY
+    if quality_gates and all(_gate_passed(by_name, name) for name in quality_gates):
+        return ReadinessTier.READY_FOR_QUALITY
 
-    quality_gate_names = {
-        GateName.FROZEN_SUITE,
-        GateName.HUMAN_LABELS,
-        GateName.JUDGE_TRUSTED,
-        GateName.SCORED_COVERAGE,
-    }
-    quality_ready = all(g.passed for g in gates if g.name in quality_gate_names)
-    if not quality_ready:
-        return ReadinessTier.BASELINE_ONLY
-    return ReadinessTier.READY_TO_PROVE if has_power else ReadinessTier.READY_FOR_QUALITY
+    return ReadinessTier.BASELINE_ONLY
+
+
+def _gate_passed(by_name: dict[GateName, Gate], name: GateName) -> bool:
+    """Whether the gate named ``name`` passed; raise loud if it was not evaluated.
+
+    Tier derivation must never reference a gate that ``compute_readiness`` did not
+    build — that would let a dropped gate read as a silent pass. A missing gate is
+    a programming error in this module, so it raises rather than defaulting.
+    """
+    gate = by_name.get(name)
+    if gate is None:
+        raise RuntimeError(
+            f"required readiness gate {name.value!r} was not evaluated — "
+            "bug in compute_readiness (a gate was dropped from the built set)"
+        )
+    return gate.passed

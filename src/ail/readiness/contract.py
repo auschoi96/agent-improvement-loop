@@ -48,14 +48,16 @@ class ReadinessTier(StrEnum):
     * :attr:`COLLECTING` — too few traces to even baseline (0 traces is the
       limiting case). No baseline, no claims; tell the user what to connect.
     * :attr:`BASELINE_ONLY` — enough traces to baseline + diagnose waste, but
-      **cannot prove improvement**: not enough traces for statistical power and/or
-      (for a quality goal) the quality gates are unmet.
+      **cannot prove improvement**: not enough traces for statistical power, no
+      frozen paired benchmark, and/or (for a quality goal) the quality gates are
+      unmet.
     * :attr:`READY_FOR_QUALITY` — a *quality* goal's gates all pass (frozen suite,
       human labels, a trusted/calibrated judge, scored-coverage) so a trustworthy
       quality signal exists, but trace count is still below the prove floor.
     * :attr:`READY_TO_PROVE` — the data is sufficient to prove an improvement for
-      this goal. (The comparison harness still requires candidate runs on the
-      frozen Task Suite; this tier gates *data sufficiency*, not the run itself.)
+      this goal (enough traces **and** a frozen Task Suite to compare on). The
+      comparison harness still has to *execute* the candidate runs; this tier
+      gates *data sufficiency*, not the run itself.
     """
 
     COLLECTING = "collecting"
@@ -67,9 +69,10 @@ class ReadinessTier(StrEnum):
 class GateName(StrEnum):
     """Stable identifier of a single readiness gate.
 
-    Trace gates apply to every goal; the rest are evaluated only for a goal whose
-    :attr:`~ail.readiness.goal.GoalView.requires_quality` is set (a quality claim
-    needs a frozen suite, human labels, a trusted judge, and real coverage).
+    The trace gates and the frozen-suite gate are **universal** — every goal needs
+    a paired baseline-vs-candidate benchmark to prove any improvement. The
+    remaining gates (human labels, judge trust, scored-coverage) are evaluated only
+    for a goal whose :attr:`~ail.readiness.goal.GoalView.requires_quality` is set.
     """
 
     TRACE_BASELINE = "trace_baseline"
