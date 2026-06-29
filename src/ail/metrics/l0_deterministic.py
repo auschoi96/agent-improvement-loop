@@ -71,10 +71,10 @@ def _entry(model: str, in_rate: float, out_rate: float, confidence: str) -> Pric
     )
 
 
-#: Default model→price mapping. Keys are normalized model ids (see
-#: :func:`_normalize_model`). Confidence is ``"high"`` for base input/output
-#: rates taken directly from the pricing table and ``"medium"`` for the
-#: cache rates (derived from documented multipliers, TTL assumed).
+#: Default model→price mapping. Keys are canonical model ids (see
+#: :func:`_canonicalize_model`). Confidence is ``"high"`` for the base
+#: input/output rates taken directly from the pricing table; the cache-rate
+#: caveat (derived multipliers, TTL assumed) lives in each entry's ``notes``.
 DEFAULT_PRICEBOOK: dict[str, PriceBookEntry] = {
     "claude-opus-4-8": _entry("claude-opus-4-8", 5.0, 25.0, "high"),
     "claude-opus-4-7": _entry("claude-opus-4-7", 5.0, 25.0, "high"),
@@ -86,31 +86,59 @@ DEFAULT_PRICEBOOK: dict[str, PriceBookEntry] = {
     "claude-fable-5": _entry("claude-fable-5", 10.0, 50.0, "high"),
 }
 
-_DATE_SUFFIX = re.compile(r"[-@]\d{6,8}$")
+# Provider-routing prefixes that denote the SAME SKU as the bare model id.
+# ``anthropic.`` is the Amazon Bedrock model-id prefix (per the Claude API
+# reference, Bedrock ids take an ``anthropic.`` prefix) — same model, same price.
+_PROVIDER_PREFIXES = ("anthropic.",)
+
+#: Explicit alias -> canonical-model map. Only entries we can SOURCE as the same
+#: SKU (same price) belong here. Source: the Claude API model table's "full ID"
+#: column, where a dated snapshot is the same model as its bare alias.
+#: NOTE: speed-tier variants like ``-fast`` are deliberately absent — fast mode
+#: is billed at *premium* pricing (per the Claude API fast-mode notes), so it is
+#: a different SKU and must fall through to unpriced+flagged, never be mapped
+#: here without a cited price of its own.
+_MODEL_ALIASES: dict[str, str] = {
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+    "claude-opus-4-5-20251101": "claude-opus-4-5",
+    "claude-sonnet-4-5-20250929": "claude-sonnet-4-5",
+}
 
 
-def _normalize_model(model: str) -> str:
-    """Normalize a producer model id to a price-book key.
+def _canonicalize_model(model: str) -> str:
+    """Lowercase, strip whitespace and a known provider-routing prefix.
 
-    Lowercases, drops a leading provider prefix (``anthropic.``), a trailing
-    dated-snapshot suffix (``-20251001`` / ``@20251001``) and a ``-fast``
-    speed-tier suffix, so e.g. ``Anthropic.claude-opus-4-8`` and
-    ``claude-haiku-4-5-20251001`` both resolve to a base key.
+    This performs **only** safe, same-SKU canonicalization: case folding and the
+    documented ``anthropic.`` Bedrock prefix. It does NOT strip arbitrary date or
+    speed-tier suffixes — dated snapshots resolve through the explicit
+    :data:`_MODEL_ALIASES` table, and anything else (e.g. a ``-fast`` tier or an
+    unknown vendor id) is left to fall through to unpriced in
+    :func:`lookup_price`.
     """
     m = model.strip().lower()
-    if m.startswith("anthropic."):
-        m = m[len("anthropic.") :]
-    if m.endswith("-fast"):
-        m = m[: -len("-fast")]
-    m = _DATE_SUFFIX.sub("", m)
+    for prefix in _PROVIDER_PREFIXES:
+        if m.startswith(prefix):
+            m = m[len(prefix) :]
     return m
 
 
 def lookup_price(model: str | None, pricebook: dict[str, PriceBookEntry]) -> PriceBookEntry | None:
-    """Return the price-book entry for ``model``, or ``None`` if not covered."""
+    """Return the price-book entry for ``model``, or ``None`` if not covered.
+
+    Resolution order: exact (canonicalized) key, then the explicit sourced
+    :data:`_MODEL_ALIASES` table. A model that matches neither is **not** priced
+    — no fuzzy suffix-stripping that could map a differently-billed variant onto
+    a base rate.
+    """
     if not model:
         return None
-    return pricebook.get(_normalize_model(model))
+    canon = _canonicalize_model(model)
+    if canon in pricebook:
+        return pricebook[canon]
+    aliased = _MODEL_ALIASES.get(canon)
+    if aliased is not None:
+        return pricebook.get(aliased)
+    return None
 
 
 # ---------------------------------------------------------------------------

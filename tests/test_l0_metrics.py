@@ -89,12 +89,26 @@ class TestPricing:
         assert cost.priced is False
         assert any("no recorded model" in f for f in cost.flags)
 
-    def test_model_normalization(self) -> None:
+    def test_model_aliasing_is_explicit_and_sourced(self) -> None:
+        # exact id resolves
         assert lookup_price("claude-opus-4-8", DEFAULT_PRICEBOOK) is not None
+        # provider-routing prefix (Bedrock) is the same SKU -> resolves
         assert lookup_price("Anthropic.claude-opus-4-8", DEFAULT_PRICEBOOK) is not None
+        # a dated snapshot resolves via the explicit, sourced alias table
         assert lookup_price("claude-haiku-4-5-20251001", DEFAULT_PRICEBOOK) is not None
-        assert lookup_price("claude-opus-4-8-fast", DEFAULT_PRICEBOOK) is not None
+        # an unknown model is not priced
         assert lookup_price("not-a-model", DEFAULT_PRICEBOOK) is None
+
+    def test_fast_speed_tier_is_not_silently_priced_as_base(self) -> None:
+        # fast mode is a different (premium) SKU; without a cited fast price it
+        # must be left UNPRICED, never mapped onto the base claude-opus-4-8 rate.
+        assert lookup_price("claude-opus-4-8-fast", DEFAULT_PRICEBOOK) is None
+        cost = compute_cost(
+            TokenUsage(input_tokens=1_000_000), "claude-opus-4-8-fast", DEFAULT_PRICEBOOK
+        )
+        assert cost.priced is False
+        assert cost.total_usd == 0.0
+        assert any("not in the price book" in f for f in cost.flags)
 
     def test_custom_pricebook_overrides_default(self) -> None:
         cost = compute_cost(TokenUsage(input_tokens=1_000_000), "claude-opus-4-8", {})

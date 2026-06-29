@@ -23,7 +23,8 @@ REFERENCE_PROFILE = "dais-demo"
 
 
 def _big_session() -> NormalizedTrace:
-    # 600K tokens, re-runs the same shell prologue 14x and re-reads one file 5x
+    # ~943K tokens (matches the documented 943K session), re-runs the same shell
+    # prologue 14x and re-reads one file 5x.
     tools: list[ToolCall] = []
     for i in range(14):
         tools.append(
@@ -41,19 +42,20 @@ def _big_session() -> NormalizedTrace:
         producer="claude_code",
         model="claude-opus-4-8",
         session_id="sess-huge",
-        token_usage=TokenUsage(input_tokens=560_000, output_tokens=40_000, _total_tokens=600_000),
+        token_usage=TokenUsage(input_tokens=900_000, output_tokens=43_000, _total_tokens=943_000),
         tool_calls=tools,
         execution_duration_ms=9_000_000,
     )
 
 
 def _second_big() -> NormalizedTrace:
+    # ~549K tokens (matches the documented 549K session)
     return NormalizedTrace(
         trace_id="trace:/loc/big2",
         status=TraceStatus.OK,
         producer="claude_code",
         model="claude-opus-4-8",
-        token_usage=TokenUsage(input_tokens=500_000, output_tokens=20_000, _total_tokens=520_000),
+        token_usage=TokenUsage(input_tokens=520_000, output_tokens=29_000, _total_tokens=549_000),
         tool_calls=[ToolCall(id="x", name="Bash", arguments={"command": "cd /repo\nmake"})],
         execution_duration_ms=1_000_000,
     )
@@ -100,20 +102,33 @@ class TestDiagnosis:
         assert reads[0]["count"] == 5
         assert reads[0]["identity"] == "/repo/schema.ts"
 
-    def test_reconciliation_block(self) -> None:
+    def test_reconciliation_is_derived(self) -> None:
         _, payload = build_example1_diagnosis(_report())
         rec = payload["reconciliation_with_doc"]
+        # high sessions (~943K, ~549K) are within tolerance of the documented pair
         assert rec["high_token_sessions"]["status"] == "match"
-        assert "reproduced" in rec["shell_boilerplate"]["status"]
-        # the synthetic corpus has max read-same-path 5x, so the 34x doc figure is flagged
+        # 14x shell prologue >= documented floor 13x -> reproduced
+        assert rec["shell_boilerplate"]["reproduced"] is True
+        assert rec["shell_boilerplate"]["status"].startswith("reproduced")
+        # max read-same-path is 5x, far below the documented 34x -> NOT reproduced
+        assert rec["read_same_path"]["reproduced"] is False
         assert "NOT reproduced" in rec["read_same_path"]["status"]
         assert rec["read_same_path"]["live_max_read_same_path"] == 5
+
+    def test_reconciliation_flags_drift_when_not_reproduced(self) -> None:
+        # a corpus with no big sessions / no boilerplate must NOT report a match
+        small = compute_l0([_small()], experiment_id="x", generated_at="x")
+        _, payload = build_example1_diagnosis(small)
+        rec = payload["reconciliation_with_doc"]
+        assert rec["high_token_sessions"]["status"].startswith("drift")
+        assert rec["shell_boilerplate"]["reproduced"] is False
+        assert rec["read_same_path"]["reproduced"] is False
 
     def test_markdown_renders_key_facts(self) -> None:
         md, _ = build_example1_diagnosis(_report())
         assert "# Example 1 — Token-Waste Diagnosis" in md
         assert "660599403165942" in md
-        assert "600,000" in md  # huge session total tokens
+        assert "943,000" in md  # huge session total tokens
         assert "Reconciliation" in md
         assert "14×" in md  # shell boilerplate repeats
 
@@ -123,8 +138,14 @@ def test_live_pull_and_l0(tmp_path: object) -> None:
     """Acceptance: pull the reference experiment, compute L0, sanity-check it.
 
     Guarded by ``AIL_LIVE_MLFLOW=1`` so the default suite is green offline.
-    Auth: set DATABRICKS_HOST + DATABRICKS_TOKEN, or rely on the
-    ``AIL_DATABRICKS_PROFILE`` CLI profile (default ``dais-demo``).
+
+    Auth: on the reference workspace the experiment is UC-table-backed and read
+    through MLflow 3's v4 trace REST store, which rejects OAuth-profile
+    credentials for the span ``batchGet`` — so a CLI profile alone does **not**
+    work here. Set ``DATABRICKS_HOST`` + ``DATABRICKS_TOKEN`` (e.g.
+    ``export DATABRICKS_TOKEN=$(databricks auth token -p <profile> | jq -r .access_token)``);
+    ``_build_source`` uses those. ``AIL_DATABRICKS_PROFILE`` is only a fallback
+    for workspaces where profile auth does reach the span store.
     """
     if os.environ.get("AIL_LIVE_MLFLOW") != "1":
         pytest.skip("set AIL_LIVE_MLFLOW=1 to run the live MLflow pull")

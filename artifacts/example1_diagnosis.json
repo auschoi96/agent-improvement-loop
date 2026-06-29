@@ -1,18 +1,18 @@
 {
   "schema_version": "l0.metrics/v1",
   "experiment_id": "660599403165942",
-  "generated_at": "2026-06-29T08:30:42.456472+00:00",
+  "generated_at": "2026-06-29T08:54:10.927851+00:00",
   "scenario": "Example 1 \u2014 token waste (ARCHITECTURE.md \u00a78)",
   "corpus": {
-    "n_traces": 90,
+    "n_traces": 91,
     "status_counts": {
-      "OK": 90
+      "OK": 91
     },
     "by_model": [
       {
         "model": "claude-opus-4-8",
-        "n_traces": 84,
-        "total_tokens": 7392583
+        "n_traces": 85,
+        "total_tokens": 8005403
       },
       {
         "model": "claude-sonnet-4-6",
@@ -28,7 +28,7 @@
     "by_producer": [
       {
         "producer": "claude_code",
-        "n_traces": 89
+        "n_traces": 90
       },
       {
         "producer": "<unknown-producer>",
@@ -37,16 +37,16 @@
     ]
   },
   "tokens": {
-    "total": 7639587,
-    "median": 18828.5,
-    "mean": 84884.3,
-    "p90": 242673.9,
+    "total": 8252407,
+    "median": 19149.0,
+    "mean": 90685.79,
+    "p90": 249891.0,
     "max": 942929,
     "min": 0
   },
   "cost": {
-    "total_usd": 61.356799,
-    "priced_traces": 88,
+    "total_usd": 66.637559,
+    "priced_traces": 89,
     "unpriced_traces": 2,
     "flags": [
       "Unpriced models (tokens counted, cost omitted): (no model recorded)",
@@ -64,6 +64,18 @@
       "total_tool_calls": 60,
       "duration_seconds": 33095.088,
       "cost_usd": 6.208125,
+      "cost_priced": true
+    },
+    {
+      "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+      "session_id": "b50a3d9c-0bca-42a3-b475-eca106759f6b",
+      "model": "claude-opus-4-8",
+      "total_tokens": 612820,
+      "input_tokens": 501987,
+      "output_tokens": 110833,
+      "total_tool_calls": 90,
+      "duration_seconds": 2109.912,
+      "cost_usd": 5.28076,
       "cost_priced": true
     },
     {
@@ -92,9 +104,9 @@
     }
   ],
   "tool_redundancy": {
-    "strict_redundancy_rate": 0.006963,
+    "strict_redundancy_rate": 0.006457,
     "redundant_tool_calls": 8,
-    "total_tool_calls": 1149,
+    "total_tool_calls": 1239,
     "shell_boilerplate_top": [
       {
         "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/a9b23c23c1efb90c576cd012f0a70522",
@@ -102,6 +114,13 @@
         "count": 27,
         "identity": "cd /Users/austin.choi/PycharmProjects2/omniagent/agent-framework",
         "total_tool_calls": 60
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+        "tool": "Bash",
+        "count": 20,
+        "identity": "cd /Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics",
+        "total_tool_calls": 90
       },
       {
         "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/680444e7d8a9679489700fb3d2958dc6",
@@ -144,13 +163,6 @@
         "count": 7,
         "identity": "cd /Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl",
         "total_tool_calls": 57
-      },
-      {
-        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/e10ee82da2412883ea522b81092b472a",
-        "tool": "Bash",
-        "count": 5,
-        "identity": "export SCRATCH=\"/private/tmp/claude-502/-Users-austin-choi/<id>/scratchpad\"",
-        "total_tool_calls": 45
       }
     ],
     "repeated_file_reads_top": [
@@ -160,6 +172,13 @@
         "count": 4,
         "identity": "/Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl/scripts/sync_from_logfood.mjs",
         "total_tool_calls": 66
+      },
+      {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+        "tool": "Read",
+        "count": 3,
+        "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics/src/ail/metrics/report.py",
+        "total_tool_calls": 90
       },
       {
         "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/8b53ae884b3458d81c3676c7da00aff4",
@@ -202,13 +221,6 @@
         "count": 2,
         "identity": "/private/tmp/claude-502/-Users-austin-choi/4c756d53-33f7-4fed-9ff8-ee44d68fc986/tasks/bjsu6ryn1.output",
         "total_tool_calls": 2
-      },
-      {
-        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/bb4362c1c8c7baeff292e11b7c3e69fb",
-        "tool": "Read",
-        "count": 2,
-        "identity": "/Users/austin.choi/PycharmProjects2/omniagent/agent-framework/deploy/databricks/deploy.py",
-        "total_tool_calls": 18
       }
     ],
     "repeated_file_access_top": [
@@ -241,6 +253,13 @@
         "total_tool_calls": 156
       },
       {
+        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+        "tool": "Edit",
+        "count": 3,
+        "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics/src/ail/metrics/l0_deterministic.py",
+        "total_tool_calls": 90
+      },
+      {
         "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/44e3e992122283e59710d40aba014134",
         "tool": "Edit",
         "count": 3,
@@ -260,13 +279,6 @@
         "count": 3,
         "identity": "/private/tmp/claude-502/-Users-austin-choi/b44358b4-b9b7-4782-aea6-a181891c80de/scratchpad/repoint_cc_tracing.py",
         "total_tool_calls": 45
-      },
-      {
-        "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/f9eb702f32e1f531944ecad247a4deea",
-        "tool": "Edit",
-        "count": 3,
-        "identity": "/Users/austin.choi/PycharmProjects2/emerging_epl/emerging-epl/scripts/sync_from_logfood.mjs",
-        "total_tool_calls": 19
       }
     ]
   },
@@ -274,6 +286,7 @@
     "high_token_sessions": {
       "live": [
         942929,
+        612820,
         549300,
         543910
       ],
@@ -281,11 +294,13 @@
         549000,
         943000
       ],
+      "tolerance": 0.15,
       "status": "match"
     },
     "median_tokens": {
-      "live": 18828.5,
+      "live": 19149.0,
       "doc": 18500,
+      "tolerance": 0.15,
       "status": "match"
     },
     "shell_boilerplate": {
@@ -294,13 +309,16 @@
         13,
         21
       ],
-      "status": "reproduced (re-run shell setup prologue is present and in/above range)"
+      "reproduced": true,
+      "status": "reproduced (max 27\u00d7/trace \u2265 documented floor 13\u00d7)"
     },
     "read_same_path": {
       "live_max_read_same_path": 4,
       "live_max_same_path_any_file_tool": 8,
       "doc": 34,
-      "status": "NOT reproduced on the live corpus \u2014 the 34x re-read trace is not present (corpus grew 77->90 and rotates); strongest current re-read of one path is 4x"
+      "tolerance": 0.15,
+      "reproduced": false,
+      "status": "NOT reproduced \u2014 strongest live re-read of one path is 4\u00d7 (any file tool 8\u00d7) vs documented 34\u00d7; corpus grew 77->91 and rotates, so the 34\u00d7 trace is no longer present"
     }
   }
 }

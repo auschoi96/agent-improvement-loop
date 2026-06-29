@@ -1,49 +1,55 @@
 {
   "schema_version": "l0.metrics/v1",
   "experiment_id": "660599403165942",
-  "generated_at": "2026-06-29T08:30:42.456472+00:00",
-  "n_traces": 90,
+  "generated_at": "2026-06-29T08:54:10.927851+00:00",
+  "n_traces": 91,
   "aggregate": {
-    "n_traces": 90,
+    "n_traces": 91,
     "tokens": {
-      "input_tokens": 6436225,
-      "output_tokens": 1203362,
-      "total_tokens": 7639587,
+      "input_tokens": 6938212,
+      "output_tokens": 1314195,
+      "total_tokens": 8252407,
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 0,
       "cache_total_tokens": 0
     },
     "token_stats": {
-      "count": 90,
+      "count": 91,
       "min": 0,
-      "median": 18828.5,
-      "mean": 84884.3,
-      "p90": 242673.9,
+      "median": 19149.0,
+      "mean": 90685.79,
+      "p90": 249891.0,
       "max": 942929
     },
     "cost": {
-      "input_usd": 31.790709,
-      "output_usd": 29.56609,
+      "input_usd": 34.300644,
+      "output_usd": 32.336915,
       "cache_write_usd": 0.0,
       "cache_read_usd": 0.0,
-      "total_usd": 61.356799,
-      "priced_traces": 88,
+      "total_usd": 66.637559,
+      "priced_traces": 89,
       "unpriced_traces": 2,
       "flags": [
         "2 trace(s) unpriced (model missing or not in price book); their tokens are counted but excluded from total_usd"
       ]
     },
-    "total_tool_calls": 1149,
+    "total_tool_calls": 1239,
     "redundancy": {
-      "total_tool_calls": 1149,
-      "distinct_tool_calls": 1141,
+      "total_tool_calls": 1239,
+      "distinct_tool_calls": 1231,
       "redundant_tool_calls": 8,
-      "redundancy_rate": 0.006963,
+      "redundancy_rate": 0.006457,
       "repeated_calls": [
         {
           "tool": "Bash",
           "identity": "cd /Users/austin.choi/PycharmProjects2/omniagent/agent-framework",
           "count": 27,
+          "signature_kind": "shell"
+        },
+        {
+          "tool": "Bash",
+          "identity": "cd /Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics",
+          "count": 20,
           "signature_kind": "shell"
         },
         {
@@ -153,42 +159,36 @@
           "identity": "cd /Users/austin.choi/PycharmProjects2/omniagent/agent-framework/deploy/databricks",
           "count": 4,
           "signature_kind": "shell"
-        },
-        {
-          "tool": "Bash",
-          "identity": "cd /private/tmp/claude-502/-Users-austin-choi-PycharmProjects2-omniagent/<id>/scratchpad/omnigent_doc",
-          "count": 4,
-          "signature_kind": "shell"
         }
       ]
     },
     "status_counts": {
-      "OK": 90
+      "OK": 91
     }
   },
   "by_model": [
     {
       "key": "claude-opus-4-8",
-      "n_traces": 84,
+      "n_traces": 85,
       "tokens": {
-        "input_tokens": 6241017,
-        "output_tokens": 1151566,
-        "total_tokens": 7392583,
+        "input_tokens": 6743004,
+        "output_tokens": 1262399,
+        "total_tokens": 8005403,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "cache_total_tokens": 0
       },
       "cost": {
-        "input_usd": 31.205085,
-        "output_usd": 28.78915,
+        "input_usd": 33.71502,
+        "output_usd": 31.559975,
         "cache_write_usd": 0.0,
         "cache_read_usd": 0.0,
-        "total_usd": 59.994235,
-        "priced_traces": 84,
+        "total_usd": 65.274995,
+        "priced_traces": 85,
         "unpriced_traces": 0,
         "flags": []
       },
-      "total_tool_calls": 1082
+      "total_tool_calls": 1172
     },
     {
       "key": "claude-sonnet-4-6",
@@ -242,28 +242,28 @@
   "by_producer": [
     {
       "key": "claude_code",
-      "n_traces": 89,
+      "n_traces": 90,
       "tokens": {
-        "input_tokens": 6436225,
-        "output_tokens": 1203362,
-        "total_tokens": 7639587,
+        "input_tokens": 6938212,
+        "output_tokens": 1314195,
+        "total_tokens": 8252407,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "cache_total_tokens": 0
       },
       "cost": {
-        "input_usd": 31.790709,
-        "output_usd": 29.56609,
+        "input_usd": 34.300644,
+        "output_usd": 32.336915,
         "cache_write_usd": 0.0,
         "cache_read_usd": 0.0,
-        "total_usd": 61.356799,
-        "priced_traces": 88,
+        "total_usd": 66.637559,
+        "priced_traces": 89,
         "unpriced_traces": 1,
         "flags": [
           "1 trace(s) unpriced (model missing or not in price book); their tokens are counted but excluded from total_usd"
         ]
       },
-      "total_tool_calls": 1149
+      "total_tool_calls": 1239
     },
     {
       "key": "<unknown-producer>",
@@ -294,28 +294,28 @@
   "by_status": [
     {
       "key": "OK",
-      "n_traces": 90,
+      "n_traces": 91,
       "tokens": {
-        "input_tokens": 6436225,
-        "output_tokens": 1203362,
-        "total_tokens": 7639587,
+        "input_tokens": 6938212,
+        "output_tokens": 1314195,
+        "total_tokens": 8252407,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "cache_total_tokens": 0
       },
       "cost": {
-        "input_usd": 31.790709,
-        "output_usd": 29.56609,
+        "input_usd": 34.300644,
+        "output_usd": 32.336915,
         "cache_write_usd": 0.0,
         "cache_read_usd": 0.0,
-        "total_usd": 61.356799,
-        "priced_traces": 88,
+        "total_usd": 66.637559,
+        "priced_traces": 89,
         "unpriced_traces": 2,
         "flags": [
           "2 trace(s) unpriced (model missing or not in price book); their tokens are counted but excluded from total_usd"
         ]
       },
-      "total_tool_calls": 1149
+      "total_tool_calls": 1239
     }
   ],
   "traces": [
@@ -389,6 +389,87 @@
           {
             "tool": "Write",
             "identity": "/Users/austin.choi/PycharmProjects2/omniagent/agent-framework/examples/databricks_governed_demo.yaml",
+            "count": 2,
+            "signature_kind": "path"
+          }
+        ]
+      }
+    },
+    {
+      "trace_id": "trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f",
+      "producer": "claude_code",
+      "model": "claude-opus-4-8",
+      "session_id": "b50a3d9c-0bca-42a3-b475-eca106759f6b",
+      "status": "OK",
+      "request_time": "2026-06-29T08:02:25.278000+00:00",
+      "duration_seconds": 2109.912,
+      "tokens": {
+        "input_tokens": 501987,
+        "output_tokens": 110833,
+        "total_tokens": 612820,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_total_tokens": 0
+      },
+      "cost": {
+        "input_usd": 2.509935,
+        "output_usd": 2.770825,
+        "cache_write_usd": 0.0,
+        "cache_read_usd": 0.0,
+        "total_usd": 5.28076,
+        "priced": true,
+        "flags": []
+      },
+      "total_tool_calls": 90,
+      "tool_counts": {
+        "Bash": 37,
+        "Read": 17,
+        "ToolSearch": 2,
+        "TaskCreate": 5,
+        "Skill": 1,
+        "Edit": 12,
+        "Write": 9,
+        "TaskUpdate": 7
+      },
+      "redundancy": {
+        "total_tool_calls": 90,
+        "distinct_tool_calls": 90,
+        "redundant_tool_calls": 0,
+        "redundancy_rate": 0.0,
+        "repeated_calls": [
+          {
+            "tool": "Bash",
+            "identity": "cd /Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics",
+            "count": 20,
+            "signature_kind": "shell"
+          },
+          {
+            "tool": "Edit",
+            "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics/src/ail/metrics/l0_deterministic.py",
+            "count": 3,
+            "signature_kind": "path"
+          },
+          {
+            "tool": "Edit",
+            "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics/src/ail/metrics/report.py",
+            "count": 3,
+            "signature_kind": "path"
+          },
+          {
+            "tool": "Read",
+            "identity": "/Users/austin.choi/PycharmProjects2/ail-worktrees/wave0b-l0-metrics/src/ail/metrics/report.py",
+            "count": 3,
+            "signature_kind": "path"
+          },
+          {
+            "tool": "Bash",
+            "identity": "AIL_DATABRICKS_PROFILE=dais-demo .venv/bin/python /private/tmp/claude-502/-Users-austin-choi/<id>/scratchpad/explore.py 2>&1 | grep -vE 'WARNING|FutureWarning|w",
+            "count": 2,
+            "signature_kind": "shell"
+          },
+          {
+            "tool": "Edit",
+            "identity": "/private/tmp/claude-502/-Users-austin-choi/b50a3d9c-0bca-42a3-b475-eca106759f6b/scratchpad/explore.py",
             "count": 2,
             "signature_kind": "path"
           }

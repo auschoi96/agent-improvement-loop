@@ -33,22 +33,28 @@ from ail.metrics.l0_deterministic import compute_l0
 REFERENCE_EXPERIMENT = "660599403165942"
 HIGH_TOKEN_THRESHOLD = 500_000
 
+# Relative tolerance for calling a live value a "match" of a documented one.
+TOKEN_TOLERANCE = 0.15
+
 # The 77-trace snapshot recorded in docs/ARCHITECTURE.md §8. The live corpus is
 # explicitly "a live, growing corpus, not a stable historical baseline", so the
 # diagnosis reconciles the live numbers against these and flags any drift rather
 # than asserting they still hold.
-DOC_REFERENCE = {
-    "snapshot_traces": 77,
-    "high_token_sessions": [549_000, 943_000],
-    "median_tokens": 18_500,
-    "max_read_same_path": 34,
-    "shell_boilerplate_range": [13, 21],
-}
+DOC_SNAPSHOT_TRACES = 77
+DOC_HIGH_TOKEN_SESSIONS: list[int] = [549_000, 943_000]
+DOC_MEDIAN_TOKENS = 18_500
+DOC_MAX_READ_SAME_PATH = 34
+DOC_SHELL_BOILERPLATE_RANGE: tuple[int, int] = (13, 21)
 
 
 # ---------------------------------------------------------------------------
 # Diagnosis (pure: report -> markdown + machine-readable payload)
 # ---------------------------------------------------------------------------
+
+
+def _value_matches(live_values: list[float], expected: float, tol: float = TOKEN_TOLERANCE) -> bool:
+    """Whether any live value is within ``tol`` (relative) of ``expected``."""
+    return any(abs(v - expected) <= tol * expected for v in live_values)
 
 
 def _max_repeat(trace: TraceMetrics, kind: str, tool: str | None = None) -> RepeatedCall | None:
@@ -113,31 +119,82 @@ def build_example1_diagnosis(report: L0MetricsReport) -> tuple[str, dict[str, An
     max_path = path_rows[0]["count"] if path_rows else 0
     max_shell = shell_rows[0]["count"] if shell_rows else 0
 
+    # Statuses are DERIVED from the live numbers against documented expectations
+    # with explicit tolerances, so a rerun on a rotated/changed corpus reports
+    # drift instead of overstating reproduction.
+    live_high = sorted(
+        (
+            m.tokens.total_tokens
+            for m in report.traces
+            if m.tokens.total_tokens >= HIGH_TOKEN_THRESHOLD
+        ),
+        reverse=True,
+    )
+    high_matched = len(live_high) >= len(DOC_HIGH_TOKEN_SESSIONS) and all(
+        _value_matches([float(v) for v in live_high], float(e)) for e in DOC_HIGH_TOKEN_SESSIONS
+    )
+    high_status = (
+        "match"
+        if high_matched
+        else f"drift: documented {DOC_HIGH_TOKEN_SESSIONS} not all present in live {live_high[:3]}"
+    )
+
+    median = agg.token_stats.median
+    median_matched = _value_matches([median], float(DOC_MEDIAN_TOKENS))
+    median_status = (
+        "match"
+        if median_matched
+        else f"drift: live median {median} vs documented ~{DOC_MEDIAN_TOKENS}"
+    )
+
+    shell_lo, shell_hi = DOC_SHELL_BOILERPLATE_RANGE
+    shell_reproduced = max_shell >= shell_lo
+    shell_status = (
+        f"reproduced (max {max_shell}×/trace ≥ documented floor {shell_lo}×)"
+        if shell_reproduced
+        else f"not reproduced (max {max_shell}× below documented {shell_lo}–{shell_hi}×)"
+    )
+
+    read_floor = DOC_MAX_READ_SAME_PATH * (1 - TOKEN_TOLERANCE)
+    read_reproduced = max_read >= read_floor
+    if read_reproduced:
+        read_status = (
+            f"reproduced (strongest live re-read {max_read}× ≥ ~{DOC_MAX_READ_SAME_PATH}×)"
+        )
+    else:
+        read_status = (
+            f"NOT reproduced — strongest live re-read of one path is {max_read}× "
+            f"(any file tool {max_path}×) vs documented {DOC_MAX_READ_SAME_PATH}×; corpus grew "
+            f"{DOC_SNAPSHOT_TRACES}->{report.n_traces} and rotates, so the "
+            f"{DOC_MAX_READ_SAME_PATH}× trace is no longer present"
+        )
+
     reconciliation = {
         "high_token_sessions": {
-            "live": [h["total_tokens"] for h in high],
-            "doc": DOC_REFERENCE["high_token_sessions"],
-            "status": "match" if len(high) >= 2 else "drift: fewer than 2 sessions above threshold",
+            "live": live_high,
+            "doc": DOC_HIGH_TOKEN_SESSIONS,
+            "tolerance": TOKEN_TOLERANCE,
+            "status": high_status,
         },
         "median_tokens": {
-            "live": agg.token_stats.median,
-            "doc": DOC_REFERENCE["median_tokens"],
-            "status": "match",
+            "live": median,
+            "doc": DOC_MEDIAN_TOKENS,
+            "tolerance": TOKEN_TOLERANCE,
+            "status": median_status,
         },
         "shell_boilerplate": {
             "live_max_per_trace": max_shell,
-            "doc_range": DOC_REFERENCE["shell_boilerplate_range"],
-            "status": "reproduced (re-run shell setup prologue is present and in/above range)",
+            "doc_range": list(DOC_SHELL_BOILERPLATE_RANGE),
+            "reproduced": shell_reproduced,
+            "status": shell_status,
         },
         "read_same_path": {
             "live_max_read_same_path": max_read,
             "live_max_same_path_any_file_tool": max_path,
-            "doc": DOC_REFERENCE["max_read_same_path"],
-            "status": (
-                "NOT reproduced on the live corpus — the 34x re-read trace is not "
-                "present (corpus grew 77->90 and rotates); strongest current re-read "
-                f"of one path is {max_read}x"
-            ),
+            "doc": DOC_MAX_READ_SAME_PATH,
+            "tolerance": TOKEN_TOLERANCE,
+            "reproduced": read_reproduced,
+            "status": read_status,
         },
     }
 
@@ -319,13 +376,25 @@ def _render_markdown(report: L0MetricsReport, p: dict[str, Any]) -> str:
         f"{rp['status']} |"
     )
     a("")
-    a(
-        "> **Flagged:** the doc's *34× re-read of the same path* is **not** present in the live "
-        "90-trace corpus. The corpus is explicitly live and growing (the doc snapshot was 77 "
-        "traces); that high-redundancy trace has rotated out. The token-waste shape "
-        "(bimodal distribution, huge tail sessions, re-run shell boilerplate) reproduces; the "
-        "specific 34× figure does not, and is not asserted."
-    )
+    if not rp["reproduced"]:
+        doc_read = rp["doc"]
+        by_tool = rp["live_max_read_same_path"]
+        any_tool = rp["live_max_same_path_any_file_tool"]
+        a(
+            f"> **Flagged:** the documented *{doc_read}× re-read of the same path* is **not** "
+            f"present in the live {report.n_traces}-trace corpus (strongest current re-read "
+            f"{by_tool}× by one tool, {any_tool}× across file tools). The corpus is explicitly "
+            f"live and growing (the doc snapshot was {DOC_SNAPSHOT_TRACES} traces); that "
+            "high-redundancy trace has rotated out. The token-waste shape (bimodal distribution, "
+            f"huge tail sessions, re-run shell boilerplate) reproduces; the specific {doc_read}× "
+            "figure does not, and is not asserted."
+        )
+    else:
+        a(
+            f"> The documented token-waste signals reproduce on the live {report.n_traces}-trace "
+            f"corpus, including a re-read of the same path up to {rp['live_max_read_same_path']}× "
+            f"(documented ~{rp['doc']}×)."
+        )
     a("")
     return "\n".join(lines)
 
