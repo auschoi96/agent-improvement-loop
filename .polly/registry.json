@@ -2,6 +2,7 @@
   "repo": "auschoi96/agent-improvement-loop",
   "milestone": "Milestone 1 (Phase 0 + 1 + token slice)",
   "updated": "2026-06-29",
+  "repo_governance": "Repo is PUBLIC. main is branch-protected: required checks = ['Python 3.11','Python 3.12','Python 3.13','AppKit app (ail-self-optimizer)'], strict (up-to-date) = true, no force-push, no deletion, conversation-resolution required. enforce_admins = false (owner may bypass; flip to true for zero-bypass on request). Strict mode => any push to main (incl. .polly/registry.json) makes open PRs BEHIND and forces re-sync; only push registry when no PRs are open, or gitignore/relocate .polly/.",
   "license": "Apache-2.0 (chosen). Permissive/OSS => ai-dev-kit (DB proprietary) derived code must be clean-roomed before the LICENSE file is added. SkillForge schema NOT copied; we define our own. LICENSE file held until remediation lands.",
   "global_requirements": [
     "MLflow: use DATABRICKS-MANAGED MLflow (tracking via profile/databricks, registry=databricks-uc) and the LATEST mlflow version on everything that touches MLflow. Current repo pin is mlflow>=3.0 (floor) -> implementers upgrade to actual latest and report version. Applies to ingestion, the app, and Wave 1 judges/MemAlign/GEPA (need MLflow 3 GenAI APIs).",
@@ -200,15 +201,25 @@
     },
     {
       "id": "ci-merge-safety",
-      "status": "IN_REVIEW",
+      "status": "MERGED",
       "branch": "ci-merge-safety",
-      "note": "PR #5 (Py matrix 3.11/3.12/3.13 + AppKit gate, license metadata, CONTRIBUTING). CI green in real Actions (4 checks). Local gates re-verified by orchestrator. Codex review R1 = CHANGES-REQUIRED but both blockers CONDITIONAL & disproven with full-source evidence: (1) mypy config packages=['ail'] => bare mypy == 'mypy src' (same 11 files); 'mypy src tests' breaks on numpy stub, so chosen scope correct. (2) backend=hatchling (PEP639-native); real wheel build carries License-Expression: Apache-2.0. Awaiting codex R2 confirm; then update branch-protection required contexts to ['Python 3.11','Python 3.12','Python 3.13','AppKit app (ail-self-optimizer)'] (removes stale 'lint-typecheck-test') to unblock PR #5.",
+      "reviewer": {
+        "vendor": "codex",
+        "verdict": "PASS (R2)",
+        "detail": "R1 CHANGES-REQUIRED had 2 CONDITIONAL blockers, both disproven with full-source evidence: (1) mypy config packages=['ail'] => bare mypy == 'mypy src' (same 11 files); 'mypy src tests' breaks on numpy stub so chosen scope correct. (2) backend=hatchling (PEP639-native); real wheel build carries License-Expression: Apache-2.0. R2 = PASS once given full-source facts."
+      },
+      "note": "PR #5 MERGED (merge commit b161c91). Py matrix 3.11/3.12/3.13 + AppKit gate, license metadata, CONTRIBUTING/merge policy. After codex R2 PASS: branch protection required contexts updated to the 4 real checks (removed stale 'lint-typecheck-test'), repo made PUBLIC, branch protection enabled with strict=true. PR #5 dogfooded the strict gate (went BEHIND on a registry push, re-synced, re-passed). Integration gate re-verified by polly on merged main: ruff/mypy(11)/81 passed.",
       "pr": 5
+    },
+    {
+      "id": "polly-ops-gitignore",
+      "status": "PROPOSED",
+      "note": "Offered follow-up: gitignore or relocate .polly/ so the ops registry stops living on protected main (it triggers strict-mode BEHIND churn on open PRs). Low-risk config change (.gitignore + git rm --cached). Awaiting human go."
     }
   ],
   "open_decisions": [
     "RESOLVED 2026-06-29: License = Apache-2.0. Consequence: clean-room remediation of ai-dev-kit-derived code before LICENSE added; define own GT schema (no SkillForge copy); harvest -> clean-room reimplement against public OSS APIs.",
-    "OPEN: App deployment target - Databricks App on dais-demo (recommended, stated home) vs local app; confirm reading exp 660599403165942. Needed to dispatch the app build/deploy.",
+    "RESOLVED 2026-06-29: App deployment target = Databricks App on dais-demo (human: prioritize Databricks app, support both). DEPLOYED + RUNNING at https://ail-self-optimizer-7474647489683936.aws.databricksapps.com reading exp 660599403165942 via UC l0_* tables. PR #4 MERGED.",
     "OPEN (low): Fixture - synthetic fixture kept (recommended) vs scrubbed-real recording.",
     "RESOLVED 2026-06-29: codex throttling - human reports codex ready again. Cross-vendor review (codex) unblocked for the AppKit app PR and the clean-room remediation PR (non-derivation check). pi still down (optional third vendor)."
   ]
