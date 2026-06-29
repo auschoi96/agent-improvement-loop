@@ -6,12 +6,18 @@ The design's load-bearing principle: **the optimizer is never allowed to train a
 
 ## Status
 
-Greenfield. Built by harvesting proven pieces from:
+Greenfield. The trace-ingestion seam — `src/ail/ingest/` (the `TraceSource` /
+`AgentAdapter` interfaces, the Databricks-managed MLflow source, and the Claude
+Code adapter) — is **original clean-room work**, written only against this
+repo's own interfaces/tests and the public docs/source of `mlflow`,
+`databricks-sdk`, and `claude-agent-sdk`. See [`PROVENANCE.md`](PROVENANCE.md).
 
-- **`databricks-solutions/ai-dev-kit`** (`.test/src/skill_test/`) — the optimization spine: GEPA loop, MLflow `make_judge`, MemAlign `judge.align()`, `search_traces` ingestion, GRP (Generate-Review-Promote) ground-truth pipeline, Claude Code agent adapter. *Cross-vendor verified from source (Claude + GPT-5).*
+Other phases plan to draw proven pieces from:
+
+- **`databricks-solutions/ai-dev-kit`** (`.test/src/skill_test/`) — the optimization spine: GEPA loop, MLflow `make_judge`, MemAlign `judge.align()`, GRP (Generate-Review-Promote) ground-truth pipeline. *Cross-vendor verified from source (Claude + GPT-5).*
 - **`databricks-field-eng/skillforge`** — ground-truth methodology (`/forge` Designer⇄Critic case design) and the `GroundTruthV5` schema contract.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and [`docs/MILESTONE-1.md`](docs/MILESTONE-1.md) for the current build plan. Harvest provenance and license reconciliation are tracked in [`PROVENANCE.md`](PROVENANCE.md).
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and [`docs/MILESTONE-1.md`](docs/MILESTONE-1.md) for the current build plan. Provenance and license reconciliation are tracked in [`PROVENANCE.md`](PROVENANCE.md).
 
 ## Reference deployment
 
