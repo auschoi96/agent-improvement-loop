@@ -40,6 +40,17 @@ It writes `artifacts/l0_baseline_<exp>.json` (the full contract) and
 [`artifacts/`](artifacts/) capture the current corpus. See the contract doc for
 the Databricks auth note for the reference workspace.
 
+## Cohorts (segment one experiment by tag)
+
+`ail.cohorts` adds first-class **cohorts** — named, tag-defined slices of one
+experiment's traces — so a single experiment can hold several agents or
+deployments and still be measured apart. Cohorts respect the **user's own MLflow
+UI tags** (any key); an `ail.agent` / `ail.cohort` convention is offered but not
+required. Tag-aware ingestion (`MLflowTraceSource.fetch_cohort_traces`) and
+per-cohort L0 metrics (`ail.metrics.compute_cohort_l0`) are strictly **additive**
+over the existing read/metrics surfaces. Documented in
+[`docs/COHORTS.md`](docs/COHORTS.md).
+
 ## Scheduled refresh (living dashboard)
 
 `ail.publish` (Tier A) computes the L0 contract via `ail.metrics` and writes the
