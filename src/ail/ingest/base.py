@@ -116,10 +116,17 @@ class SpanKind(StrEnum):
 class TokenUsage:
     """Token accounting for a trace or span.
 
-    Cache fields are kept separate because cached reads are billed and
-    weighted differently from fresh input tokens — the L0 cost metric needs
-    both. ``total_tokens`` defaults to ``input + output`` when not supplied
-    explicitly by the producer.
+    The four counters mirror the public Anthropic Messages API ``usage`` object
+    — ``input_tokens``, ``output_tokens``, ``cache_creation_input_tokens`` and
+    ``cache_read_input_tokens`` — so a producer's raw usage payload maps onto
+    this record one-to-one with no field translation. The two cache counters
+    are tracked apart from fresh input tokens deliberately: a cache write and a
+    cache read are priced differently from an uncached input token, and the L0
+    cost metric needs that breakdown to attribute spend.
+
+    ``total_tokens`` is derived as ``input_tokens + output_tokens``. A producer
+    that reports its own authoritative total can override the derivation by
+    passing it through the private ``_total_tokens`` slot, which then wins.
     """
 
     input_tokens: int = 0
@@ -130,26 +137,35 @@ class TokenUsage:
 
     @property
     def total_tokens(self) -> int:
-        """Total billed tokens, preferring a producer-supplied total."""
-        if self._total_tokens is not None:
-            return self._total_tokens
-        return self.input_tokens + self.output_tokens
+        """Billed token total: a producer-reported total if given, else input + output."""
+        reported = self._total_tokens
+        return reported if reported is not None else self.input_tokens + self.output_tokens
 
     @property
     def cache_tokens(self) -> int:
-        """Total cache-related tokens (creation + read)."""
+        """Cache-attributable tokens: cache writes (creation) plus cache reads."""
         return self.cache_creation_input_tokens + self.cache_read_input_tokens
 
     def __add__(self, other: TokenUsage) -> TokenUsage:
-        """Sum two usages (used to aggregate span usage into a trace total)."""
+        """Field-wise sum, rolling per-turn or per-span usage up to a trace total.
+
+        The sum intentionally drops any ``_total_tokens`` override so the
+        aggregate's :attr:`total_tokens` recomputes from the summed counters
+        rather than carrying a stale per-part total.
+        """
         return TokenUsage(
-            input_tokens=self.input_tokens + other.input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-            cache_creation_input_tokens=(
-                self.cache_creation_input_tokens + other.cache_creation_input_tokens
-            ),
-            cache_read_input_tokens=(self.cache_read_input_tokens + other.cache_read_input_tokens),
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.cache_creation_input_tokens + other.cache_creation_input_tokens,
+            self.cache_read_input_tokens + other.cache_read_input_tokens,
         )
+
+
+# Model Context Protocol exposes a server's tools under the public naming
+# convention ``mcp__<server>__<tool>``: a fixed ``mcp__`` marker followed by the
+# server and tool names joined by ``__``. Parsing keys off these two tokens.
+_MCP_PREFIX = "mcp__"
+_MCP_DELIMITER = "__"
 
 
 @dataclass(slots=True)
@@ -173,16 +189,20 @@ class ToolCall:
 
     @property
     def is_mcp(self) -> bool:
-        """Whether this is an MCP tool call (``mcp__server__tool``)."""
-        return self.name.startswith("mcp__")
+        """Whether this call targets an MCP tool, per the ``mcp__`` name marker."""
+        return self.name.startswith(_MCP_PREFIX)
 
     @property
     def mcp_server(self) -> str | None:
-        """The MCP server name, or ``None`` for non-MCP tools."""
+        """Server name carried in an ``mcp__<server>__<tool>`` name; ``None`` otherwise.
+
+        The server is the second ``__``-delimited token (the one following the
+        leading ``mcp__`` marker). Non-MCP names yield ``None``.
+        """
         if not self.is_mcp:
             return None
-        parts = self.name.split("__")
-        return parts[1] if len(parts) >= 2 else None
+        tokens = self.name.split(_MCP_DELIMITER)
+        return tokens[1] if len(tokens) >= 2 else None
 
 
 @dataclass(slots=True)

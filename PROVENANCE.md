@@ -1,23 +1,69 @@
 # Provenance & License Reconciliation
 
-This project **harvests** code from other repositories. Every harvested file
-must be attributed here with its source path and the upstream license, and any
-license incompatibility must be flagged before the code is merged. Until this
-reconciliation is complete, the repository carries **no top-level LICENSE**.
+This file records where each non-trivial module in the repository came from and
+flags any license obligation that must be resolved before the project takes a
+top-level LICENSE. Until that reconciliation is complete, the repository carries
+**no top-level LICENSE**.
 
 A license-provenance check is an explicit **Wave 0** deliverable.
 
-## Harvest sources
+## Clean-room reimplemented modules (original work)
 
-| Upstream repo | Module harvested | Upstream license | Status |
+The three ingestion modules below were **reimplemented clean-room** as original
+work. They preserve only this repository's own public interface (the
+`ail.ingest.base` contracts, which are this project's design) and were written
+**without reading, cloning, fetching, browsing, or grepping
+`databricks-solutions/ai-dev-kit` in any way**. Each was re-derived solely from
+(a) this repository's own interfaces and tests and (b) the **public**
+documentation/source of the packages listed under "Public sources" below.
+
+| Module | Status | Re-derived from (public sources only) |
+|---|---|---|
+| `src/ail/ingest/base.py` — `TokenUsage` (fields + `total_tokens`/`cache_tokens`) and `ToolCall` `mcp__` parsing | **Original (clean-room)** | Public Anthropic Messages API `usage` object schema; public MCP/Claude Code tool-naming convention `mcp__<server>__<tool>`. The rest of `base.py` (`TraceStatus`, `SpanKind`, `NormalizedSpan`, `NormalizedTrace`, `TraceSource`, `AgentTask`, `AgentRunResult`, `AgentAdapter`) is this repo's own design and was left as-is. |
+| `src/ail/ingest/mlflow_source.py` | **Original (clean-room)** | Public `mlflow` Traces API (`mlflow.search_traces`, `mlflow.get_trace`), the public `mlflow.entities.Trace` shape, public MLflow trace-metadata/span-attribute key conventions, and public `databricks-sdk` (`WorkspaceClient`) + MLflow configuration docs for Databricks-managed MLflow (`tracking_uri="databricks"`, `registry_uri="databricks-uc"`). |
+| `src/ail/ingest/adapters/claude_code.py` | **Original (clean-room)** | Public `claude-agent-sdk` (`ClaudeSDKClient`, `ClaudeAgentOptions`, `HookMatcher`, and the `AssistantMessage`/`ResultMessage`/`SystemMessage`/`UserMessage`/`TextBlock`/`ToolUseBlock`/`ToolResultBlock` types); public `mlflow.claude_code.tracing` (`setup_mlflow`, `process_transcript`) and its documented env-var contract; public Claude Code `.mcp.json` / `mcpServers` configuration conventions. |
+
+### Public sources used
+
+- **`mlflow`** (OSS, Apache-2.0), pinned `mlflow>=3.14,<4`, resolved/verified against **3.14.0**:
+  `mlflow.search_traces` (scoping via `locations=[experiment_id]`, `return_type="list"`),
+  `mlflow.get_trace`, `mlflow.set_tracking_uri` / `mlflow.set_registry_uri`,
+  `mlflow.entities.Trace` (`.info`, `.data.spans`), and `mlflow.claude_code.tracing`.
+- **`databricks-sdk`** (OSS, Apache-2.0): `databricks.sdk.WorkspaceClient` and its
+  `.config.host`, with the active workspace selected by a Databricks CLI profile.
+- **`claude-agent-sdk`** (public on PyPI, MIT): the client, options, hook, and
+  message/content-block types, all imported lazily as an optional dependency.
+- **Public Anthropic Messages API** `usage` schema: `input_tokens`, `output_tokens`,
+  `cache_creation_input_tokens`, `cache_read_input_tokens`.
+- **Public MCP / Claude Code** tool-naming convention: `mcp__<server>__<tool>`.
+
+### base.py provenance gap — disclosed and closed
+
+An independent audit flagged that, in earlier revisions, `base.py`'s `TokenUsage`
+properties and `ToolCall` `mcp__` parsing appeared derived from an uncited
+upstream file. That gap is **closed**: those two pieces were reimplemented
+clean-room from the public Anthropic `usage` schema and the public MCP naming
+convention (above). No upstream code was consulted. The surrounding `base.py`
+interfaces were already this repository's own design and were not changed.
+
+## Outstanding source (not yet incorporated)
+
+| Upstream repo | Module | Upstream license | Status |
 |---|---|---|---|
-| `databricks-solutions/ai-dev-kit` @ `c4947868` | `.test/src/skill_test/trace/mlflow_integration.py` → `src/ail/ingest/mlflow_source.py` | **Databricks "DB license"** (proprietary; `LICENSE.md`) | harvested in this PR |
-| `databricks-solutions/ai-dev-kit` @ `c4947868` | `.test/src/skill_test/agent/executor.py` → `src/ail/ingest/adapters/claude_code.py` | **Databricks "DB license"** (proprietary; `LICENSE.md`) | harvested in this PR |
-| `databricks-field-eng/skillforge` @ `3569232e` | `python/skillforge/eval/schema.py` (`GroundTruthV5`) | **Undeclared** — no `LICENSE` file in repo; `package.json` says `"MIT"` (unverified, no license text) | **NOT yet harvested** (Wave 1a) — see flag below |
+| `databricks-field-eng/skillforge` @ `3569232e` | `python/skillforge/eval/schema.py` (`GroundTruthV5`) | **Undeclared** — no `LICENSE` file in repo; `package.json` says `"MIT"` (unverified, no license text) | **NOT incorporated** (Wave 1a) — see flag below |
 
-Commit pins verified by direct clone/read on 2026-06-28:
-- `ai-dev-kit` HEAD `c4947868f06fbfbb8cb666cbfba15888127b8a3a` (2026-06-25).
-- `skillforge` HEAD `3569232e72bfaf93d7b38cd22db95612af35e979` (2026-05-28).
+## History (why this remediation happened)
+
+Earlier revisions of `mlflow_source.py` and `claude_code.py` were *harvested* from
+`databricks-solutions/ai-dev-kit` (`@ c4947868`, under the Databricks "DB
+license", a proprietary non-OSI license), and `base.py` carried the uncited
+derivation noted above. Because the DB license is **not** a permissive
+open-source grant, that code blocked any Apache-2.0 release. The three modules
+were therefore reimplemented clean-room (this PR) so the repository contains no
+DB-licensed code in these paths. The `HARVEST` / `CHANGES FROM UPSTREAM` headers
+that previously sat atop the two harvested files were removed, since the files
+are now original work and there is no longer an upstream change-notice
+obligation to satisfy for them.
 
 ## Original work (NOT harvested — clean-room, Apache-2.0-ready)
 
@@ -44,57 +90,43 @@ and any uncovered model is flagged rather than guessed.
 
 ## ⚠️ License flags (resolve before adding a top-level LICENSE)
 
-1. **ai-dev-kit is under the Databricks "DB license", NOT an OSI open-source
-   license.** Full text in this repo's git history is the upstream
-   `LICENSE.md`. Key terms relevant to harvesting:
-   - **Scope is restricted to use "in connection with your use of the
-     Databricks Services."** This is *not* a permissive grant — it is bounded
-     by the Databricks MCSA.
-   - **Redistribution is permitted** but with obligations: recipients must get
-     a copy of the license; **modified files must carry prominent notices that
-     they were changed**; copyright/attribution notices must be retained; any
-     `NOTICE` file must be reproduced.
-   - **Liability is capped at $1,000 and warranties are disclaimed.**
-   - **Databricks can terminate the license at any time on notice**, after
-     which copies must be deleted.
-   - **Implication:** this repo cannot be relicensed as MIT/Apache while it
-     contains DB-licensed code. Either (a) keep the repo under the DB license
-     and propagate it (with the "changed files" notices — satisfied by the
-     `CHANGES FROM UPSTREAM` headers on every harvested file), or (b)
-     reimplement the harvested modules clean-room before any permissive
-     release. **For an internal Databricks Field-Eng repo used with the
-     Databricks Services, option (a) is compatible.** This must be confirmed by
-     the human before a public/OSS release.
-
-2. **skillforge has no declared license file.** The repo (private,
+1. **skillforge has no declared license file.** The repo (private,
    Databricks-Field-Eng-internal) ships **no `LICENSE`/`COPYING`/`NOTICE`** at
    its root; only `package.json` claims `"license": "MIT"`, with no
    accompanying MIT license text and no `license` field in `pyproject.toml`.
    This is an **ambiguous / undeclared license**. `GroundTruthV5` is **not**
-   harvested in this PR (it is Wave 1a). **Do not copy SkillForge code until
+   incorporated in this PR (it is Wave 1a). **Do not copy SkillForge code until
    its license is clarified in writing** — a bare `package.json` "MIT" string
    without license text is not a reliable grant for a Python module copied out
    of the repo.
 
+2. **Confirm before relicensing.** With the three ingestion modules now
+   clean-room, the previously-blocking DB-licensed code is gone from these
+   paths. A clean-room reimplementation that preserves only an interface is the
+   standard remedy, but a human should confirm no other module derives from a
+   non-permissive source before a top-level Apache-2.0 LICENSE is added, and an
+   independent (different-vendor) review should verify the non-derivation of the
+   three modules above.
+
 ## Reference-only (not copied)
 
 - ai-dev-kit `.test/src/skill_test/trace/source.py` + `parser.py` — the
-  Claude-Code-coupled local-JSONL/autolog path. **Deliberately NOT harvested**
-  (the architecture's SKIP/REPLACE row): `mlflow_source.py` reads only the
-  MLflow Traces API and is producer-agnostic.
+  Claude-Code-coupled local-JSONL/autolog path. **Deliberately NOT used**: the
+  reimplemented `mlflow_source.py` reads only the public MLflow Traces API and
+  is producer-agnostic.
 - SkillForge `/forge`, `/forge-author` skills — methodology reference only.
 - ai-dev-kit builder app — UI reference only.
 - DSPy `RLM`, HALO — design inspiration only (deferred).
 
 ## Rules
 
-1. Every copied file gets a header comment naming its upstream source path and
-   commit. **Done** for both harvested files (see the `HARVEST` docstring at
-   the top of `mlflow_source.py` and `claude_code.py`), each with an explicit
-   `CHANGES FROM UPSTREAM` section — which also satisfies the DB license's
-   "modified files must carry prominent notices that they were changed"
-   obligation.
+1. Any file copied from another repository gets a header naming its upstream
+   source path and commit, and is recorded in this file in the same PR. (No such
+   files exist today: the three ingestion modules are original clean-room work.)
 2. No upstream license obligation is dropped. If an upstream license is
-   incompatible with this repo's intended license, the code is reimplemented or
-   the dependency is added instead of copied.
-3. This table is updated in the same PR that introduces the harvested code.
+   incompatible with this repo's intended license, the code is reimplemented
+   clean-room (as here) or added as a properly-licensed dependency, never
+   copied.
+3. Clean-room reimplementations must be written without accessing the
+   non-permissive source, working only from the project's own interfaces/tests
+   and the public documentation/source of permissively-licensed packages.

@@ -9,7 +9,7 @@ description = "A reusable, agent-agnostic self-improvement loop for LLM agents"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mlflow>=3.0",
+    "mlflow>=3.14,<4",
     "databricks-sdk>=0.20",
     # The L0 metrics output contract is a typed, stable, JSON-serializable schema
     # a downstream UI reads. pydantic v2 is the contract surface (already an

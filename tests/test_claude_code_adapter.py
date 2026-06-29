@@ -7,10 +7,14 @@ its missing-SDK behavior, since the SDK is an optional dependency.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
-from ail.ingest.adapters.claude_code import AgentEvent, ClaudeCodeAdapter
-from ail.ingest.base import AgentTask, SpanKind, TraceStatus
+import pytest
+
+import ail.ingest.adapters.claude_code as cc
+from ail.ingest.adapters.claude_code import AgentEvent, ClaudeCodeAdapter, _run_async
+from ail.ingest.base import AgentRunResult, AgentTask, NormalizedTrace, SpanKind, TraceStatus
 
 T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -84,6 +88,36 @@ class TestRunWithoutSdk:
         assert result.success is False
         assert result.error is not None
         assert "claude-agent-sdk" in result.error
+        assert result.trace.status is TraceStatus.ERROR
+        assert result.trace.producer == "claude_code"
+
+
+class TestHardTimeout:
+    def test_run_async_returns_fallback_instead_of_raising(self) -> None:
+        async def _hang() -> str:
+            await asyncio.sleep(2)
+            return "completed"
+
+        sentinel = object()
+        # The worker cannot finish within 0.3s, so the fallback is returned.
+        result = _run_async(_hang(), timeout=0.3, on_timeout=lambda: sentinel)
+        assert result is sentinel
+
+    def test_run_returns_failed_result_on_hard_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class HangingAdapter(ClaudeCodeAdapter):
+            async def _arun(self, task: AgentTask) -> AgentRunResult:
+                await asyncio.sleep(2)
+                return AgentRunResult(trace=NormalizedTrace(trace_id="late"))
+
+        # Drive the hard timeout to ~0.3s (task timeout 0 + patched buffer).
+        monkeypatch.setattr(cc, "_HARD_TIMEOUT_BUFFER_S", 0.3)
+        result = HangingAdapter().run(AgentTask(prompt="x", timeout_seconds=0))
+
+        assert result.success is False
+        assert result.error is not None
+        assert "timeout" in result.error.lower()
         assert result.trace.status is TraceStatus.ERROR
         assert result.trace.producer == "claude_code"
 

@@ -94,7 +94,8 @@ Two interfaces (`src/ail/ingest/base.py`):
   to a common trace record (spans, tool calls, token usage, model, status).
 - **`AgentAdapter`** — run the agent on a Task-Suite input and capture a trace.
 
-Shipped adapters: Claude Code (harvested) and Codex (**new** — Codex does not
+Shipped adapters: Claude Code (clean-room original; see `PROVENANCE.md`) and
+Codex (**new** — Codex does not
 autolog to MLflow the way Claude Code does, so a Codex→MLflow trace-capture
 path is required and is in scope). Users implement these two interfaces for
 their own deployment.
@@ -108,9 +109,9 @@ agent-improvement-loop/
 ├── src/ail/
 │   ├── ingest/
 │   │   ├── base.py             # TraceSource + AgentAdapter interfaces  (NEW seam)
-│   │   ├── mlflow_source.py    # HARVEST ai-dev-kit trace/mlflow_integration
+│   │   ├── mlflow_source.py    # CLEAN-ROOM original (public mlflow Traces API)
 │   │   └── adapters/
-│   │       ├── claude_code.py  # HARVEST ai-dev-kit agent/executor
+│   │       ├── claude_code.py  # CLEAN-ROOM original (public claude-agent-sdk + mlflow)
 │   │       └── codex.py        # NEW Codex→MLflow capture
 │   ├── pools/                  # frozen wall: task_suite / alignment_set / human_anchor
 │   ├── groundtruth/            # HARVEST ai-dev-kit grp/ + skillforge GroundTruthV5 schema
@@ -133,9 +134,9 @@ Verified independently by Claude Code and Codex/GPT-5 against
 | GEPA loop (`optimize_anything`) | ai-dev-kit | HARVEST | `optimize/runner.py:19,871` |
 | `make_judge` scorers | ai-dev-kit | HARVEST | `optimize/judges.py:46,421` |
 | MemAlign `judge.align()` | ai-dev-kit | HARVEST | `optimize/alignment.py:83` |
-| MLflow `search_traces` ingestion | ai-dev-kit | HARVEST | `trace/mlflow_integration.py:130` |
+| MLflow `search_traces` ingestion | public mlflow | CLEAN-ROOM (original) | `src/ail/ingest/mlflow_source.py` · public `mlflow.search_traces` |
 | GRP capture→approve→**promote** | ai-dev-kit | HARVEST (see note) | `grp/pipeline.py` + separate `promote_approved()` |
-| Claude Code adapter (`ClaudeSDKClient`) | ai-dev-kit | HARVEST | `agent/executor.py:475` |
+| Claude Code adapter (`ClaudeSDKClient`) | public claude-agent-sdk | CLEAN-ROOM (original) | `src/ail/ingest/adapters/claude_code.py` · public `claude-agent-sdk` |
 | e2e "quality up + tokens down" test | ai-dev-kit | REFERENCE (template for Phase 2) | `tests/test_optimize_e2e.py::test_optimize_improves_quality_and_reduces_tokens` |
 | `GroundTruthV5` schema (`sources`+`regression_intent` required) | SkillForge | HARVEST | `eval/schema.py` |
 | `/forge` Designer⇄Critic case design | SkillForge | REFERENCE | `/forge`, `/forge-author` skills |

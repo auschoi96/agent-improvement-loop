@@ -1,42 +1,34 @@
 """Claude Code :class:`~ail.ingest.base.AgentAdapter`.
 
-HARVEST
--------
-Source: ``databricks-solutions/ai-dev-kit``
-        ``.test/src/skill_test/agent/executor.py`` (the ``ClaudeSDKClient``
-        runner ~L449-L706, event capture, the
-        ``_build_trace_metrics`` mapper ~L82, the agent-env / MCP helpers, and
-        the ``_run_in_fresh_loop`` sync wrapper ~L709).
-Commit: c4947868f06fbfbb8cb666cbfba15888127b8a3a
-License: see PROVENANCE.md (Databricks "DB license").
+Drives the Claude Agent SDK (public ``claude-agent-sdk`` package) against an
+:class:`~ail.ingest.base.AgentTask`, captures the agent's streamed events, and
+projects them onto a :class:`~ail.ingest.base.NormalizedTrace` — the identical
+shape an :class:`~ail.ingest.base.TraceSource` yields — so a frozen task suite
+replayed through this adapter is comparable apples-to-apples with traces read
+back from MLflow.
 
-CHANGES FROM UPSTREAM
----------------------
-* Repackaged the free ``run_agent`` / ``run_agent_sync_wrapper`` functions as a
-  :class:`ClaudeCodeAdapter` implementing :class:`AgentAdapter`.
-* ``_build_trace_metrics`` (which produced the Claude-specific ``TraceMetrics``)
-  is reimplemented as ``_build_normalized_trace`` producing the
-  producer-agnostic :class:`~ail.ingest.base.NormalizedTrace`, so adapter-
-  captured traces match :class:`TraceSource` output exactly.
-* Dropped the ai-dev-kit-internal ``SkillTestConfig`` coupling from the MLflow
-  Stop hook; tracing is configured from env vars + the experiment passed to the
-  adapter. The settings-file search was generalized away from ``.test/`` paths.
-* The Claude Agent SDK is imported lazily; if it is absent, :meth:`run` returns
-  a failed :class:`AgentRunResult` rather than raising (matches upstream).
+When an MLflow experiment is supplied, a Claude Code ``Stop`` hook logs the full
+conversation transcript to Databricks-managed MLflow using the public
+``mlflow.claude_code.tracing`` helpers (``setup_mlflow`` + ``process_transcript``).
+
+The Claude Agent SDK is an optional dependency, imported lazily. If it is
+absent, :meth:`ClaudeCodeAdapter.run` returns a failed
+:class:`~ail.ingest.base.AgentRunResult` rather than raising — agent unavailability
+is an ordinary failure under the :class:`~ail.ingest.base.AgentAdapter` contract.
 """
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
-from collections.abc import Coroutine
-from dataclasses import dataclass
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -57,36 +49,72 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-# Env var prefixes forwarded into the agent subprocess (harvested).
-_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DATABRICKS_", "MLFLOW_")
-# Internal Claude Code vars that must not leak into the child process.
-_SKIP_ENV_KEYS = {
-    "CLAUDE_CODE_SSE_PORT",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
-}
-_DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+# Token counters carried on every assistant turn — the public Anthropic
+# Messages API ``usage`` schema.
+_USAGE_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+# Env var families the spawned agent needs to authenticate (model + workspace +
+# tracing). Forwarded from the parent process into the child.
+_FORWARDED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DATABRICKS_", "MLFLOW_")
+# Internal Claude Code session vars that would confuse a freshly spawned child.
+_INTERNAL_ENV_KEYS = frozenset(
+    {
+        "CLAUDE_CODE_SSE_PORT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+    }
+)
+_DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep")
+
+# Grace period added on top of the task's own timeout before the worker thread
+# is abandoned. The in-stream timeout (``task.timeout_seconds``) handles the
+# normal case; this hard ceiling only fires if the SDK wedges so badly that the
+# in-stream check never runs, and it yields a failed result rather than raising.
+_HARD_TIMEOUT_BUFFER_S = 60
+
+# Public MLflow Claude-tracing env var names (read by ``setup_mlflow``).
+_ENV_TRACING_ENABLED = "MLFLOW_CLAUDE_TRACING_ENABLED"
+_ENV_TRACKING_URI = "MLFLOW_TRACKING_URI"
+_ENV_EXPERIMENT_NAME = "MLFLOW_EXPERIMENT_NAME"
+
+# Agent-settings file (optional): supplies extra env (e.g. FMAPI routing) with
+# ``${VAR}`` / ``${VAR:-default}`` interpolation under an ``{"env": {...}}`` key.
+_AGENT_SETTINGS_FILES = (
+    Path(".ail") / "agent_settings.json",
+    Path(".claude") / "agent_settings.json",
+)
+_PLUGIN_ROOT_TOKEN = "${CLAUDE_PLUGIN_ROOT}"
 
 
 @dataclass(slots=True)
 class AgentEvent:
-    """A captured event from the agent execution stream (harvested)."""
+    """One observation captured from the agent's execution stream.
 
-    type: str  # tool_use, tool_result, text, assistant_turn, result, system, error
+    ``type`` is one of ``assistant_turn``, ``text``, ``tool_use``,
+    ``tool_result``, ``result``, ``system`` or ``error``; ``data`` carries the
+    type-specific payload.
+    """
+
+    type: str
     timestamp: datetime
-    data: dict[str, Any]
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 class ClaudeCodeAdapter(AgentAdapter):
-    """Run Claude Code via the Claude Agent SDK and capture a normalized trace.
+    """Run Claude Code through the Claude Agent SDK and capture a normalized trace.
 
     Args:
-        mlflow_experiment: Optional MLflow experiment to log the run's trace to
-            via a Stop hook (best-effort, fire-and-forget). When ``None``,
-            tracing is skipped and the trace is built purely from streamed
-            events.
-        default_allowed_tools: Tools to allow when a task does not specify any
-            and no MCP servers are configured.
+        mlflow_experiment: Optional MLflow experiment name. When set, a ``Stop``
+            hook logs the run's transcript to Databricks-managed MLflow
+            (best-effort, fire-and-forget). When ``None``, the trace is built
+            solely from the captured event stream.
+        default_allowed_tools: Tools allowed when a task specifies none and no
+            MCP servers are configured.
     """
 
     name = "claude_code"
@@ -97,22 +125,47 @@ class ClaudeCodeAdapter(AgentAdapter):
         default_allowed_tools: list[str] | None = None,
     ) -> None:
         self.mlflow_experiment = mlflow_experiment
-        self.default_allowed_tools = default_allowed_tools or list(_DEFAULT_ALLOWED_TOOLS)
+        self.default_allowed_tools = (
+            list(default_allowed_tools)
+            if default_allowed_tools is not None
+            else list(_DEFAULT_ALLOWED_TOOLS)
+        )
 
     # -- AgentAdapter interface -------------------------------------------
 
     def run(self, task: AgentTask) -> AgentRunResult:
-        """Run ``task`` synchronously (over a dedicated event loop)."""
-        return _run_in_fresh_loop(self._arun(task))
+        """Execute ``task`` synchronously and return its captured trace.
+
+        The async SDK session is driven to completion on a dedicated event loop
+        (see :func:`_run_async`), keeping ``run`` synchronous per the
+        :class:`~ail.ingest.base.AgentAdapter` contract. If the session blows
+        past its hard timeout, a failed :class:`~ail.ingest.base.AgentRunResult`
+        is returned rather than an exception raised.
+        """
+        hard_timeout = task.timeout_seconds + _HARD_TIMEOUT_BUFFER_S
+        return _run_async(
+            self._arun(task),
+            timeout=hard_timeout,
+            on_timeout=lambda: self._timeout_result(hard_timeout),
+        )
+
+    def _timeout_result(self, timeout: float) -> AgentRunResult:
+        """Failed result for a run that exceeded its hard timeout."""
+        message = f"Claude agent run exceeded its hard timeout of {timeout:g}s"
+        logger.error(message)
+        return AgentRunResult(
+            trace=NormalizedTrace(
+                trace_id=f"timeout-{uuid.uuid4().hex}",
+                status=TraceStatus.ERROR,
+                producer=self.name,
+            ),
+            success=False,
+            error=message,
+        )
 
     async def _arun(self, task: AgentTask) -> AgentRunResult:
-        """Async core: stream the SDK, capture events, build a trace."""
         try:
-            from claude_agent_sdk import (
-                ClaudeAgentOptions,
-                ClaudeSDKClient,
-                HookMatcher,
-            )
+            from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
             from claude_agent_sdk.types import (
                 AssistantMessage,
                 ResultMessage,
@@ -123,168 +176,147 @@ class ClaudeCodeAdapter(AgentAdapter):
                 UserMessage,
             )
         except ImportError:
-            return AgentRunResult(
-                trace=NormalizedTrace(
-                    trace_id=f"error-{uuid.uuid4().hex}",
-                    status=TraceStatus.ERROR,
-                    producer=self.name,
-                ),
-                success=False,
-                error=(
-                    "claude-agent-sdk not installed. "
-                    "Install with: pip install 'claude-agent-sdk>=0.1.39'"
-                ),
-            )
+            return self._sdk_unavailable_result()
 
-        session_id = str(uuid.uuid4())
         events: list[AgentEvent] = []
-        response_parts: list[str] = []
+        response_text: list[str] = []
+        session_id = str(uuid.uuid4())
 
-        mcp_config = _load_mcp_config()
+        mcp_servers = _load_mcp_servers()
         allowed_tools = task.allowed_tools
-        if allowed_tools is None:
-            allowed_tools = None if mcp_config else list(self.default_allowed_tools)
+        if allowed_tools is None and not mcp_servers:
+            allowed_tools = list(self.default_allowed_tools)
 
-        env = _get_agent_env()
+        env = _agent_env()
         if task.model:
             env["ANTHROPIC_MODEL"] = task.model
-        env.pop("CLAUDECODE", None)  # don't let the child think it is nested
+        env.pop("CLAUDECODE", None)  # the child must not believe it is nested
+        _attach_databricks_env(mcp_servers, env)
 
-        if mcp_config:
-            mcp_env = {k: v for k, v in env.items() if k.startswith("DATABRICKS_")}
-            for server_cfg in mcp_config.values():
-                if "env" not in server_cfg and mcp_env:
-                    server_cfg["env"] = mcp_env
-
-        hooks: dict[str, Any] = {}
-        if self.mlflow_experiment:
-            hook = _build_mlflow_stop_hook(self.mlflow_experiment, self.name)
-            if hook is not None:
-                hooks["Stop"] = [HookMatcher(hooks=[hook])]
-
-        stderr_lines: list[str] = []
-
-        def _stderr_callback(line: str) -> None:
-            stripped = line.strip()
-            if stripped:
-                stderr_lines.append(stripped)
+        hooks = self._build_hooks(HookMatcher)
+        stderr_tail: list[str] = []
 
         options = ClaudeAgentOptions(
             cwd=task.cwd or os.getcwd(),
             allowed_tools=allowed_tools,
             permission_mode="bypassPermissions",
-            mcp_servers=mcp_config or {},
+            mcp_servers=mcp_servers or {},
             system_prompt=task.system_prompt or "",
-            setting_sources=[],  # inject our own context; no ambient project skills
+            setting_sources=[],  # no ambient project skills; context is injected explicitly
             env=env,
             hooks=hooks or None,
-            stderr=_stderr_callback,
+            stderr=lambda line: _capture_stderr(stderr_tail, line),
         )
 
-        start = time.monotonic()
+        started = time.monotonic()
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(task.prompt)
-                async for msg in client.receive_response():
-                    now = datetime.now(UTC)
-                    if time.monotonic() - start > task.timeout_seconds:
+                async for message in client.receive_response():
+                    if time.monotonic() - started > task.timeout_seconds:
                         events.append(
                             AgentEvent(
-                                "error", now, {"message": f"Timeout after {task.timeout_seconds}s"}
+                                "error",
+                                datetime.now(UTC),
+                                {"message": f"Timeout after {task.timeout_seconds}s"},
                             )
                         )
                         break
 
-                    if isinstance(msg, AssistantMessage):
-                        usage_data: dict[str, int] = {}
-                        if getattr(msg, "usage", None):
-                            usage = msg.usage
-                            usage_data = {
-                                "input_tokens": getattr(usage, "input_tokens", 0),
-                                "output_tokens": getattr(usage, "output_tokens", 0),
-                                "cache_creation_input_tokens": getattr(
-                                    usage, "cache_creation_input_tokens", 0
-                                ),
-                                "cache_read_input_tokens": getattr(
-                                    usage, "cache_read_input_tokens", 0
-                                ),
-                            }
-                        events.append(AgentEvent("assistant_turn", now, {"usage": usage_data}))
-
-                        for block in getattr(msg, "content", []):
+                    if isinstance(message, AssistantMessage):
+                        now = datetime.now(UTC)
+                        events.append(
+                            AgentEvent(
+                                "assistant_turn",
+                                now,
+                                {"usage": _usage_payload(getattr(message, "usage", None))},
+                            )
+                        )
+                        for block in getattr(message, "content", None) or []:
                             if isinstance(block, TextBlock):
-                                response_parts.append(block.text)
+                                response_text.append(block.text)
                                 events.append(AgentEvent("text", now, {"text": block.text}))
                             elif isinstance(block, ToolUseBlock):
+                                tool_input = block.input if isinstance(block.input, dict) else {}
                                 events.append(
                                     AgentEvent(
                                         "tool_use",
                                         now,
-                                        {
-                                            "id": block.id,
-                                            "name": block.name,
-                                            "input": block.input
-                                            if isinstance(block.input, dict)
-                                            else {},
-                                        },
+                                        {"id": block.id, "name": block.name, "input": tool_input},
                                     )
                                 )
                             elif isinstance(block, ToolResultBlock):
-                                events.append(
-                                    AgentEvent("tool_result", now, _tool_result_data(block))
-                                )
-
-                    elif isinstance(msg, UserMessage):
-                        for block in getattr(msg, "content", []):
+                                events.append(AgentEvent("tool_result", now, _tool_result(block)))
+                    elif isinstance(message, UserMessage):
+                        now = datetime.now(UTC)
+                        for block in getattr(message, "content", None) or []:
                             if isinstance(block, ToolResultBlock):
-                                events.append(
-                                    AgentEvent("tool_result", now, _tool_result_data(block))
-                                )
-
-                    elif isinstance(msg, ResultMessage):
-                        session_id = getattr(msg, "session_id", session_id)
+                                events.append(AgentEvent("tool_result", now, _tool_result(block)))
+                    elif isinstance(message, ResultMessage):
+                        session_id = getattr(message, "session_id", None) or session_id
                         events.append(
                             AgentEvent(
                                 "result",
-                                now,
+                                datetime.now(UTC),
                                 {
                                     "session_id": session_id,
-                                    "duration_ms": getattr(msg, "duration_ms", None),
+                                    "duration_ms": getattr(message, "duration_ms", None),
                                 },
                             )
                         )
-
-                    elif isinstance(msg, SystemMessage):
+                    elif isinstance(message, SystemMessage):
                         events.append(
                             AgentEvent(
                                 "system",
-                                now,
+                                datetime.now(UTC),
                                 {
-                                    "subtype": getattr(msg, "subtype", ""),
-                                    "data": getattr(msg, "data", {}),
+                                    "subtype": getattr(message, "subtype", ""),
+                                    "data": getattr(message, "data", {}),
                                 },
                             )
                         )
-        except Exception as e:  # noqa: BLE001 - capture, don't raise, per AgentAdapter contract
-            detail = "; ".join(stderr_lines[-5:]) if stderr_lines else "no stderr"
-            logger.error("Claude agent run failed: %s | stderr: %s", e, detail)
+        except Exception as exc:  # noqa: BLE001 - capture per AgentAdapter contract
+            tail = "; ".join(stderr_tail[-5:]) if stderr_tail else "no stderr"
+            logger.error("Claude agent run failed: %s | stderr: %s", exc, tail)
             events.append(
-                AgentEvent("error", datetime.now(UTC), {"message": f"{e} | stderr: {detail}"})
+                AgentEvent("error", datetime.now(UTC), {"message": f"{exc} | stderr: {tail}"})
             )
 
-        duration_ms = int((time.monotonic() - start) * 1000)
+        wall_ms = int((time.monotonic() - started) * 1000)
         model = task.model or os.environ.get("ANTHROPIC_MODEL")
         trace = self._build_normalized_trace(events, session_id, model)
-        has_error = any(e.type == "error" for e in events)
+        first_error = next((e.data.get("message") for e in events if e.type == "error"), None)
 
         return AgentRunResult(
             trace=trace,
-            output_text="\n".join(response_parts),
-            success=not has_error,
-            error=next((e.data.get("message") for e in events if e.type == "error"), None),
+            output_text="\n".join(response_text),
+            success=first_error is None,
+            error=first_error,
             session_id=session_id,
-            duration_ms=duration_ms,
+            duration_ms=wall_ms,
             raw=events,
+        )
+
+    def _build_hooks(self, hook_matcher_cls: Any) -> dict[str, Any]:
+        if not self.mlflow_experiment:
+            return {}
+        hook = _mlflow_stop_hook(self.mlflow_experiment)
+        if hook is None:
+            return {}
+        return {"Stop": [hook_matcher_cls(hooks=[hook])]}
+
+    def _sdk_unavailable_result(self) -> AgentRunResult:
+        return AgentRunResult(
+            trace=NormalizedTrace(
+                trace_id=f"error-{uuid.uuid4().hex}",
+                status=TraceStatus.ERROR,
+                producer=self.name,
+            ),
+            success=False,
+            error=(
+                "claude-agent-sdk is not installed. "
+                "Install it with: pip install 'claude-agent-sdk>=0.1.39'"
+            ),
         )
 
     def _build_normalized_trace(
@@ -293,76 +325,54 @@ class ClaudeCodeAdapter(AgentAdapter):
         session_id: str,
         model: str | None,
     ) -> NormalizedTrace:
-        """Build a :class:`NormalizedTrace` from captured stream events.
+        """Fold captured events into a :class:`NormalizedTrace`.
 
-        Reimplements upstream ``_build_trace_metrics`` against the normalized
-        record: ``tool_use``/``tool_result`` pairs become :class:`ToolCall`s
-        (and ``TOOL`` spans), ``assistant_turn`` usage is summed into the trace
-        :class:`TokenUsage`, and trace timing comes from the first/last events.
+        ``tool_use``/``tool_result`` events are paired by tool-use id into
+        :class:`ToolCall` records (each also surfaced as a ``TOOL``
+        :class:`NormalizedSpan`); per-turn ``usage`` is summed into the trace
+        :class:`TokenUsage`; and the trace inherits ``ERROR`` status if any
+        ``error`` event was captured.
         """
-        tool_calls: dict[str, ToolCall] = {}
+        tools_by_id: dict[str, ToolCall] = {}
         ordered_tools: list[ToolCall] = []
         usage = TokenUsage()
         start_time: datetime | None = None
         end_time: datetime | None = None
 
         for event in events:
-            if start_time is None:
-                start_time = event.timestamp
+            start_time = start_time or event.timestamp
             end_time = event.timestamp
 
             if event.type == "tool_use":
-                tc = ToolCall(
+                call = ToolCall(
                     id=str(event.data.get("id") or uuid.uuid4().hex),
-                    name=str(event.data.get("name", "unknown")),
-                    arguments=event.data.get("input", {}) or {},
+                    name=str(event.data.get("name") or "unknown"),
+                    arguments=dict(event.data.get("input") or {}),
                     status=TraceStatus.IN_PROGRESS,
                     span_id=str(event.data.get("id") or ""),
                     start_time=event.timestamp,
                 )
-                tool_calls[tc.id] = tc
-                ordered_tools.append(tc)
-
+                tools_by_id[call.id] = call
+                ordered_tools.append(call)
             elif event.type == "tool_result":
-                pending = tool_calls.get(str(event.data.get("tool_use_id", "")))
-                if pending is not None:
-                    content = event.data.get("content", "")
-                    pending.result = content if isinstance(content, str) else str(content)
-                    is_error = bool(event.data.get("is_error"))
-                    pending.status = TraceStatus.ERROR if is_error else TraceStatus.OK
-
+                self._apply_tool_result(tools_by_id, event)
             elif event.type == "assistant_turn":
-                turn = event.data.get("usage", {}) or {}
-                usage = usage + TokenUsage(
-                    input_tokens=int(turn.get("input_tokens", 0) or 0),
-                    output_tokens=int(turn.get("output_tokens", 0) or 0),
-                    cache_creation_input_tokens=int(
-                        turn.get("cache_creation_input_tokens", 0) or 0
-                    ),
-                    cache_read_input_tokens=int(turn.get("cache_read_input_tokens", 0) or 0),
-                )
-
-            elif event.type == "result":
-                end_time = event.timestamp
+                usage = usage + _usage_from_payload(event.data.get("usage"))
 
         spans = [
             NormalizedSpan(
-                span_id=tc.span_id or tc.id,
-                name=f"tool_{tc.name}",
+                span_id=call.span_id or call.id,
+                name=f"tool_{call.name}",
                 kind=SpanKind.TOOL,
-                status=tc.status,
-                start_time=tc.start_time,
-                inputs=tc.arguments,
-                outputs=tc.result,
+                status=call.status,
+                start_time=call.start_time,
+                inputs=call.arguments,
+                outputs=call.result,
             )
-            for tc in ordered_tools
+            for call in ordered_tools
         ]
 
-        has_error = any(e.type == "error" for e in events)
-        duration_ms = None
-        if start_time and end_time:
-            duration_ms = int((end_time - start_time).total_seconds() * 1000)
-
+        has_error = any(event.type == "error" for event in events)
         return NormalizedTrace(
             trace_id=session_id,
             status=TraceStatus.ERROR if has_error else TraceStatus.OK,
@@ -371,150 +381,239 @@ class ClaudeCodeAdapter(AgentAdapter):
             session_id=session_id,
             request_time=start_time,
             end_time=end_time,
-            execution_duration_ms=duration_ms,
+            execution_duration_ms=_trace_duration_ms(events, start_time, end_time),
             token_usage=usage,
             spans=spans,
             tool_calls=ordered_tools,
         )
 
+    @staticmethod
+    def _apply_tool_result(tools_by_id: dict[str, ToolCall], event: AgentEvent) -> None:
+        call = tools_by_id.get(str(event.data.get("tool_use_id") or ""))
+        if call is None:
+            return
+        content = event.data.get("content", "")
+        call.result = content if isinstance(content, str) else str(content)
+        call.status = TraceStatus.ERROR if event.data.get("is_error") else TraceStatus.OK
 
-def _tool_result_data(block: Any) -> dict[str, Any]:
+
+# ---------------------------------------------------------------------------
+# Event extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _tool_result(block: Any) -> dict[str, Any]:
+    """Extract the fields we keep from a public ``ToolResultBlock``."""
     return {
         "tool_use_id": getattr(block, "tool_use_id", ""),
         "content": getattr(block, "content", ""),
-        "is_error": getattr(block, "is_error", False),
+        "is_error": bool(getattr(block, "is_error", False)),
     }
 
 
+def _usage_payload(usage: Any) -> dict[str, int]:
+    """Read the public Anthropic ``usage`` dict off an assistant message.
+
+    The SDK exposes ``AssistantMessage.usage`` as a plain mapping, so the
+    counters are read by key (not attribute). Missing keys default to zero.
+    """
+    if not isinstance(usage, dict):
+        return {}
+    return {key: _as_int(usage.get(key)) for key in _USAGE_KEYS}
+
+
+def _usage_from_payload(payload: Any) -> TokenUsage:
+    data = payload if isinstance(payload, dict) else {}
+    return TokenUsage(
+        input_tokens=_as_int(data.get("input_tokens")),
+        output_tokens=_as_int(data.get("output_tokens")),
+        cache_creation_input_tokens=_as_int(data.get("cache_creation_input_tokens")),
+        cache_read_input_tokens=_as_int(data.get("cache_read_input_tokens")),
+    )
+
+
+def _trace_duration_ms(
+    events: list[AgentEvent], start_time: datetime | None, end_time: datetime | None
+) -> int | None:
+    """Trace duration: the SDK-reported result duration if present, else wall time."""
+    reported = next(
+        (e.data.get("duration_ms") for e in events if e.type == "result"),
+        None,
+    )
+    if isinstance(reported, (int, float)):
+        return int(reported)
+    if start_time and end_time:
+        return int((end_time - start_time).total_seconds() * 1000)
+    return None
+
+
+def _as_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _capture_stderr(buffer: list[str], line: str) -> None:
+    stripped = line.strip()
+    if stripped:
+        buffer.append(stripped)
+
+
 # ---------------------------------------------------------------------------
-# Subprocess env / MCP config helpers (harvested from executor.py, generalized)
+# Subprocess environment + MCP configuration (public Claude Code conventions)
 # ---------------------------------------------------------------------------
 
 
-def _find_repo_root() -> Path:
-    """Walk up from this file to the nearest directory containing ``.git``."""
-    d = Path(__file__).resolve().parent
-    for _ in range(10):
-        if (d / ".git").exists():
-            return d
-        d = d.parent
+def _repo_root() -> Path:
+    """Nearest ancestor directory containing ``.git``; cwd if none is found."""
+    here = Path(__file__).resolve().parent
+    for directory in (here, *here.parents):
+        if (directory / ".git").exists():
+            return directory
     return Path.cwd()
 
 
-def _resolve_env_refs(value: str) -> str:
-    """Expand ``${VAR}`` / ``${VAR:-default}`` references from ``os.environ``."""
+def _expand_env_refs(value: str) -> str:
+    """Expand ``${VAR}`` and ``${VAR:-default}`` references against ``os.environ``."""
 
-    def _replace(m: re.Match[str]) -> str:
-        var = m.group(1)
-        if ":-" in var:
-            name, default = var.split(":-", 1)
+    def _sub(match: re.Match[str]) -> str:
+        ref = match.group(1)
+        if ":-" in ref:
+            name, default = ref.split(":-", 1)
             return os.environ.get(name, default)
-        return os.environ.get(var, m.group(0))
+        return os.environ.get(ref, match.group(0))
 
-    return re.sub(r"\$\{([^}]+)\}", _replace, value)
+    return re.sub(r"\$\{([^}]+)\}", _sub, value)
 
 
-def _get_agent_env() -> dict[str, str]:
-    """Build env vars for the agent subprocess.
+def _agent_env() -> dict[str, str]:
+    """Assemble the environment for the spawned agent.
 
-    Loads optional FMAPI settings from ``.ail/agent_settings.json`` or
-    ``.claude/agent_settings.json`` (``{"env": {...}}`` with ``${VAR}``
-    interpolation), then overlays matching-prefix env vars. Internal Claude Code
-    vars are stripped so the child does not think it is nested.
+    Starts from an optional agent-settings file (FMAPI routing, etc.), then
+    overlays every parent env var whose name matches a forwarded prefix,
+    dropping internal Claude Code session vars. A couple of stream-stability
+    defaults are added last.
     """
     env: dict[str, str] = {}
-    repo_root = _find_repo_root()
-    for p in (
-        repo_root / ".ail" / "agent_settings.json",
-        repo_root / ".claude" / "agent_settings.json",
-    ):
-        if p.exists():
-            try:
-                file_env = json.loads(p.read_text()).get("env", {})
-                for k, v in file_env.items():
-                    if isinstance(v, str):
-                        env[k] = _resolve_env_refs(v)
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning("Failed to load agent settings %s: %s", p, e)
+
+    root = _repo_root()
+    for relative in _AGENT_SETTINGS_FILES:
+        path = root / relative
+        if not path.exists():
+            continue
+        try:
+            settings_env = json.loads(path.read_text()).get("env", {})
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read agent settings %s: %s", path, exc)
             break
+        for key, value in settings_env.items():
+            if isinstance(value, str):
+                env[key] = _expand_env_refs(value)
+        break
 
     for key, value in os.environ.items():
-        if key in _SKIP_ENV_KEYS:
+        if key in _INTERNAL_ENV_KEYS or not value:
             continue
-        if value and any(key.startswith(prefix) for prefix in _ENV_PREFIXES):
+        if any(key.startswith(prefix) for prefix in _FORWARDED_ENV_PREFIXES):
             env[key] = value
 
-    for k in _SKIP_ENV_KEYS:
-        env.pop(k, None)
+    for key in _INTERNAL_ENV_KEYS:
+        env.pop(key, None)
 
     env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
     env.setdefault("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "600000")
     return env
 
 
-def _load_mcp_config() -> dict[str, Any]:
-    """Load MCP server config from ``.mcp.json`` at the repo root, if present."""
-    mcp_json = _find_repo_root() / ".mcp.json"
-    if not mcp_json.exists():
+def _attach_databricks_env(mcp_servers: dict[str, Any], env: dict[str, str]) -> None:
+    """Give MCP servers that declare no ``env`` the Databricks credentials."""
+    databricks_env = {k: v for k, v in env.items() if k.startswith("DATABRICKS_")}
+    if not databricks_env:
+        return
+    for server in mcp_servers.values():
+        if isinstance(server, dict) and "env" not in server:
+            server["env"] = dict(databricks_env)
+
+
+def _load_mcp_servers() -> dict[str, Any]:
+    """Load MCP server definitions from ``.mcp.json`` at the repo root, if present.
+
+    Reads the public Claude Code ``{"mcpServers": {...}}`` format and resolves
+    the ``${CLAUDE_PLUGIN_ROOT}`` placeholder to the repo root.
+    """
+    config_path = _repo_root() / ".mcp.json"
+    if not config_path.exists():
         return {}
     try:
-        data = json.loads(mcp_json.read_text())
+        config = json.loads(config_path.read_text())
     except (json.JSONDecodeError, OSError):
         return {}
 
-    root = str(_find_repo_root())
-    resolved: dict[str, Any] = {}
-    for name, cfg in data.get("mcpServers", {}).items():
-        out: dict[str, Any] = {}
-        for key, val in cfg.items():
-            if key == "defer_loading":
-                continue
-            if isinstance(val, str):
-                out[key] = val.replace("${CLAUDE_PLUGIN_ROOT}", root)
-            elif isinstance(val, list):
-                out[key] = [
-                    v.replace("${CLAUDE_PLUGIN_ROOT}", root) if isinstance(v, str) else v
-                    for v in val
-                ]
-            else:
-                out[key] = val
-        if out:
-            resolved[name] = out
-    return resolved
+    root = str(_repo_root())
+    servers: dict[str, Any] = {}
+    for name, definition in config.get("mcpServers", {}).items():
+        resolved = {
+            key: _resolve_plugin_root(value, root)
+            for key, value in definition.items()
+            if key != "defer_loading"
+        }
+        if resolved:
+            servers[name] = resolved
+    return servers
 
 
-def _build_mlflow_stop_hook(experiment: str, producer: str) -> Any:
-    """Build a best-effort MLflow Stop hook that logs the run's transcript.
+def _resolve_plugin_root(value: Any, root: str) -> Any:
+    if isinstance(value, str):
+        return value.replace(_PLUGIN_ROOT_TOKEN, root)
+    if isinstance(value, list):
+        return [v.replace(_PLUGIN_ROOT_TOKEN, root) if isinstance(v, str) else v for v in value]
+    return value
 
-    Simplified from upstream: configured from ``experiment`` + ambient
-    ``MLFLOW_*`` env vars (no ai-dev-kit ``SkillTestConfig``). Returns ``None``
-    if ``mlflow.claude_code.tracing`` is unavailable, in which case the trace is
-    still built from streamed events.
+
+# ---------------------------------------------------------------------------
+# MLflow Stop hook (Databricks-managed MLflow via public mlflow.claude_code)
+# ---------------------------------------------------------------------------
+
+
+def _mlflow_stop_hook(experiment: str) -> Any:
+    """Build a best-effort ``Stop`` hook that logs the transcript to MLflow.
+
+    Configures the public ``mlflow.claude_code.tracing`` env contract
+    (tracing-enabled flag + Databricks tracking URI + experiment), then returns
+    an async hook that runs ``setup_mlflow`` and ``process_transcript`` off the
+    event loop. Returns ``None`` if the tracing helpers are unavailable or the
+    experiment cannot be reached — in which case the trace is still built from
+    the captured event stream.
     """
     try:
         import mlflow
         from mlflow.claude_code.tracing import process_transcript, setup_mlflow
     except ImportError:
-        logger.warning("mlflow.claude_code.tracing unavailable — run will not be logged to MLflow.")
+        logger.warning("mlflow.claude_code.tracing unavailable; the run will not be logged.")
         return None
 
-    os.environ.setdefault("MLFLOW_TRACKING_URI", "databricks")
-    os.environ["MLFLOW_EXPERIMENT_NAME"] = experiment
-    os.environ["MLFLOW_CLAUDE_TRACING_ENABLED"] = "true"
+    os.environ[_ENV_TRACING_ENABLED] = "true"
+    os.environ.setdefault(_ENV_TRACKING_URI, "databricks")
+    os.environ[_ENV_EXPERIMENT_NAME] = experiment
     try:
-        mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+        mlflow.set_tracking_uri(os.environ[_ENV_TRACKING_URI])
         mlflow.set_experiment(experiment)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("MLflow experiment '%s' not accessible: %s", experiment, e)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("MLflow experiment %r not accessible: %s", experiment, exc)
         return None
 
     async def _stop_hook(
         input_data: dict[str, Any], tool_use_id: Any, context: Any
-    ) -> dict[str, bool]:
+    ) -> dict[str, Any]:
         session_id = input_data.get("session_id")
         transcript_path = input_data.get("transcript_path")
 
-        async def _upload() -> None:
+        async def _log_transcript() -> None:
             try:
                 setup_mlflow()
                 loop = asyncio.get_running_loop()
@@ -522,62 +621,71 @@ def _build_mlflow_stop_hook(experiment: str, producer: str) -> Any:
                     loop.run_in_executor(None, process_transcript, transcript_path, session_id),
                     timeout=60.0,
                 )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Background trace upload failed (session=%s): %s", session_id, e)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Transcript logging failed (session=%s): %s", session_id, exc)
 
-        asyncio.ensure_future(_upload())
-        return {"continue": True}
+        asyncio.ensure_future(_log_transcript())
+        return {}
 
     return _stop_hook
 
 
-def _run_in_fresh_loop(coro: Coroutine[Any, Any, _T]) -> _T:
-    """Run a coroutine to completion on a dedicated thread + event loop.
+# ---------------------------------------------------------------------------
+# Synchronous bridge to the async SDK session
+# ---------------------------------------------------------------------------
 
-    Harvested from upstream: isolating the loop in its own thread avoids anyio
-    cancel-scope and subprocess transport cleanup errors when the SDK client
-    tears down.
+
+def _run_async(
+    coro: Coroutine[Any, Any, _T], *, timeout: float, on_timeout: Callable[[], _T]
+) -> _T:
+    """Drive ``coro`` to completion on a fresh event loop in a worker thread.
+
+    The Claude Agent SDK spawns and supervises a subprocess over anyio. Running
+    the whole session on its own loop in a dedicated thread keeps that lifecycle
+    self-contained, so subprocess/transport teardown cannot race the caller's
+    loop (the source of spurious "Event loop is closed" / cancel-scope noise),
+    and lets the public :meth:`ClaudeCodeAdapter.run` stay synchronous.
+
+    If the worker is still running after ``timeout`` seconds, the call does not
+    raise: it abandons the (daemon) worker and returns ``on_timeout()`` so a
+    wedged session surfaces as a failed result rather than a propagating
+    exception.
     """
-    result_holder: dict[str, Any] = {}
+    outcome: dict[str, Any] = {}
 
-    def _target() -> None:
+    def _worker() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            result_holder["value"] = loop.run_until_complete(coro)
-        except Exception as e:  # noqa: BLE001
-            result_holder["error"] = e
+            outcome["value"] = loop.run_until_complete(coro)
+        except Exception as exc:  # noqa: BLE001 - re-raised on the caller thread
+            outcome["error"] = exc
         finally:
-            try:
-                pending = asyncio.all_tasks(loop)
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                loop.run_until_complete(loop.shutdown_asyncgens())
-                try:
-                    loop.run_until_complete(
-                        asyncio.wait_for(loop.shutdown_default_executor(), timeout=5.0)
-                    )
-                except (TimeoutError, RuntimeError):
-                    pass
-            except Exception:  # noqa: BLE001
-                pass
-            # Silence "Event loop is closed" noise from subprocess transport
-            # __del__ running during GC after the loop closes (harmless).
-            setattr(loop, "_check_closed", lambda: None)  # noqa: B010
-            loop.close()
+            _shutdown_loop(loop)
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    worker = threading.Thread(target=_worker, name="claude-code-adapter", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return on_timeout()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def _shutdown_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel stragglers and close ``loop`` quietly."""
     try:
-        future = pool.submit(_target)
-        future.result(timeout=600)
-    except concurrent.futures.TimeoutError:
-        pool.shutdown(wait=False)
-        raise
-    else:
-        pool.shutdown(wait=True)
-
-    if "error" in result_holder:
-        raise result_holder["error"]
-    return result_holder["value"]
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:  # noqa: BLE001 - teardown is best-effort
+        pass
+    finally:
+        # Subprocess transports may call back into the loop from __del__ during
+        # GC after close; neutralizing the closed-check silences that harmless noise.
+        setattr(loop, "_check_closed", lambda: None)  # noqa: B010
+        loop.close()

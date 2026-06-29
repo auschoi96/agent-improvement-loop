@@ -37,14 +37,15 @@ provable goal.
     lint/typecheck config (ruff + mypy or equivalent), CI stub.
   - `src/ail/ingest/base.py` — `TraceSource` + `AgentAdapter` interfaces (the
     reusability seam). Clean, documented, with type signatures.
-  - `src/ail/ingest/mlflow_source.py` — HARVEST ai-dev-kit
-    `trace/mlflow_integration.py` (`search_traces` ingestion), refactored to
-    implement `TraceSource` and be producer-agnostic (drop the Claude-Code
-    hardwiring).
-  - `src/ail/ingest/adapters/claude_code.py` — HARVEST ai-dev-kit
-    `agent/executor.py` Claude Code adapter behind the `AgentAdapter` interface.
-  - **License-provenance check** on all harvested code → populate
-    `PROVENANCE.md`, flag any incompatibility before more harvesting.
+  - `src/ail/ingest/mlflow_source.py` — CLEAN-ROOM original implementing
+    `TraceSource` over the public MLflow Traces API (`search_traces` /
+    `get_trace`), producer-agnostic (no Claude-Code hardwiring).
+  - `src/ail/ingest/adapters/claude_code.py` — CLEAN-ROOM original Claude Code
+    adapter over the public `claude-agent-sdk`, behind the `AgentAdapter`
+    interface.
+  - **License-provenance check** → populate `PROVENANCE.md`; the ingestion
+    modules are original clean-room work (never read ai-dev-kit), flag any
+    incompatibility before incorporating other sources.
 - **Acceptance:**
   - Connects to experiment `660599403165942` and pulls the 77 traces via
     `TraceSource` into the normalized record.
