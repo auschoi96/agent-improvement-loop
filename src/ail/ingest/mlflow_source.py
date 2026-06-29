@@ -87,7 +87,7 @@ class MLflowTraceSource(TraceSource):
             import mlflow
         except ImportError as exc:  # pragma: no cover - import guard
             raise ImportError(
-                "MLflowTraceSource requires mlflow. Install it with: pip install 'mlflow>=3.14'"
+                "MLflowTraceSource requires mlflow. Install it with: pip install 'mlflow>=3.14,<4'"
             ) from exc
 
         if self.profile:

@@ -25,7 +25,7 @@ documentation/source of the packages listed under "Public sources" below.
 
 ### Public sources used
 
-- **`mlflow`** (OSS, Apache-2.0), pinned `mlflow>=3.14`, resolved/verified against **3.14.0**:
+- **`mlflow`** (OSS, Apache-2.0), pinned `mlflow>=3.14,<4`, resolved/verified against **3.14.0**:
   `mlflow.search_traces` (scoping via `locations=[experiment_id]`, `return_type="list"`),
   `mlflow.get_trace`, `mlflow.set_tracking_uri` / `mlflow.set_registry_uri`,
   `mlflow.entities.Trace` (`.info`, `.data.spans`), and `mlflow.claude_code.tracing`.

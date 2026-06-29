@@ -27,7 +27,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,6 +70,12 @@ _INTERNAL_ENV_KEYS = frozenset(
     }
 )
 _DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep")
+
+# Grace period added on top of the task's own timeout before the worker thread
+# is abandoned. The in-stream timeout (``task.timeout_seconds``) handles the
+# normal case; this hard ceiling only fires if the SDK wedges so badly that the
+# in-stream check never runs, and it yields a failed result rather than raising.
+_HARD_TIMEOUT_BUFFER_S = 60
 
 # Public MLflow Claude-tracing env var names (read by ``setup_mlflow``).
 _ENV_TRACING_ENABLED = "MLFLOW_CLAUDE_TRACING_ENABLED"
@@ -132,9 +138,30 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         The async SDK session is driven to completion on a dedicated event loop
         (see :func:`_run_async`), keeping ``run`` synchronous per the
-        :class:`~ail.ingest.base.AgentAdapter` contract.
+        :class:`~ail.ingest.base.AgentAdapter` contract. If the session blows
+        past its hard timeout, a failed :class:`~ail.ingest.base.AgentRunResult`
+        is returned rather than an exception raised.
         """
-        return _run_async(self._arun(task), timeout=task.timeout_seconds + 60)
+        hard_timeout = task.timeout_seconds + _HARD_TIMEOUT_BUFFER_S
+        return _run_async(
+            self._arun(task),
+            timeout=hard_timeout,
+            on_timeout=lambda: self._timeout_result(hard_timeout),
+        )
+
+    def _timeout_result(self, timeout: float) -> AgentRunResult:
+        """Failed result for a run that exceeded its hard timeout."""
+        message = f"Claude agent run exceeded its hard timeout of {timeout:g}s"
+        logger.error(message)
+        return AgentRunResult(
+            trace=NormalizedTrace(
+                trace_id=f"timeout-{uuid.uuid4().hex}",
+                status=TraceStatus.ERROR,
+                producer=self.name,
+            ),
+            success=False,
+            error=message,
+        )
 
     async def _arun(self, task: AgentTask) -> AgentRunResult:
         try:
@@ -608,7 +635,9 @@ def _mlflow_stop_hook(experiment: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _run_async(coro: Coroutine[Any, Any, _T], *, timeout: float) -> _T:
+def _run_async(
+    coro: Coroutine[Any, Any, _T], *, timeout: float, on_timeout: Callable[[], _T]
+) -> _T:
     """Drive ``coro`` to completion on a fresh event loop in a worker thread.
 
     The Claude Agent SDK spawns and supervises a subprocess over anyio. Running
@@ -616,6 +645,11 @@ def _run_async(coro: Coroutine[Any, Any, _T], *, timeout: float) -> _T:
     self-contained, so subprocess/transport teardown cannot race the caller's
     loop (the source of spurious "Event loop is closed" / cancel-scope noise),
     and lets the public :meth:`ClaudeCodeAdapter.run` stay synchronous.
+
+    If the worker is still running after ``timeout`` seconds, the call does not
+    raise: it abandons the (daemon) worker and returns ``on_timeout()`` so a
+    wedged session surfaces as a failed result rather than a propagating
+    exception.
     """
     outcome: dict[str, Any] = {}
 
@@ -633,7 +667,7 @@ def _run_async(coro: Coroutine[Any, Any, _T], *, timeout: float) -> _T:
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
-        raise TimeoutError(f"Claude agent run exceeded {timeout}s")
+        return on_timeout()
     if "error" in outcome:
         raise outcome["error"]
     return outcome["value"]
