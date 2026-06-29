@@ -1,0 +1,61 @@
+resources:
+  jobs:
+    l0_publish:
+      name: ail-l0-publish-scheduled
+      description: >-
+        Tier A — recompute the L0 deterministic metrics from MLflow experiment
+        ${var.experiment_id} and (atomically, idempotently) refresh the UC Delta
+        tables that back the L0 leaderboard app. Runs on a schedule so the
+        dashboard stays a LIVING view of the corpus instead of a one-time
+        snapshot. Reuses ail.metrics via ail.publish — no metric logic here.
+      tags:
+        project: agent-improvement-loop
+        tier: A
+        managed_by: dab
+
+      # With no `run_as` set, the Job runs as the deploying identity — for the
+      # verification deploy that is the user (who holds the catalog/warehouse
+      # grants). For production, run as a service principal that has been granted
+      # the data privileges by uncommenting:
+      #   run_as:
+      #     service_principal_name: <sp-application-id>
+
+      # Defined and live by default (UNPAUSED). Override schedule_pause_status to
+      # PAUSED to keep it deployed-but-dormant.
+      schedule:
+        quartz_cron_expression: ${var.publish_cron}
+        timezone_id: ${var.schedule_timezone}
+        pause_status: ${var.schedule_pause_status}
+
+      # The publish is idempotent (REPLACE WHERE per experiment); never overlap runs.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      tasks:
+        - task_key: publish_l0
+          environment_key: serverless
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-publish-job
+            named_parameters:
+              experiment: ${var.experiment_id}
+              warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              # Empty by default -> the entrypoint mints a short-lived bearer from
+              # the run-as identity. Set both to read a stored token from a secret
+              # scope (production-hardened service-principal path).
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+
+      # Serverless compute. The `ail` wheel (+ its deps: mlflow, databricks-sdk,
+      # pydantic) is installed into the run environment from the locally-built
+      # artifact declared in databricks.yml.
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
+              - ../dist/*.whl

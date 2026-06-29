@@ -1,0 +1,55 @@
+bundle:
+  name: ail-scheduled-publish
+
+include:
+  - resources/*.yml
+
+# Build the `ail` wheel locally before deploy; the serverless Job environment
+# installs it (see resources/l0_publish.job.yml -> environments). `uv` is the
+# fast PEP 517 builder; `python -m build --wheel` is an equivalent fallback.
+artifacts:
+  ail_wheel:
+    type: whl
+    path: .
+    build: uv build --wheel
+
+variables:
+  experiment_id:
+    description: MLflow experiment whose traces are summarized into the L0 tables.
+    default: '660599403165942'
+  warehouse_id:
+    description: SQL warehouse id used to create + (atomically) populate the L0 UC Delta tables.
+    default: 7d1d3dbb3ba65f2a
+  catalog:
+    description: Unity Catalog catalog that holds the L0 tables.
+    default: austin_choi_omni_agent_catalog
+  schema:
+    description: Schema (within --catalog) that holds l0_session_metrics / l0_corpus_summary / l0_diagnosis.
+    default: agent_improvement_loop
+  publish_cron:
+    description: >-
+      Quartz cron for the refresh schedule (sec min hour day-of-month month day-of-week).
+      Default is daily at 07:00. Override e.g. --var publish_cron='0 0 */6 * * ?' for every 6h.
+    default: '0 0 7 * * ?'
+  schedule_timezone:
+    description: Timezone id for the schedule.
+    default: UTC
+  schedule_pause_status:
+    description: UNPAUSED (schedule is live — the living-dashboard default) or PAUSED.
+    default: UNPAUSED
+  token_secret_scope:
+    description: >-
+      Optional Databricks secret scope holding the run-as bearer token for the
+      v4 trace store (production-hardened path). Empty => the Job mints a
+      short-lived OAuth bearer from its own run-as identity at runtime.
+    default: ''
+  token_secret_key:
+    description: Secret key within token_secret_scope (only used when the scope is set).
+    default: ''
+
+targets:
+  # Single workspace target; host + auth resolve from the Databricks CLI profile
+  # given at deploy time (e.g. --profile dais-demo). The host is intentionally not
+  # hardcoded so the same bundle deploys to any workspace.
+  dais_demo:
+    default: true
