@@ -7,12 +7,17 @@ These cover the contract -> flat-row mapping and SQL-literal escaping in
 
 from __future__ import annotations
 
+import pytest
+from databricks.sdk.service.sql import StatementState
+
 from ail.ingest.base import NormalizedTrace, TokenUsage, ToolCall, TraceStatus
 from ail.metrics.l0_deterministic import compute_l0
 from ail.publish import (
     DIAGNOSIS_COLUMNS,
     SESSION_COLUMNS,
+    SESSION_TABLE,
     SUMMARY_COLUMNS,
+    _atomic_replace_table,
     _diagnosis_rows,
     _lit,
     _row,
@@ -21,6 +26,41 @@ from ail.publish import (
 )
 
 EXPERIMENT = "660599403165942"
+
+
+# -- fake warehouse client (records statements; can fail on demand) --------
+
+
+class _FakeStatus:
+    def __init__(self, state: StatementState) -> None:
+        self.state = state
+        self.error = None
+
+
+class _FakeResp:
+    def __init__(self, state: StatementState) -> None:
+        self.statement_id = "stmt-1"
+        self.status = _FakeStatus(state)
+
+
+class _FakeStatementExecution:
+    def __init__(self, fail_substr: str | None) -> None:
+        self.statements: list[str] = []
+        self._fail_substr = fail_substr
+
+    def execute_statement(self, *, warehouse_id, statement, wait_timeout=None):  # type: ignore[no-untyped-def]
+        self.statements.append(statement)
+        if self._fail_substr and self._fail_substr in statement:
+            raise RuntimeError("simulated warehouse failure")
+        return _FakeResp(StatementState.SUCCEEDED)
+
+    def get_statement(self, statement_id):  # type: ignore[no-untyped-def]
+        return _FakeResp(StatementState.SUCCEEDED)
+
+
+class _FakeClient:
+    def __init__(self, fail_substr: str | None = None) -> None:
+        self.statement_execution = _FakeStatementExecution(fail_substr)
 
 
 def _priced_session() -> NormalizedTrace:
@@ -134,3 +174,48 @@ def test_diagnosis_rows_capture_repeats() -> None:
     paths = [r for r in rows if r[kind_i] == "path"]
     assert any(r[tool_i] == "Bash" and r[count_i] == 3 for r in shell)
     assert any(r[tool_i] == "Read" and r[count_i] == 2 for r in paths)
+
+
+# -- atomic replace: happy path + failure path -----------------------------
+
+SCHEMA_FQN = "`cat`.`sch`"
+
+
+def test_atomic_replace_swaps_via_staging_then_replace_where() -> None:
+    report = _report()
+    client = _FakeClient()
+    n = _atomic_replace_table(
+        client, "wh", SCHEMA_FQN, SESSION_TABLE, SESSION_COLUMNS, _session_rows(report), EXPERIMENT
+    )
+    stmts = client.statement_execution.statements
+    assert n == report.n_traces
+    # Ordered contract: clone staging -> load staging -> atomic swap -> drop.
+    assert stmts[0].startswith(f"CREATE OR REPLACE TABLE {SCHEMA_FQN}._stg_")
+    assert any(s.startswith(f"INSERT INTO {SCHEMA_FQN}._stg_") and "VALUES" in s for s in stmts)
+    swap = [s for s in stmts if "REPLACE WHERE" in s]
+    assert len(swap) == 1
+    assert f"REPLACE WHERE experiment_id = '{EXPERIMENT}'" in swap[0]
+    assert "SELECT * FROM" in swap[0]
+    assert any(s.startswith("DROP TABLE IF EXISTS") for s in stmts)
+
+
+def test_atomic_replace_failure_leaves_live_table_untouched() -> None:
+    report = _report()
+    # Fail on the staging load (the only statement that uses VALUES).
+    client = _FakeClient(fail_substr=" VALUES")
+    with pytest.raises(RuntimeError, match="simulated warehouse failure"):
+        _atomic_replace_table(
+            client,
+            "wh",
+            SCHEMA_FQN,
+            SESSION_TABLE,
+            SESSION_COLUMNS,
+            _session_rows(report),
+            EXPERIMENT,
+        )
+    stmts = client.statement_execution.statements
+    # Invariant: the live table is mutated only by REPLACE WHERE, which must NOT
+    # have run — a failed staging load leaves the prior snapshot intact.
+    assert not any("REPLACE WHERE" in s for s in stmts)
+    # Staging was still cleaned up.
+    assert any(s.startswith("DROP TABLE IF EXISTS") for s in stmts)

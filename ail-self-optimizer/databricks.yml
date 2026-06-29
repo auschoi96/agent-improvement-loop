@@ -3,7 +3,8 @@ bundle:
 
 variables:
   sql_warehouse_id:
-    description: SQL Warehouse ID
+    description: SQL Warehouse ID backing the analytics plugin. Override with --var sql_warehouse_id=... or BUNDLE_VAR_sql_warehouse_id.
+    default: 7d1d3dbb3ba65f2a
 
 resources:
   apps:
@@ -25,8 +26,8 @@ resources:
 targets:
   default:
     default: true
-    workspace:
-      host: https://fevm-austin-choi-omni-agent.cloud.databricks.com
-
-    variables:
-      sql_warehouse_id: 7d1d3dbb3ba65f2a
+    # Target workspace + auth are resolved from the Databricks CLI profile given
+    # at deploy time (e.g. `--profile dais-demo`, DATABRICKS_CONFIG_PROFILE, or
+    # DATABRICKS_HOST). The host is intentionally not hardcoded here so the same
+    # bundle deploys to any workspace; the warehouse id is overridable via the
+    # sql_warehouse_id variable above.

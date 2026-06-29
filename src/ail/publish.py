@@ -20,9 +20,14 @@ Tables written to ``<catalog>.<schema>`` (default
   identity (``shell`` boilerplate re-runs, ``path`` repeated file edits/reads,
   ``args`` exact repeats), each with its repeat count.
 
-The write is **idempotent per experiment**: each table is created if missing,
-the rows for the target ``experiment_id`` are deleted, then re-inserted. Re-runs
-replace; other experiments are left untouched.
+The write is **idempotent and atomic per experiment**: each table is created if
+missing, the new snapshot is staged in a transient clone, then swapped into the
+live table with a single ``INSERT INTO … REPLACE WHERE experiment_id = <id>
+SELECT * FROM <staging>`` statement. Because the live table is only ever touched
+by that one atomic Delta transaction, a failure before or during staging leaves
+the previous complete snapshot intact — a reader never sees empty or partial
+data for an experiment that already had one. Re-runs replace; other experiments
+are left untouched.
 
 Auth mirrors :mod:`ail.metrics.report`: if ``DATABRICKS_HOST`` and
 ``DATABRICKS_TOKEN`` are set they are used for both the MLflow trace pull (the
@@ -39,6 +44,7 @@ Run::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import time
 from datetime import UTC, datetime
@@ -368,6 +374,50 @@ def _insert_batched(
     return written
 
 
+def _atomic_replace_table(
+    client: Any,
+    warehouse_id: str,
+    schema_fqn: str,
+    table: str,
+    columns: list[str],
+    rows: list[list[Any]],
+    experiment_id: str,
+) -> int:
+    """Atomically replace one experiment's rows in ``table`` with ``rows``.
+
+    The new snapshot is loaded into a transient staging clone (batched — those
+    writes are not visible to readers of the live table), then swapped in with a
+    single ``INSERT INTO … REPLACE WHERE`` Delta transaction. The live table is
+    therefore mutated exactly once, atomically: if staging fails the live table
+    keeps its prior complete snapshot. Empty ``rows`` is handled correctly — the
+    swap removes any prior rows for the experiment and writes nothing.
+
+    Returns the number of rows written.
+    """
+    main = f"{schema_fqn}.{table}"
+    staging = f"{schema_fqn}._stg_{table}"
+
+    # Fresh empty clone — same schema and column order as the live table, so the
+    # SELECT * swap below is position-aligned. CREATE OR REPLACE is itself atomic
+    # and clears any staging table left behind by an earlier interrupted run.
+    _execute(
+        client, warehouse_id, f"CREATE OR REPLACE TABLE {staging} AS SELECT * FROM {main} WHERE 1=0"
+    )
+    try:
+        _insert_batched(client, warehouse_id, staging, columns, rows)
+        _execute(
+            client,
+            warehouse_id,
+            f"INSERT INTO {main} REPLACE WHERE experiment_id = {_lit(experiment_id)} "
+            f"SELECT * FROM {staging}",
+        )
+    finally:
+        # Best-effort cleanup; never mask a failure from the steps above.
+        with contextlib.suppress(Exception):
+            _execute(client, warehouse_id, f"DROP TABLE IF EXISTS {staging}")
+    return len(rows)
+
+
 # ---------------------------------------------------------------------------
 # Source + orchestration
 # ---------------------------------------------------------------------------
@@ -409,23 +459,35 @@ def publish(
     for ddl in _ddl(catalog, schema):
         _execute(client, warehouse_id, ddl)
 
-    # 2. Replace this experiment's rows (idempotent per experiment).
-    for table in (SESSION_TABLE, SUMMARY_TABLE, DIAGNOSIS_TABLE):
-        _execute(
-            client,
-            warehouse_id,
-            f"DELETE FROM {fqn}.{table} WHERE experiment_id = {_lit(experiment_id)}",
-        )
-
-    # 3. Insert freshly computed rows.
-    n_session = _insert_batched(
-        client, warehouse_id, f"{fqn}.{SESSION_TABLE}", SESSION_COLUMNS, _session_rows(report)
+    # 2. Atomically replace each table's slice for this experiment. Each call
+    #    mutates its live table exactly once (staging clone -> REPLACE WHERE
+    #    swap), so a mid-run failure never leaves empty/partial data.
+    n_session = _atomic_replace_table(
+        client,
+        warehouse_id,
+        fqn,
+        SESSION_TABLE,
+        SESSION_COLUMNS,
+        _session_rows(report),
+        experiment_id,
     )
-    n_summary = _insert_batched(
-        client, warehouse_id, f"{fqn}.{SUMMARY_TABLE}", SUMMARY_COLUMNS, [_summary_row(report)]
+    n_summary = _atomic_replace_table(
+        client,
+        warehouse_id,
+        fqn,
+        SUMMARY_TABLE,
+        SUMMARY_COLUMNS,
+        [_summary_row(report)],
+        experiment_id,
     )
-    n_diag = _insert_batched(
-        client, warehouse_id, f"{fqn}.{DIAGNOSIS_TABLE}", DIAGNOSIS_COLUMNS, _diagnosis_rows(report)
+    n_diag = _atomic_replace_table(
+        client,
+        warehouse_id,
+        fqn,
+        DIAGNOSIS_TABLE,
+        DIAGNOSIS_COLUMNS,
+        _diagnosis_rows(report),
+        experiment_id,
     )
 
     print(
