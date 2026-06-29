@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+# Local config / secrets
+*.local.toml
+.databrickscfg
+# MLflow / notebooks
+mlruns/
+.ipynb_checkpoints/
+# OS
+.DS_Store
