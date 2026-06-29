@@ -55,7 +55,9 @@ functions with disjoint, type-checked inputs is the structural half of
 The **judge-vs-human agreement floor** is the trip-wire: when agreement on the
 Human Anchor drops below the configured floor, `AgreementReport.distrusted`
 fires and the loop must stop trusting that judge's scores until it is re-aligned
-and re-measured. A drifting judge is a distrusted judge.
+and re-measured. A drifting judge is a distrusted judge — and so is an
+*unmeasured* one: an empty or under-sampled anchor fails closed to `distrusted`
+rather than reading as trusted (see `insufficient_data` below).
 
 ## API surface
 
@@ -68,15 +70,22 @@ construction is offline and free.
 ```python
 from ail.judges import make_correctness_judge, make_modularity_judge, make_groundedness_judge
 
-correctness = make_correctness_judge(model="databricks:/...")   # categorical "yes"/"no" — the Phase-2 guardrail
-modularity  = make_modularity_judge(model="databricks:/...")    # graded int 1..5
-groundedness = make_groundedness_judge(model="databricks:/...")  # categorical "yes"/"no"
+correctness = make_correctness_judge(model="databricks:/...")   # Literal["yes","no"] — the Phase-2 guardrail
+modularity  = make_modularity_judge(model="databricks:/...")    # Literal[1,2,3,4,5] — bounded graded scale
+groundedness = make_groundedness_judge(model="databricks:/...")  # Literal["yes","no"]
 
 feedback = correctness(inputs=task, outputs=response, expectations=expected)
 ```
 
-- `ScorerSpec(name, instructions, feedback_value_type, description)` — a reusable
-  scorer definition. The built-in set is `DEFAULT_SCORERS`
+All three use **constrained** structured outputs (an MLflow `Literal[...]`), so a
+judge can never emit an out-of-domain value: correctness/groundedness are a true
+categorical `"yes"`/`"no"`, and modularity is bounded to the integers `1..5`. A
+bounded `Literal` scale loses `make_judge`'s default mean aggregation, so the
+modularity spec restores `["mean", "median", "p90"]` to keep the graded metric
+rolling up across traces.
+
+- `ScorerSpec(name, instructions, feedback_value_type, description, aggregations=None)`
+  — a reusable scorer definition. The built-in set is `DEFAULT_SCORERS`
   (`correctness`/`modularity`/`groundedness`).
 - `make_scorer(spec, *, model=None, instructions=None, feedback_value_type=..., name=None, inference_params=None)`
   — build a `Judge`, overriding rubric/type/name/model per call.
@@ -136,7 +145,11 @@ log_agreement(report)   # best-effort MLflow logging (metrics + JSON artifact)
   it with the human label, and delegates to `compute_agreement`. A per-item judge
   exception is captured (recorded as an `error`, counted as a non-agreement) so
   one bad item never aborts the measurement.
-- `AgreementConfig(floor=0.7, numeric_tolerance=0.0, case_insensitive=True)`.
+- `AgreementConfig(floor=0.7, numeric_tolerance=0.0, case_insensitive=True, min_samples=1)`.
+  `case_insensitive` is applied **uniformly** — the agreement decision *and* the
+  Cohen's-kappa discretization / label space honour it, so kappa never folds
+  labels a deployer chose to keep distinct. `min_samples` is the fail-closed
+  knob: below that many *scored* items the judge is unmeasured (see below).
 - `log_agreement(report, *, run_id=None) -> bool` — logs
   `judge_human_agreement` / `judge_distrusted` (and `judge_human_cohen_kappa`)
   as metrics plus the full report as a JSON artifact; best-effort, returns
@@ -159,7 +172,8 @@ alarm" reads.
   "n_agreements": 16,
   "agreement_rate": 0.8,             // n_agreements / n_items (floor applies here)
   "floor": 0.7,
-  "distrusted": false,               // true when agreement_rate < floor
+  "distrusted": false,               // true when agreement_rate < floor OR insufficient_data
+  "insufficient_data": false,        // true when n_scored < min_samples (unmeasured judge)
   "cohen_kappa": 0.61,               // chance-corrected agreement; null when N/A
   "numeric_tolerance": null,         // set only when float labels used a tolerance
   "label_space": ["no", "yes"],
@@ -179,6 +193,14 @@ Notes:
   items — an item the judge could not score (`error` set) counts as a
   non-agreement, so a judge that crashes on half the anchor cannot look fully
   trustworthy.
+- **Fail-closed on insufficient data.** An empty anchor — or any anchor with
+  fewer than `min_samples` *scored* items — leaves the judge *unmeasured*. An
+  unmeasured judge must never read as trusted, so `insufficient_data` is set and
+  `distrusted` fires regardless of the (vacuous) rate. A consumer that only
+  reads `distrusted` therefore stays safe; `insufficient_data` is the extra bit
+  that distinguishes "could not measure" from "measured and failed the floor".
+  This is the anti-co-adaptation correction to an earlier false-clear where a
+  zero-item anchor reported `distrusted: false`.
 - **`cohen_kappa`** is the chance-corrected companion (raw agreement is inflated
   by class imbalance, which matters for a guardrail). It is `null` when
   undefined/uninformative (no pairs, a single label space) or when float labels

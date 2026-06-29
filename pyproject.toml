@@ -34,6 +34,12 @@ ail-publish-job = "ail.jobs.publish_job:main"
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
 # seam + MLflow source install without pulling an agent runtime.
 claude = ["claude-agent-sdk>=0.1.39"]
+# Scheduled-scorer registration (src/ail/judges/registration.py) calls the
+# public mlflow.genai.scorers API, but that delegates to databricks-agents for a
+# Databricks backend. Optional + lazy so the core library (ingest, L0 metrics,
+# ground truth, judge construction) installs without this heavy dependency
+# (boto3/tiktoken/...); only operators registering scorers need it.
+agents = ["databricks-agents>=1.11,<2"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

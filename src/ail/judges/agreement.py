@@ -53,6 +53,14 @@ __all__ = [
 DEFAULT_FLOOR = 0.7
 
 
+#: Default minimum number of *scored* anchor items below which the measurement
+#: is treated as insufficient (and the judge as distrusted). The floor is 1 —
+#: zero scored items is an unmeasured judge, which must never read as trusted. A
+#: real ship/no-ship guardrail should raise this so a 1–2 item anchor cannot
+#: certify a judge; it is deliberately a knob, not a constant.
+DEFAULT_MIN_SAMPLES = 1
+
+
 @dataclass(frozen=True, slots=True)
 class AgreementConfig:
     """Knobs for the agreement computation.
@@ -64,12 +72,20 @@ class AgreementConfig:
             which a judge score and a human label are deemed to agree. Ignored
             for categorical/bool/int labels, which require exact equality.
         case_insensitive: Compare string labels case-insensitively (so a judge
-            emitting ``"Yes"`` agrees with a human ``"yes"``).
+            emitting ``"Yes"`` agrees with a human ``"yes"``). Applied uniformly:
+            the agreement decision **and** the Cohen's-kappa discretization /
+            label space honour this flag, so kappa never silently case-folds
+            labels a deployer asked to keep distinct.
+        min_samples: Minimum number of *scored* items required to trust a
+            measurement. Below it (an empty anchor, or a judge that scored too
+            few items) the report is flagged ``insufficient_data`` and
+            ``distrusted`` — an unmeasured judge is never trusted.
     """
 
     floor: float = DEFAULT_FLOOR
     numeric_tolerance: float = 0.0
     case_insensitive: bool = True
+    min_samples: int = DEFAULT_MIN_SAMPLES
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,36 +145,50 @@ def _values_agree(
     return judge_value == human_value
 
 
-def _cohen_kappa(pairs: Sequence[tuple[ScoreValue, ScoreValue]]) -> float | None:
+def _cohen_kappa(
+    pairs: Sequence[tuple[ScoreValue, ScoreValue]], *, case_insensitive: bool
+) -> float | None:
     """Cohen's kappa over discrete (judge, human) label pairs, or ``None``.
 
     Chance-corrected agreement: ``(p_o - p_e) / (1 - p_e)``. Returns ``None`` when
     it is undefined or uninformative — no pairs, or perfect expected agreement
     (a single label used by both raters), where the raw rate is the honest
-    number to report.
+    number to report. Labels are discretized with :func:`_kappa_key` under the
+    same ``case_insensitive`` rule used for the agreement decision, so kappa and
+    the raw rate measure like with like.
     """
     n = len(pairs)
     if n == 0:
         return None
-    labels = sorted({_kappa_key(j) for j, _ in pairs} | {_kappa_key(h) for _, h in pairs})
+
+    def key(value: ScoreValue) -> str:
+        return _kappa_key(value, case_insensitive=case_insensitive)
+
+    labels = sorted({key(j) for j, _ in pairs} | {key(h) for _, h in pairs})
     if len(labels) < 2:
         return None
     index = {label: i for i, label in enumerate(labels)}
-    observed = sum(1 for j, h in pairs if _kappa_key(j) == _kappa_key(h)) / n
+    observed = sum(1 for j, h in pairs if key(j) == key(h)) / n
     judge_counts = [0.0] * len(labels)
     human_counts = [0.0] * len(labels)
     for j, h in pairs:
-        judge_counts[index[_kappa_key(j)]] += 1
-        human_counts[index[_kappa_key(h)]] += 1
+        judge_counts[index[key(j)]] += 1
+        human_counts[index[key(h)]] += 1
     expected = sum((judge_counts[i] / n) * (human_counts[i] / n) for i in range(len(labels)))
     if expected >= 1.0:
         return None
     return round((observed - expected) / (1.0 - expected), 6)
 
 
-def _kappa_key(value: ScoreValue) -> str:
-    """Discretize a label for kappa (case-folded string form)."""
-    return str(value).strip().casefold()
+def _kappa_key(value: ScoreValue, *, case_insensitive: bool) -> str:
+    """Discretize a label for kappa / label-space (string form).
+
+    Case-folds only when ``case_insensitive`` is set, matching
+    :func:`_values_agree`; with it off, ``"Yes"`` and ``"yes"`` stay distinct
+    labels rather than being silently merged.
+    """
+    text = str(value).strip()
+    return text.casefold() if case_insensitive else text
 
 
 def compute_agreement(
@@ -178,6 +208,12 @@ def compute_agreement(
     Cohen's kappa is reported for categorical comparisons (no float tolerance in
     play); the **floor is applied to the raw agreement rate**, and
     :attr:`AgreementReport.distrusted` fires when the rate is below it.
+
+    Fail-closed on insufficient data: with fewer than ``config.min_samples``
+    *scored* items (an empty anchor is the limiting case), the judge is
+    unmeasured. :attr:`AgreementReport.insufficient_data` is set and
+    :attr:`AgreementReport.distrusted` fires regardless of the rate — an
+    unmeasured judge must never read as trusted.
     """
     cfg = config or AgreementConfig()
     items: list[AgreementItem] = []
@@ -210,18 +246,36 @@ def compute_agreement(
         )
 
     n_items = len(items)
+    n_scored = len(scored_pairs)
     n_agreements = sum(1 for item in items if item.agree)
     # The rate is over ALL items (an unscored item is a non-agreement), so a
     # judge that errors on half the anchor cannot look fully trustworthy.
     rate = round(n_agreements / n_items, 6) if n_items else 0.0
-    distrusted = n_items > 0 and rate < cfg.floor
+    # Fail closed: too few scored items (an empty anchor is the limiting case)
+    # means the judge is unmeasured, and an unmeasured judge is never trusted.
+    insufficient_data = n_scored < cfg.min_samples
+    distrusted = insufficient_data or rate < cfg.floor
 
-    kappa = None if used_tolerance else _cohen_kappa(scored_pairs)
-    label_space = sorted({_kappa_key(h) for h in (p.human_value for p in pairs)})
+    kappa = (
+        None
+        if used_tolerance
+        else _cohen_kappa(scored_pairs, case_insensitive=cfg.case_insensitive)
+    )
+    label_space = sorted(
+        {_kappa_key(p.human_value, case_insensitive=cfg.case_insensitive) for p in pairs}
+    )
 
     notes: list[str] = []
-    if n_items == 0:
-        notes.append("empty Human Anchor: agreement is undefined; not treated as distrusted")
+    if insufficient_data:
+        if n_items == 0:
+            notes.append(
+                "empty Human Anchor: judge is unmeasured; flagged distrusted (fail closed)"
+            )
+        else:
+            notes.append(
+                f"only {n_scored} scored item(s) < min_samples {cfg.min_samples}: judge is "
+                "under-measured; flagged distrusted (fail closed)"
+            )
     n_errored = sum(1 for item in items if item.error is not None)
     if n_errored:
         notes.append(f"{n_errored} item(s) had no judge value and count as non-agreements")
@@ -234,11 +288,12 @@ def compute_agreement(
     return AgreementReport(
         judge_name=judge_name,
         n_items=n_items,
-        n_scored=len(scored_pairs),
+        n_scored=n_scored,
         n_agreements=n_agreements,
         agreement_rate=rate,
         floor=cfg.floor,
         distrusted=distrusted,
+        insufficient_data=insufficient_data,
         cohen_kappa=kappa,
         numeric_tolerance=cfg.numeric_tolerance if used_tolerance else None,
         label_space=label_space,
@@ -321,6 +376,9 @@ def log_agreement(report: AgreementReport, *, run_id: str | None = None) -> bool
         kwargs = {"run_id": run_id} if run_id else {}
         mlflow.log_metric("judge_human_agreement", report.agreement_rate, **kwargs)
         mlflow.log_metric("judge_distrusted", 1.0 if report.distrusted else 0.0, **kwargs)
+        mlflow.log_metric(
+            "judge_insufficient_data", 1.0 if report.insufficient_data else 0.0, **kwargs
+        )
         if report.cohen_kappa is not None:
             mlflow.log_metric("judge_human_cohen_kappa", report.cohen_kappa, **kwargs)
         mlflow.log_dict(
