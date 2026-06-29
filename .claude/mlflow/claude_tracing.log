@@ -1,3 +1,0 @@
-2026-06-29 01:37:40,533 - mlflow.claude_code.tracing - CLAUDE_TRACING - Stop hook: session=b50a3d9c-0bca-42a3-b475-eca106759f6b, transcript=/Users/austin.choi/.claude/projects/-Users-austin-choi/b50a3d9c-0bca-42a3-b475-eca106759f6b.jsonl
-2026-06-29 01:37:40,544 - mlflow.claude_code.tracing - CLAUDE_TRACING - Creating MLflow trace for session: b50a3d9c-0bca-42a3-b475-eca106759f6b
-2026-06-29 01:37:43,329 - mlflow.claude_code.tracing - CLAUDE_TRACING - Created MLflow trace: trace:/austin_choi_omni_agent_catalog.mlflow_traces.cc/201506dc57618323b322df3a4c328f0f
