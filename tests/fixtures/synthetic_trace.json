@@ -1,0 +1,119 @@
+{
+ "info": {
+  "trace_id": "tr-synthetic0000000000000000000001",
+  "trace_location": {
+   "type": "MLFLOW_EXPERIMENT",
+   "mlflow_experiment": {
+    "experiment_id": "660599403165942"
+   }
+  },
+  "request_preview": "synthetic request",
+  "response_preview": "synthetic response",
+  "request_time": "2026-06-28T18:28:55.769Z",
+  "state": "OK",
+  "trace_metadata": {
+   "mlflow.trace.tokenUsage": "{\"input_tokens\": 1000, \"output_tokens\": 200, \"total_tokens\": 1200}",
+   "mlflow.trace.session": "11111111-2222-3333-4444-555555555555",
+   "mlflow.trace.user": "test.user",
+   "mlflow.trace.working_directory": "/tmp/synthetic",
+   "mlflow.claude_code_version": "2.1.195",
+   "mlflow.trace_schema.version": "4"
+  },
+  "tags": {
+   "mlflow.traceName": "claude_code_conversation"
+  },
+  "execution_duration_ms": 4200
+ },
+ "data": {
+  "spans": [
+   {
+    "trace_id": "c3ludGhldGljLXRyYWNlLWlk",
+    "span_id": "c3BhbjA=",
+    "parent_span_id": null,
+    "name": "claude_code_conversation",
+    "start_time_unix_nano": 1782671335000000000,
+    "end_time_unix_nano": 1782671339200000000,
+    "events": [],
+    "status": {
+     "code": "STATUS_CODE_OK",
+     "message": ""
+    },
+    "attributes": {
+     "mlflow.spanType": "\"AGENT\"",
+     "mlflow.spanStartTimeNs": "\"1782671335000000000\"",
+     "mlflow.traceRequestId": "\"tr-synthetic0000000000000000000001\"",
+     "mlflow.spanInputs": "\"{}\"",
+     "mlflow.spanOutputs": "\"{}\""
+    },
+    "links": []
+   },
+   {
+    "trace_id": "c3ludGhldGljLXRyYWNlLWlk",
+    "span_id": "c3BhbjE=",
+    "parent_span_id": "c3BhbjA=",
+    "name": "llm",
+    "start_time_unix_nano": 1782671336000000000,
+    "end_time_unix_nano": 1782671338000000000,
+    "events": [],
+    "status": {
+     "code": "STATUS_CODE_OK",
+     "message": ""
+    },
+    "attributes": {
+     "mlflow.spanType": "\"LLM\"",
+     "mlflow.spanStartTimeNs": "\"1782671336000000000\"",
+     "mlflow.traceRequestId": "\"tr-synthetic0000000000000000000001\"",
+     "model": "\"claude-opus-4-8\"",
+     "mlflow.chat.tokenUsage": "{\"input_tokens\": 1000, \"output_tokens\": 200, \"total_tokens\": 1200}"
+    },
+    "links": []
+   },
+   {
+    "trace_id": "c3ludGhldGljLXRyYWNlLWlk",
+    "span_id": "c3BhbjI=",
+    "parent_span_id": "c3BhbjA=",
+    "name": "tool_Read",
+    "start_time_unix_nano": 1782671336200000000,
+    "end_time_unix_nano": 1782671336300000000,
+    "events": [],
+    "status": {
+     "code": "STATUS_CODE_OK",
+     "message": ""
+    },
+    "attributes": {
+     "mlflow.spanType": "\"TOOL\"",
+     "mlflow.spanStartTimeNs": "\"1782671336200000000\"",
+     "mlflow.traceRequestId": "\"tr-synthetic0000000000000000000001\"",
+     "tool_name": "\"Read\"",
+     "tool_id": "\"toolu_1\"",
+     "mlflow.spanInputs": "\"{\\\"file_path\\\":\\\"/a\\\"}\"",
+     "mlflow.spanOutputs": "\"file contents\""
+    },
+    "links": []
+   },
+   {
+    "trace_id": "c3ludGhldGljLXRyYWNlLWlk",
+    "span_id": "c3BhbjM=",
+    "parent_span_id": "c3BhbjA=",
+    "name": "tool_Bash",
+    "start_time_unix_nano": 1782671336400000000,
+    "end_time_unix_nano": 1782671336500000000,
+    "events": [],
+    "status": {
+     "code": "STATUS_CODE_ERROR",
+     "message": ""
+    },
+    "attributes": {
+     "mlflow.spanType": "\"TOOL\"",
+     "mlflow.spanStartTimeNs": "\"1782671336400000000\"",
+     "mlflow.traceRequestId": "\"tr-synthetic0000000000000000000001\"",
+     "tool_name": "\"Bash\"",
+     "tool_id": "\"toolu_2\"",
+     "mlflow.spanInputs": "\"{\\\"command\\\":\\\"ls\\\"}\"",
+     "mlflow.spanOutputs": "\"err\""
+    },
+    "links": []
+   }
+  ]
+ }
+}

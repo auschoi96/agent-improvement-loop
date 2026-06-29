@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ail"
+version = "0.0.0"
+description = "A reusable, agent-agnostic self-improvement loop for LLM agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mlflow>=3.0",
+    "databricks-sdk>=0.20",
+]
+
+[project.optional-dependencies]
+# The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
+# seam + MLflow source install without pulling an agent runtime.
+claude = ["claude-agent-sdk>=0.1.39"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ail"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "live: tests that hit a live Databricks/MLflow workspace (deselected by default)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["ail"]
+mypy_path = "src"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+
+# Upstream/runtime deps ship without usable type information. ``follow_imports
+# = skip`` keeps mypy from descending into them (and into their transitive deps
+# such as numpy, whose stubs use 3.12-only syntax).
+[[tool.mypy.overrides]]
+module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
