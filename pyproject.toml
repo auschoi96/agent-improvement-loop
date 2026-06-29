@@ -94,6 +94,9 @@ strict_equality = true
 # = skip`` keeps mypy from descending into them (and into their transitive deps
 # such as numpy, whose stubs use 3.12-only syntax).
 [[tool.mypy.overrides]]
-module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*"]
+# ``engine.*`` is HALO (the optional ``l3`` extra); ``agents.*`` is the OpenAI
+# Agents SDK it pulls in — neither is installed in CI (core install only), so
+# their imports (lazy, inside the reviewer) must not fail the typecheck.
+module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*", "agents.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
