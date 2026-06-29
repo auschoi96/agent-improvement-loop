@@ -8,6 +8,7 @@ there is no expected-output synthesis surface anywhere in the package.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -16,10 +17,16 @@ import ail.groundtruth as gt
 from ail.groundtruth.approve import apply_review, approve_case, pending_cases, reject_case
 from ail.groundtruth.capture import CaptureError, capture_candidates
 from ail.groundtruth.execute import execute_candidate
-from ail.groundtruth.promote import PoolConflictError, PromotionError, promote_approved
+from ail.groundtruth.promote import (
+    PoolConflictError,
+    PromotionError,
+    TaskSuiteProtectedError,
+    promote_approved,
+)
 from ail.groundtruth.schema import (
     Expectations,
     GroundTruthCase,
+    GroundTruthSet,
     Pool,
     ReviewStatus,
 )
@@ -281,6 +288,52 @@ class TestPromote:
         promote_approved([approved], pool=Pool.ALIGNMENT_SET, store=store)
         assert len(store.load(Pool.ALIGNMENT_SET).cases) == 1
 
+    def test_promote_into_task_suite_is_forbidden(self, tmp_path: Path) -> None:
+        store = JsonGroundTruthStore(tmp_path)
+        # A human can approve a case targeting the Task Suite, but the held-out
+        # benchmark must never be fed by the bootstrap loop.
+        approved = _approved(capture_candidates([_trace()])[0], Pool.TASK_SUITE)
+        with pytest.raises(TaskSuiteProtectedError):
+            promote_approved([approved], pool=Pool.TASK_SUITE, store=store)
+        assert not (tmp_path / "task_suite.json").exists()
+
+
+class TestStoreEnforcesHumanGate:
+    """The persistence boundary cannot be used to bypass approve/promote."""
+
+    def test_save_rejects_unapproved_case_even_via_model_construct(self, tmp_path: Path) -> None:
+        store = JsonGroundTruthStore(tmp_path)
+        [candidate] = capture_candidates([_trace()])  # unapproved, target_pool is None
+        # model_construct skips the GroundTruthSet validator — the store.save()
+        # boundary must still refuse it.
+        bad = GroundTruthSet.model_construct(
+            pool=Pool.ALIGNMENT_SET, name="alignment_set", cases=[candidate]
+        )
+        with pytest.raises(gt.GroundTruthError):
+            store.save(bad)
+        assert not (tmp_path / "alignment_set.json").exists()
+
+    def test_save_rejects_pooled_but_unapproved_case(self, tmp_path: Path) -> None:
+        store = JsonGroundTruthStore(tmp_path)
+        candidate = capture_candidates([_trace()])[0].model_copy(
+            update={"target_pool": Pool.ALIGNMENT_SET}  # pool tagged, never approved
+        )
+        bad = GroundTruthSet.model_construct(
+            pool=Pool.ALIGNMENT_SET, name="alignment_set", cases=[candidate]
+        )
+        with pytest.raises(gt.GroundTruthError):
+            store.save(bad)
+        assert not (tmp_path / "alignment_set.json").exists()
+
+    def test_save_rejects_pool_mismatch(self, tmp_path: Path) -> None:
+        store = JsonGroundTruthStore(tmp_path)
+        approved = _approved(capture_candidates([_trace()])[0], Pool.HUMAN_ANCHOR)
+        bad = GroundTruthSet.model_construct(
+            pool=Pool.ALIGNMENT_SET, name="alignment_set", cases=[approved]
+        )
+        with pytest.raises(gt.GroundTruthError):
+            store.save(bad)
+
 
 # ---------------------------------------------------------------------------
 # Acceptance: full round-trip
@@ -333,50 +386,231 @@ def test_round_trip_capture_execute_approve_promote_reload(tmp_path: Path) -> No
 
 # ---------------------------------------------------------------------------
 # Anti-co-adaptation: no LLM synthesis of expected outputs anywhere
+#
+# These guards are AST-based (not string grep), so they cannot be slipped past
+# with dict(expectations=...), **kwargs spread, setattr, split-string keys, or
+# helper indirection — and they catch model-generation imports/calls reached by
+# any name, including indirect forms a grep would miss.
 # ---------------------------------------------------------------------------
 
 _PACKAGE_DIR = Path(gt.__file__).parent
-#: Surfaces that could synthesize an expected output. Plain ``mlflow`` logging is
-#: allowed (the execute stage audits captures); ``mlflow.genai`` / judges are not.
-_FORBIDDEN_SYNTH_TOKENS = [
-    "make_judge",
-    "mlflow.genai",
-    "chat.completions",
-    "messages.create",
+_PACKAGE_FILES = sorted(_PACKAGE_DIR.glob("*.py"))
+#: The human gate is the ONLY stage permitted to write expectations onto a case.
+_EXPECTATION_WRITERS_ALLOWED = {"approve.py"}
+
+#: Import roots that pull in a model-generation or arbitrary-HTTP client.
+_FORBIDDEN_IMPORT_SINGLE = {
+    "openai",
+    "anthropic",
+    "cohere",
     "litellm",
-    "import anthropic",
-    "import openai",
-    "ai_gen(",
-    "ai_query(",
+    "httpx",
+    "requests",
+    "aiohttp",
+}
+#: Multi-component import prefixes (e.g. mlflow is fine, mlflow.genai is not).
+_FORBIDDEN_IMPORT_PREFIXES = ("mlflow.genai", "google.generativeai", "google.genai")
+#: Dotted call/attribute chains that indicate generation or raw HTTP egress.
+_FORBIDDEN_CALL_CHAINS = (
+    ".genai",
+    "messages.create",
+    "responses.create",
+    "chat.completions",
+    "make_judge",
+    "requests.post",
+    "requests.get",
+    "httpx.post",
+    "httpx.get",
+)
+
+
+def _const_str(node: ast.AST) -> str | None:
+    """Constant-fold a node to a string, resolving ``"ex" + "pectations"``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _const_str(node.left), _const_str(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _dotted(node: ast.AST) -> str | None:
+    """Flatten a Name/Attribute/Call chain to a dotted path (``a.b.create``)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Call):
+        return _dotted(node.func)
+    return None
+
+
+class _ExpectationWriteFinder(ast.NodeVisitor):
+    """Flag any node that writes a value into an ``expectations`` attr/key."""
+
+    TARGET = "expectations"
+
+    def __init__(self) -> None:
+        self.hits: list[str] = []
+
+    def visit_keyword(self, node: ast.keyword) -> None:  # foo(expectations=...)
+        if node.arg == self.TARGET:
+            self.hits.append(f"keyword arg {self.TARGET}= (line {node.value.lineno})")
+        self.generic_visit(node)
+
+    def visit_Dict(self, node: ast.Dict) -> None:  # {"expectations": ...} / model_copy(update=...)
+        for key in node.keys:
+            if key is not None and _const_str(key) == self.TARGET:
+                self.hits.append(f"dict key {self.TARGET!r} (line {node.lineno})")
+        self.generic_visit(node)
+
+    def _check_target(self, target: ast.AST, lineno: int) -> None:
+        if isinstance(target, ast.Attribute) and target.attr == self.TARGET:
+            self.hits.append(f"attribute assignment .{self.TARGET} (line {lineno})")
+        if isinstance(target, ast.Subscript) and _const_str(target.slice) == self.TARGET:
+            self.hits.append(f"subscript assignment [{self.TARGET!r}] (line {lineno})")
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._check_target(target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._check_target(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._check_target(node.target, node.lineno)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:  # setattr(obj, "expectations", value)
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "setattr"
+            and len(node.args) >= 2
+            and _const_str(node.args[1]) == self.TARGET
+        ):
+            self.hits.append(f"setattr(…, {self.TARGET!r}, …) (line {node.lineno})")
+        self.generic_visit(node)
+
+
+class _SynthesisSurfaceFinder(ast.NodeVisitor):
+    """Collect every import and dotted call chain in a module."""
+
+    def __init__(self) -> None:
+        self.imports: set[str] = set()
+        self.chains: list[str] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self.imports.update(alias.name for alias in node.names)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module:
+            self.imports.add(node.module)
+            self.imports.update(f"{node.module}.{alias.name}" for alias in node.names)
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        chain = _dotted(node)
+        if chain:
+            self.chains.append(chain)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        chain = _dotted(node.func)
+        if chain:
+            self.chains.append(chain)
+        self.generic_visit(node)
+
+
+def _is_forbidden_import(name: str) -> bool:
+    if name.split(".")[0] in _FORBIDDEN_IMPORT_SINGLE:
+        return True
+    return any(name == p or name.startswith(p + ".") for p in _FORBIDDEN_IMPORT_PREFIXES)
+
+
+def _synthesis_hits(tree: ast.AST) -> list[str]:
+    finder = _SynthesisSurfaceFinder()
+    finder.visit(tree)
+    hits = [f"import {i}" for i in finder.imports if _is_forbidden_import(i)]
+    hits += [f"call {c}" for c in finder.chains if any(s in c for s in _FORBIDDEN_CALL_CHAINS)]
+    return hits
+
+
+def test_no_expectation_writes_outside_human_gate_ast() -> None:
+    for path in _PACKAGE_FILES:
+        if path.name in _EXPECTATION_WRITERS_ALLOWED:
+            continue
+        finder = _ExpectationWriteFinder()
+        finder.visit(ast.parse(path.read_text()))
+        assert finder.hits == [], f"{path.name} writes expectations outside the gate: {finder.hits}"
+
+
+def test_human_gate_is_the_expectation_writer_ast() -> None:
+    finder = _ExpectationWriteFinder()
+    finder.visit(ast.parse((_PACKAGE_DIR / "approve.py").read_text()))
+    assert finder.hits, "expected approve.py to be the one place expectations are written"
+
+
+def test_no_model_generation_surface_in_package_ast() -> None:
+    for path in _PACKAGE_FILES:
+        hits = _synthesis_hits(ast.parse(path.read_text()))
+        assert hits == [], f"{path.name} references a model-generation/network surface: {hits}"
+
+
+# --- self-tests: prove the guards FAIL if synthesis is introduced indirectly ---
+
+_INDIRECT_EXPECTATION_WRITES = [
+    "GroundTruthCase(expectations=x)",  # keyword arg
+    'case.model_copy(update={"expectations": x})',  # dict literal key
+    'case.model_copy(update={"ex" + "pectations": x})',  # split-string key
+    "case.expectations = x",  # attribute assignment
+    'd["expectations"] = x',  # subscript assignment
+    'setattr(case, "expectations", x)',  # setattr
+    'GroundTruthCase(**{"expectations": x})',  # **kwargs spread via dict literal
 ]
-#: How expectations get *written* onto a case (kwarg or model-update key).
-_EXPECTATION_WRITE_PATTERNS = ["expectations=", '"expectations":']
 
 
-def _src(name: str) -> str:
-    return (_PACKAGE_DIR / name).read_text()
+@pytest.mark.parametrize("snippet", _INDIRECT_EXPECTATION_WRITES)
+def test_expectation_write_finder_catches_indirect_forms(snippet: str) -> None:
+    finder = _ExpectationWriteFinder()
+    finder.visit(ast.parse(snippet))
+    assert finder.hits, f"guard failed to flag indirect expectation write: {snippet!r}"
 
 
-def test_no_expected_output_synthesis_surface_in_package() -> None:
-    for path in _PACKAGE_DIR.glob("*.py"):
-        text = path.read_text()
-        for token in _FORBIDDEN_SYNTH_TOKENS:
-            assert token not in text, f"{path.name} references synthesis surface {token!r}"
+_SYNTH_SURFACE_SNIPPETS = [
+    "import openai",
+    "from openai import OpenAI",
+    "import anthropic",
+    "import httpx",
+    "import requests",
+    "from mlflow.genai import judges",
+    "from mlflow.genai.judges import make_judge",
+    "x = client.messages.create(model='m')",
+    "x = client.responses.create()",
+    "x = c.chat.completions.create()",
+    "x = make_judge('j')",
+    "requests.post(url)",
+    "httpx.post(url)",
+]
 
 
-def test_only_the_human_gate_writes_expectations() -> None:
-    # Capture/execute/promote never write expectations onto a case…
-    for name in ("capture", "execute", "promote"):
-        src = _src(f"{name}.py")
-        for pat in _EXPECTATION_WRITE_PATTERNS:
-            assert pat not in src, f"{name}.py writes expectations ({pat!r}) — only approve may"
+@pytest.mark.parametrize("snippet", _SYNTH_SURFACE_SNIPPETS)
+def test_synthesis_surface_finder_catches_each(snippet: str) -> None:
+    assert _synthesis_hits(ast.parse(snippet)), f"guard failed to flag surface: {snippet!r}"
 
-    # …while the human gate is exactly where expectations are written.
-    assert any(pat in _src("approve.py") for pat in _EXPECTATION_WRITE_PATTERNS)
+
+def test_plain_mlflow_logging_is_allowed_by_guard() -> None:
+    # The execute stage's audit logging (plain mlflow) must NOT trip the guard.
+    allowed = "import mlflow\nmlflow.start_run()\nmlflow.log_text(t, 'x.txt')\nmlflow.set_tags({})"
+    assert _synthesis_hits(ast.parse(allowed)) == []
 
 
 def test_capture_and_execute_leave_expectations_empty() -> None:
-    """Behavioural mirror of the structural guard above."""
+    """Behavioural mirror of the structural guards above."""
     [candidate] = capture_candidates([_trace()])
     assert candidate.expectations.is_filled() is False
     executed = execute_candidate(candidate, FakeAdapter())

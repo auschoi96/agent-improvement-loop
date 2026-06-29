@@ -5,19 +5,23 @@ approving never promotes. Only :func:`promote_approved` writes into a frozen
 pool, and only for cases that have cleared the human gate
 (:meth:`~ail.groundtruth.schema.GroundTruthCase.is_promotable`).
 
-It enforces the two wall invariants:
+It enforces the wall invariants:
 
 * **Human-gated.** A case that is not approved-with-expectations is skipped
   (or, in ``strict`` mode, raises). You cannot promote a candidate.
 * **Pools never mix.** A case is written to exactly one pool — the pool it was
   approved for — and only if its id is not already present in a *different*
   pool. A cross-pool collision raises :class:`PoolConflictError`.
-
-Per ``docs/MILESTONE-1.md`` §1a the ground-truth bootstrap's natural targets are
-the *labelled* pools (``ALIGNMENT_SET`` / ``HUMAN_ANCHOR``); the ``TASK_SUITE``
-is frozen separately from task inputs (Wave 1b). The promoter is pool-agnostic
-so a human *can* direct a case anywhere, but it will not let two pools share a
-case.
+* **The Task Suite is off-limits.** Promoting ground truth into
+  :attr:`~ail.groundtruth.schema.Pool.TASK_SUITE` raises
+  :class:`TaskSuiteProtectedError`. The Task Suite is the *held-out benchmark*
+  the optimizer is measured against (``docs/ARCHITECTURE.md`` §2); feeding it
+  from the same bootstrap loop that the agent and its judges learn from is
+  exactly the co-adaptation we exist to prevent. The ground-truth bootstrap
+  therefore targets only the *labelled* pools (``ALIGNMENT_SET`` /
+  ``HUMAN_ANCHOR``). Populating the Task Suite is a **separate, future API/wave**
+  (it is curated from task inputs, not from labelled ground truth — see
+  ``docs/MILESTONE-1.md`` §1a, Wave 1b), deliberately not reachable from here.
 """
 
 from __future__ import annotations
@@ -38,7 +42,13 @@ if TYPE_CHECKING:
 
     from ail.groundtruth.store import GroundTruthStore
 
-__all__ = ["PromotionError", "PoolConflictError", "PromotionResult", "promote_approved"]
+__all__ = [
+    "PromotionError",
+    "PoolConflictError",
+    "TaskSuiteProtectedError",
+    "PromotionResult",
+    "promote_approved",
+]
 
 
 class PromotionError(GroundTruthError):
@@ -47,6 +57,14 @@ class PromotionError(GroundTruthError):
 
 class PoolConflictError(PromotionError):
     """A case id would land in two different pools — the wall must stay disjoint."""
+
+
+class TaskSuiteProtectedError(PromotionError):
+    """Refused an attempt to promote ground truth into the held-out Task Suite.
+
+    The Task Suite is the frozen benchmark the optimizer is judged against; it
+    must never be fed by the ground-truth bootstrap loop (anti-co-adaptation).
+    """
 
 
 @dataclass(slots=True)
@@ -93,9 +111,17 @@ def promote_approved(
         A :class:`PromotionResult` listing promoted and skipped case ids.
 
     Raises:
+        TaskSuiteProtectedError: if ``pool`` is the held-out Task Suite.
         PoolConflictError: if a case id is already stored in a different pool.
         PromotionError: in ``strict`` mode, on the first non-promotable case.
     """
+    if pool is Pool.TASK_SUITE:
+        raise TaskSuiteProtectedError(
+            "refusing to promote ground truth into the held-out Task Suite; it is the "
+            "frozen benchmark and must not be fed by the bootstrap loop (Task Suite "
+            "population is a separate future API — see promote.py module docs)"
+        )
+
     result = PromotionResult(pool=pool, set_name=set_name or pool.value)
 
     # Cross-pool disjointness: a case id already living elsewhere may not be

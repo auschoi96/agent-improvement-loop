@@ -40,6 +40,7 @@ from ail.groundtruth.promote import (
     PoolConflictError,
     PromotionError,
     PromotionResult,
+    TaskSuiteProtectedError,
     promote_approved,
 )
 from ail.groundtruth.schema import (
@@ -55,6 +56,7 @@ from ail.groundtruth.schema import (
     Source,
     SourceKind,
     TaskInput,
+    validate_pool_membership,
 )
 from ail.groundtruth.store import (
     GroundTruthStore,
@@ -79,6 +81,7 @@ __all__ = [
     "Source",
     "SourceKind",
     "TaskInput",
+    "validate_pool_membership",
     # capture
     "CaptureError",
     "candidate_from_trace",
@@ -96,6 +99,7 @@ __all__ = [
     # promote
     "PromotionError",
     "PoolConflictError",
+    "TaskSuiteProtectedError",
     "PromotionResult",
     "promote_approved",
     # store

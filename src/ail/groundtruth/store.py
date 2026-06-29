@@ -18,12 +18,20 @@ candidate has no business in a frozen pool).
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ail.groundtruth.schema import GroundTruthCase, GroundTruthSet, Pool
+from ail.groundtruth.schema import (
+    GroundTruthCase,
+    GroundTruthSet,
+    Pool,
+    validate_pool_membership,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -44,6 +52,13 @@ class GroundTruthStore(ABC):
     Implementations persist a :class:`GroundTruthSet` per :class:`Pool`. The
     base class provides :meth:`case_pool_index`, the cross-pool lookup the
     promoter uses to refuse putting one case id into two pools.
+
+    :meth:`save` is the **enforced persistence boundary**: it re-checks pool
+    membership (every case approved + targeting this pool) before delegating the
+    actual write to :meth:`_write`. Subclasses implement :meth:`_write`, not
+    :meth:`save`, so it is impossible to land an unapproved or pool-mismatched
+    case in a pool through any store — even one constructed via
+    ``model_construct`` (which skips the :class:`GroundTruthSet` validator).
     """
 
     @abstractmethod
@@ -51,9 +66,19 @@ class GroundTruthStore(ABC):
         """Load a pool's set. Returns an empty set if the pool has none yet."""
         raise NotImplementedError
 
-    @abstractmethod
     def save(self, gt_set: GroundTruthSet) -> None:
-        """Persist a pool's set, replacing whatever was stored for that pool."""
+        """Persist a pool's set, replacing whatever was stored for that pool.
+
+        Rejects (with a clear error) any set holding a case that has not cleared
+        the human gate or that targets a different pool. This is the structural
+        guarantee that the public API cannot bypass approve/promote.
+        """
+        validate_pool_membership(gt_set.pool, gt_set.cases)
+        self._write(gt_set)
+
+    @abstractmethod
+    def _write(self, gt_set: GroundTruthSet) -> None:
+        """Persist an already-validated set. Implemented by subclasses."""
         raise NotImplementedError
 
     def case_pool_index(self) -> dict[str, Pool]:
@@ -91,9 +116,24 @@ class JsonGroundTruthStore(GroundTruthStore):
             return GroundTruthSet(pool=pool, name=pool.value)
         return GroundTruthSet.model_validate_json(path.read_text())
 
-    def save(self, gt_set: GroundTruthSet) -> None:
+    def _write(self, gt_set: GroundTruthSet) -> None:
+        # Atomic replace: write a sibling temp file then os.replace() it over the
+        # target (atomic on POSIX and Windows), so a reader never sees a partial
+        # pool file and a crash mid-write leaves the prior snapshot intact.
+        # NOTE: there is no cross-process lock — concurrent writers to the SAME
+        # pool can still race (last writer wins). A multi-writer deployment needs
+        # an external lock or a transactional store.
         self.root.mkdir(parents=True, exist_ok=True)
-        self._path(gt_set.pool).write_text(gt_set.model_dump_json(indent=2) + "\n")
+        payload = gt_set.model_dump_json(indent=2) + "\n"
+        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=f".{gt_set.pool.value}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(payload)
+            os.replace(tmp, self._path(gt_set.pool))
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+            raise
 
 
 # ---------------------------------------------------------------------------
