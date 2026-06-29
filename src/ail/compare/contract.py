@@ -25,7 +25,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ail.judges.pools import ScoreValue
+from ail.pools import ScoreValue
 
 #: Version of the comparison output contract. Bump the minor for additive,
 #: backward-compatible fields; the major for breaking shape changes.
