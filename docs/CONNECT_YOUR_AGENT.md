@@ -135,6 +135,36 @@ prove-floor clears. That refusal is the point.
   matters more than volume: a spread of easy/hard, short/long sessions teaches
   the judges and RLM far more than 30 near-identical runs.
 
+### Preflight: am I ready?
+
+Don't guess where you stand — ask. One command reads your experiment and prints,
+per gate, exactly how far you are from each unlock:
+
+```bash
+ail-readiness <YOUR_EXPERIMENT_ID> --profile <profile> --warehouse-id <wh>
+# scope to one agent in a shared experiment:
+ail-readiness <YOUR_EXPERIMENT_ID> --cohort-tag <agent-name>
+```
+
+It counts your traces, human labels, and scored-coverage and runs them through
+the **same** `compute_readiness` the app uses, so the output is the real verdict,
+not an estimate:
+
+```
+GATE                        HAVE   NEED   GAP   STATUS
+baseline / diagnosis (RLM)  28     10     0     READY
+prove an improvement        28     50     22    NOT READY
+frozen Task Suite           yes    yes    —     READY
+MemAlign labels             12     20     8     NOT READY
+...
+Unlocked now: RLM+diagnosis: READY; MemAlign judge: need 8 more labels; prove a total_tokens win: need 22 more traces
+```
+
+It is **fail-closed**: a *not-ready* gate is a normal exit (the refusal is the
+point), and it never prints a green verdict the readiness module didn't return.
+It exits non-zero only when it can't reach the trace store at all — and then tells
+you which profile/warehouse to fix (the UC trace store needs `CAN_USE`).
+
 ---
 
 ## Step 3 — Now the self-optimization loop is unblocked

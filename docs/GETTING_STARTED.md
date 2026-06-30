@@ -110,6 +110,9 @@ python -m ail.publish --experiment-id <YOUR_EXPERIMENT_ID> \
   [`L0_METRICS_CONTRACT.md`](L0_METRICS_CONTRACT.md)) + `src/ail/publish.py`.
 - This already reproduces things like the heavy-token tail and repeated-target
   tool calls — *where the waste is*, which drives Stage 5/6.
+- Not sure you have enough data yet? Run `ail-readiness <YOUR_EXPERIMENT_ID>` for
+  a one-command preflight of every readiness gate (see
+  [CONNECT_YOUR_AGENT § Preflight](CONNECT_YOUR_AGENT.md#preflight-am-i-ready)).
 
 ### Stage 1b — Separate agents/cohorts with tags *(optional but recommended)*
 
