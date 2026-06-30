@@ -344,6 +344,18 @@ def _metric_delta(
     )
 
 
+def _metric_worse(d: MetricDelta) -> bool:
+    """Whether ``d`` is a **strict** move in the metric's *worse* direction.
+
+    The exact mirror of :func:`_metric_delta`'s ``improved`` (negated direction),
+    so it respects ``lower_is_better`` rather than hardcoding a direction: a
+    lower-is-better metric is worse when it went *up*, a higher-is-better metric
+    when it went *down*. A tie (no measurable change) is neither improved nor
+    worse — so a genuine no-change never reads as a regression.
+    """
+    return (d.candidate > d.baseline) if d.lower_is_better else (d.candidate < d.baseline)
+
+
 def _version_metric_value(agg: AgentVersionAggregate, metric: str) -> float:
     """Pull one comparison metric off a version aggregate."""
     return {
@@ -360,6 +372,7 @@ def _decide_status(
     n_promote: int,
     correctness_held: bool,
     headline_improved: bool,
+    headline_worse: bool,
     any_regressed: bool,
     can_prove_improvement: bool,
 ) -> VersionComparisonStatus:
@@ -367,10 +380,14 @@ def _decide_status(
 
     Never green unless the controlled proof holds **and** the readiness wall has
     cleared. A measured-but-not-organically-ready improvement is amber
-    (``CONTROLLED_PROOF_COLLECTING``), not green. A regression or non-improvement is
-    never a win.
+    (``CONTROLLED_PROOF_COLLECTING``), not green. A regression is **never** a win:
+    both a correctness regression (``any_regressed``) *and* an actively-worse
+    objective metric (``headline_worse`` — e.g. tokens went up) surface as
+    ``REGRESSED``, before the no-win ``COLLECTING`` fallthrough. Only a genuine
+    tie / no-change (neither improved nor worse, improvement unprovable) stays
+    ``COLLECTING`` — that is honest: no regression, just no win yet.
     """
-    if any_regressed:
+    if any_regressed or headline_worse:
         return VersionComparisonStatus.REGRESSED
     if not headline_improved:
         return VersionComparisonStatus.COLLECTING
@@ -457,6 +474,7 @@ def build_phase2_version_bundle(
         n_promote=artifact.n_promote,
         correctness_held=correctness_held,
         headline_improved=headline.improved,
+        headline_worse=_metric_worse(headline),
         any_regressed=any_regressed,
         can_prove_improvement=readiness.can_prove_improvement,
     )

@@ -201,6 +201,55 @@ def test_no_promote_is_collecting() -> None:
     assert bundle.comparison.status is VersionComparisonStatus.COLLECTING
 
 
+def _set_promote_total_tokens_candidate(artifact: Phase2Artifact, fn) -> None:  # type: ignore[no-untyped-def]
+    """Rewrite each PROMOTE task's candidate total_tokens via ``fn(baseline)``.
+
+    Lets a test drive the version-level objective headline (the extensive sum over
+    the counted PROMOTE set) to an arbitrary direction without inventing a whole
+    artifact.
+    """
+    for o in artifact.outcomes:
+        if o.recommendation is Recommendation.PROMOTE and o.comparison is not None:
+            d = o.comparison.delta_for("total_tokens")
+            assert d is not None
+            d.candidate = fn(d.baseline)
+
+
+def test_objective_regression_reads_as_regressed_not_collecting() -> None:
+    # Candidate is strictly WORSE on the objective (tokens INCREASE) on the counted
+    # set. That is a measured FAILURE — it must surface as REGRESSED (negative),
+    # never neutral/COLLECTING ('not enough data yet'). Pre-fix this fell through
+    # to COLLECTING; this test fails against that and passes after the fix.
+    artifact = _load_artifact()
+    _set_promote_total_tokens_candidate(artifact, lambda baseline: baseline + 100.0)
+    # Even with the readiness wall cleared, an objective regression is not a win.
+    bundle = build_phase2_version_bundle(
+        artifact,
+        agent_name=AGENT,
+        baseline_version=BASE_V,
+        candidate_version=CAND_V,
+        thresholds=ReadinessThresholds(baseline_min_traces=1, prove_min_traces=1),
+    )
+    cmp = bundle.comparison
+    assert cmp.headline_improved is False
+    assert cmp.status is VersionComparisonStatus.REGRESSED
+    assert cmp.status is not VersionComparisonStatus.COLLECTING
+
+
+def test_objective_tie_stays_collecting() -> None:
+    # A genuine tie (objective unchanged) with improvement unprovable is honestly
+    # COLLECTING — no regression, just no win yet. Guards against over-correcting
+    # the regression fix into flagging no-change as a regression.
+    artifact = _load_artifact()
+    _set_promote_total_tokens_candidate(artifact, lambda baseline: baseline)
+    bundle = build_phase2_version_bundle(
+        artifact, agent_name=AGENT, baseline_version=BASE_V, candidate_version=CAND_V
+    )
+    cmp = bundle.comparison
+    assert cmp.headline_improved is False
+    assert cmp.status is VersionComparisonStatus.COLLECTING
+
+
 # -- _metric_delta semantics -----------------------------------------------
 
 
