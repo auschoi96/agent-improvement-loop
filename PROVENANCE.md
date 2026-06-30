@@ -46,6 +46,21 @@ clean-room from the public Anthropic `usage` schema and the public MCP naming
 convention (above). No upstream code was consulted. The surrounding `base.py`
 interfaces were already this repository's own design and were not changed.
 
+## Phase-2 optimization lever (original work)
+
+The Phase-2 token-efficiency lever is **original work for this repository**, built
+only on this project's own contracts (`ail.compare`, `ail.ingest.base`,
+`ail.task_suite`, `ail.groundtruth`) plus `pydantic` / `pyyaml` / the stdlib. It
+introduces **no new dependency** and harvests **no upstream code** — in
+particular it does **not** harvest the GEPA loop noted as a future `optimize/`
+source in `docs/ARCHITECTURE.md` §7; that remains unincorporated.
+
+| Module | Status | Notes |
+|---|---|---|
+| `src/ail/optimize/assets/skills/token-efficient-execution/SKILL.md` | **Original** | Behavioural skill authored for this repo (avoid redundant re-reads, batch shell commands, drop `cd`/setup boilerplate). Not copied from any skills library; never written to a user/`polly`/`~/.claude` skills dir. |
+| `src/ail/optimize/assets/__init__.py`, `src/ail/optimize/lever.py` | **Original** | `SKILL.md` loader + the `Intervention` that injects the skill into a candidate task's system prompt; the BASELINE/CANDIDATE configs. |
+| `src/ail/optimize/phase2.py`, `scripts/run_phase2_comparison.py` | **Original** | The frozen-suite comparison runner + artifact contract and its thin CLI; reuses `ail.compare.compare_candidate` unchanged for the actual comparison. |
+
 ## Outstanding source (not yet incorporated)
 
 | Upstream repo | Module | Upstream license | Status |
