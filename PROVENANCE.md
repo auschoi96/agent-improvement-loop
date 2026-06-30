@@ -60,6 +60,7 @@ source in `docs/ARCHITECTURE.md` §7; that remains unincorporated.
 | `src/ail/optimize/assets/skills/token-efficient-execution/SKILL.md` | **Original** | Behavioural skill authored for this repo (avoid redundant re-reads, batch shell commands, drop `cd`/setup boilerplate). Not copied from any skills library; never written to a user/`polly`/`~/.claude` skills dir. |
 | `src/ail/optimize/assets/__init__.py`, `src/ail/optimize/lever.py` | **Original** | `SKILL.md` loader + the `Intervention` that injects the skill into a candidate task's system prompt; the BASELINE/CANDIDATE configs. |
 | `src/ail/optimize/phase2.py`, `scripts/run_phase2_comparison.py` | **Original** | The frozen-suite comparison runner + artifact contract and its thin CLI; reuses `ail.compare.compare_candidate` unchanged for the actual comparison. |
+| `src/ail/optimize/prompt_registry.py`, `tests/test_prompt_registry.py`, `docs/PROMPT_REGISTRY.md` | **Original** | Human-gated promote step that versions agent skill/prompt bodies in the UC MLflow Prompt Registry with provenance tags (the lineage source for audit/revert). Clean-room against the public `mlflow.genai` prompt-registry API (`register_prompt`/`set_prompt_alias`/`search_prompts`/`load_prompt`) behind an injectable `PromptRegistryClient` Protocol; fail-closed (refuses non-improving/non-finite-delta candidates). Does not modify `gepa_runner.py`. |
 
 ## Outstanding source (not yet incorporated)
 
