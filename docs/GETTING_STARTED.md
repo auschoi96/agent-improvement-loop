@@ -26,9 +26,16 @@ the [readiness module](READINESS_AND_TRUST.md) computes this per goal and
 
 | Goal | What it needs before a claim is trustworthy |
 |---|---|
-| **Token / cost reduction** | ~50+ diverse traces (token distributions are heavy-tailed; a "50% cut" on 5 traces is noise) + a frozen task suite to compare on |
-| **Coding quality / accuracy** | a frozen task suite **+ ~30–50 human labels** + a judge whose agreement with you is measured and above the floor |
+| **Token / cost reduction** | **≥50** diverse traces to *prove* it (token distributions are heavy-tailed; a "50% cut" on 5 traces is noise); **≥10** is enough for a baseline + diagnosis + a frozen task suite to compare on |
+| **Coding quality / accuracy** | a frozen task suite **+ ≥20 human labels** + a judge whose agreement with you is measured and above the floor |
 | **Deep failure-mode discovery** | a few large traces (RLM/HALO review is diagnostic, never a leaderboard score) |
+
+> These are the **code-enforced defaults** (`ReadinessThresholds` in
+> `src/ail/readiness/compute.py`): `baseline_min_traces=10`,
+> `quality_min_labels=20`, `prove_min_traces=50`, `scored_coverage_floor=0.5`.
+> New here? Start with **[CONNECT_YOUR_AGENT.md](CONNECT_YOUR_AGENT.md)** — it's
+> the Stage 0 "how do I get my agent's traces in (autolog or OTEL) and how many
+> do I need" guide.
 
 If you have zero traces, **expect no improvement claims until you have collected
 enough** — and the app's readiness panel will tell you exactly how many more
