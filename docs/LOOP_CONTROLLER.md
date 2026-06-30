@@ -1,0 +1,129 @@
+# The loop controller — autonomous detect → decide → prove → propose, human approves in the app
+
+> **What this answers:** "Will the framework itself *trigger* actions (update a skill,
+> change instructions, create a metric view) when it detects from feedback that it
+> needs to — or does a human have to drive each step?"
+>
+> **The design:** the framework autonomously **detects, decides, proves, and
+> proposes** a change; a **human approves the apply in the app**, reviewing *why*
+> the change is necessary and the evidence that it works. This is **Option A**
+> (autonomous up to the apply; the live change is human-gated) — chosen to match
+> the "a human merges; the framework never silently changes production" discipline
+> the rest of this project runs on.
+
+## Status (honest)
+
+The **action capabilities already exist and are tested**: asset generation
+(`ail.optimize.assets` → UC metric-view specs), GEPA prompt/skill evolution
+(`ail.optimize.gepa_runner`), prompt versioning + champion alias
+(`ail.optimize.prompt_registry`), RLM/HALO diagnosis (`ail.l3`), the frozen-suite
+WITH/WITHOUT proof (`ail.compare`), and the readiness/eval-health gates
+(`ail.readiness`). What does **not** exist yet is the **controller that sequences
+them autonomously** and the **in-app approval queue**. Until those are built, each
+action is invoked manually. This document is the design-of-record for building
+them; it is **not** a description of current runtime behavior.
+
+## The autonomy boundary (Option A)
+
+| Stage | Who | Autonomous? |
+|---|---|---|
+| 1. Detect a problem from feedback | controller | ✅ yes |
+| 2. Decide which action addresses it | controller (goal-driven rules) | ✅ yes |
+| 3. Generate the candidate change | existing capability (asset gen / GEPA) | ✅ yes |
+| 4. **Prove** it on the frozen suite (WITH/WITHOUT, fail-closed) | `ail.compare` | ✅ yes |
+| 5. Gate on readiness + judge-vs-human agreement | `ail.readiness` | ✅ yes |
+| 6. **Propose** it (with the "why" + the proof) into the app queue | controller | ✅ yes |
+| 7. **Approve / reject the live apply** | **a human, in the app** | ❌ human-gated |
+| 8. Apply the approved change + record to lineage | framework (on approval) | ✅ (after approval) |
+| 9. Auto-revert if real post-apply impact regresses | controller | ✅ yes |
+
+Everything up to the apply is autonomous. **A change reaches production only when a
+human approves it in the app** — and a change is only ever *surfaced* for approval
+if it already passed the proof and the gates (a crashed or non-improving candidate
+is never proposed; fail-closed).
+
+## Decision rules: feedback signal → proposed action
+
+The controller compiles the user's natural-language goal (`ail.goals`) into the
+objective + guardrails, then on each cycle maps detected feedback to a candidate
+action. Illustrative rules (goal-parameterized, not hardcoded magic numbers):
+
+- **RLM/HALO recommends an asset** of type X recurring across ≥ N traces **and** the
+  goal metric (e.g. token-efficiency) is below target → generate the **metric view
+  / tool** via `ail.optimize.assets`.
+- **Redundant-read / boilerplate pattern** dominates the L0 waste diagnosis →
+  propose the **read-cache / context-compaction skill** update.
+- **A judge flags a quality dimension** (e.g. modularity) below threshold *and* that
+  judge's human-agreement is above the trust floor → trigger **GEPA** to evolve the
+  skill/instruction toward that dimension.
+- **A registered version's real post-apply impact regresses** vs its predecessor →
+  propose (and, for additive assets, auto-execute) a **revert**.
+
+Each rule names the *evidence* it fired on, so the proposal carries a defensible
+"why".
+
+## The proposed-action record (the "why" payload)
+
+Every proposal the human reviews carries:
+
+- **What** — the concrete change: the skill/prompt diff, the metric-view SQL, or the
+  GEPA-evolved body.
+- **Why** — the triggering feedback: the RLM recommendation / judge score / L0 waste
+  signal, with trace references.
+- **Proof** — the frozen-suite WITH/WITHOUT result (delta on the goal metric **with
+  correctness held**), fail-closed (no proof → not proposable).
+- **Gate status** — readiness tier + judge-vs-human agreement + scored coverage; an
+  uncalibrated/distrusted judge cannot certify a proposal.
+- **Risk class** — additive asset (low blast radius, trivially reversible) vs.
+  agent-prompt/skill/instruction change (higher blast radius).
+
+## The app as the approval control plane
+
+This adds a **human-in-the-loop approval queue** to the observability app:
+
+- A **Proposals** view, per agent, lists pending proposed actions with the full
+  *why + proof + gate status* above — so the human reviews **evidence**, not a bare
+  request.
+- **Approve** / **Reject** (with a required reason). Both are recorded with the
+  **approver identity + timestamp** — rejections are signal too (they tell the
+  controller a rule mis-fired) and are auditable.
+- On **approve**, the framework applies the change through the existing capabilities
+  — register the prompt version + set the `champion` alias (skill/prompt/instruction
+  changes), or `CREATE` the metric view (assets) — and records it to the **lineage
+  timeline** (`agent_prompt_lineage`), so "what changed, why, with what proven
+  delta, approved by whom" is one auditable trail. Revert remains available
+  (`ail-revert` / re-point the champion alias).
+
+### Architectural note: the app gains a write-path (deliberate, scoped)
+
+Until now the app has been strictly **read-only** (SELECT against precomputed UC
+tables — the two-tier rule). The approval queue is the **first write-path**: an
+**authenticated** approve/reject action that (a) records the human decision and
+(b) on approval triggers the gated apply. This is a real, intentional departure and
+will be built with care:
+
+- The approve/reject endpoint is an **authenticated server action** carrying the
+  app user's identity (recorded as the approver) — not an anonymous mutation.
+- The **apply runs server-side under the framework service principal** (the
+  single-SP + grants from `docs/DEPLOY.md`), behind the same fail-closed gates — the
+  button does not bypass the proof/readiness wall.
+- Reads stay two-tier (SELECT-only); only the explicit approval/apply actions write.
+- The exact AppKit server-action mechanism for an authenticated write must be
+  validated against the AppKit SDK at build time (do not assume; confirm).
+
+## Build sequence
+
+1. **Lineage / audit timeline + revert CLI** (in progress) — the record the
+   controller writes into and the human audits.
+2. **Loop controller + proposed-action model** — autonomous detect→decide→prove→
+   gate→propose; writes pending proposals (with the why+proof payload); **never
+   applies on its own**. Fail-closed: only proven, gated candidates become
+   proposals.
+3. **App approval queue + authenticated approve/reject + apply-on-approval** — the
+   human control plane; approval triggers the gated apply and the lineage record;
+   reject archives with reason.
+
+After these, the loop is genuinely self-triggering up to the human approval gate:
+the framework notices a problem, builds and proves the fix, and presents it with
+its evidence; the human clicks approve; the change ships and is recorded; if real
+impact later regresses, the controller flags/reverts it.
