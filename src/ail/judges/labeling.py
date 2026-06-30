@@ -67,6 +67,7 @@ Workflow (label ~30–50 traces, then align + audit)::
 
 from __future__ import annotations
 
+import copy
 import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -317,9 +318,14 @@ def to_human_anchor(
 
     When ``source`` is given, each item also carries its **raw trace**, so a
     ``{{ trace }}``-based judge can be scored on the anchor (see
-    :func:`ail.judges.agreement.score_anchor`). The human label is **not** attached
-    to that trace — unlike the Alignment Set, the anchor's traces stay free of the
-    gold the judge is being measured against.
+    :func:`ail.judges.agreement.score_anchor`). That trace is **blinded** first:
+    its ``HUMAN`` assessments are stripped, so the human gold the agreement is
+    measured against (which the live trace still carries, e.g. a label added in
+    the MLflow UI) is never visible to the judge. The gold lives only on
+    :attr:`~ail.pools.AnchorItem.human_label`. This is the inverse of the
+    Alignment Set, whose traces deliberately *carry* their human assessments for
+    MemAlign to learn from — measuring agreement on a trace the judge can read the
+    answer off would be circular (``docs/ARCHITECTURE.md`` §2).
     """
     selected = [lab for lab in labels if name is None or lab.name == name]
     return HumanAnchor.of(
@@ -329,16 +335,43 @@ def to_human_anchor(
             inputs=lab.inputs,
             outputs=lab.outputs,
             expectations=lab.expectations,
-            trace=_fetch_raw(source, lab.trace_id) if source is not None else None,
+            trace=_blind_anchor_trace(source, lab.trace_id) if source is not None else None,
         )
         for lab in selected
     )
 
 
-def _fetch_raw(source: TraceSource, trace_id: str) -> Any:
-    """Best-effort raw MLflow trace for ``trace_id`` (``None`` if unfetchable)."""
+def _blind_anchor_trace(source: TraceSource, trace_id: str) -> Any:
+    """Raw MLflow trace for the anchor with its human gold stripped (``None`` if unfetchable).
+
+    Fetches the trace and removes every ``HUMAN`` assessment, so the judge that
+    scores the anchor cannot read the human label it is being graded against off
+    ``trace.info.assessments``. Non-human (LLM-judge/AI) assessments are kept.
+    """
     normalized = source.get_trace(trace_id)
-    return None if normalized is None else normalized.raw
+    if normalized is None or normalized.raw is None:
+        return None
+    return _strip_human_assessments(normalized.raw)
+
+
+def _strip_human_assessments(raw: Any) -> Any:
+    """Return a copy of ``raw`` with its ``HUMAN`` assessments removed (else ``raw``).
+
+    Shallow-copies the trace and its ``info`` so the source's object is left
+    untouched, then reassigns ``info.assessments`` to the non-human subset. When
+    there is nothing human to strip, the original is returned unchanged.
+    """
+    info = getattr(raw, "info", None)
+    assessments = getattr(info, "assessments", None) if info is not None else None
+    if not assessments:
+        return raw
+    kept = [assessment for assessment in assessments if not _is_human(assessment)]
+    if len(kept) == len(assessments):
+        return raw  # nothing human to strip; avoid a needless copy
+    blinded = copy.copy(raw)
+    blinded.info = copy.copy(info)
+    blinded.info.assessments = kept
+    return blinded
 
 
 def assemble_pools(

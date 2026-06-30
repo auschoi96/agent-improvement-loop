@@ -82,8 +82,10 @@ built from these and passed to `build_memalign_optimizer`.
 2. **Split into disjoint pools.** `split_labels` holds out the **Human Anchor**;
    the rest is the alignment pool, sub-split (trace-level, disjoint) into a
    **genuine** subset and a **bias** subset. `assert_pools_disjoint` proves the
-   frozen wall across all three before any model call. The anchor's traces carry
-   **no** human assessment — the judge never sees the gold it is measured against.
+   frozen wall across all three before any model call. The anchor's traces are
+   **blinded** — `to_human_anchor` strips their `HUMAN` assessments — so the
+   `{{ trace }}` judge cannot read the gold it is measured against off the trace;
+   the gold lives only on `AnchorItem.human_label`.
 3. **Build the judge + align.**
    - **BASE** — the unaligned `{{ trace }}` token-efficiency judge (`make_judge`).
    - **ALIGNED** — `align_judge(base, genuine_set, optimizer)` → a

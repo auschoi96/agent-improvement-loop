@@ -281,8 +281,10 @@ alignment_set, anchor = assemble_pools(source, labels, judge_name="token_efficie
 - `to_human_anchor(labels, *, name=None, source=None) -> HumanAnchor` — builds
   anchor items (one per trace for a given judge `name`) carrying the human label +
   the `inputs`/`outputs`/`expectations` to re-run the judge. Pass `source` to also
-  carry each item's **raw trace** (without the gold label), so a `{{ trace }}`-based
-  judge can be scored on the anchor.
+  carry each item's **raw trace** so a `{{ trace }}`-based judge can be scored on
+  the anchor — that trace is **blinded** first (its `HUMAN` assessments stripped, a
+  copy; non-human assessments kept), so the judge cannot read the human gold off
+  `trace.info.assessments`. The gold lives only on `AnchorItem.human_label`.
 - `assemble_pools(source, labels, *, judge_name=None, anchor_fraction=0.3, seed=0) -> (AlignmentSet, HumanAnchor)`
   — does the split, builds both pools, and calls `assert_pools_disjoint(...)` to
   **prove** no trace id leaked across the `Pool`-keyed wall before returning.

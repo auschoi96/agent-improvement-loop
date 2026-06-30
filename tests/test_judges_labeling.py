@@ -272,6 +272,55 @@ class TestPoolAssembly:
         assert len(anchor) == 2  # the correctness label is filtered out
         assert anchor.ids == frozenset({"t1", "t2"})
 
+    def test_anchor_trace_is_blinded_of_human_gold(self) -> None:
+        # Anti-co-adaptation: the live anchor trace still carries the human gold
+        # label (e.g. added in the MLflow UI). If score_anchor handed that trace to
+        # a {{ trace }} judge, the judge could read its own answer off
+        # trace.info.assessments → circular agreement. The anchor item's trace must
+        # be blinded; the gold lives only on AnchorItem.human_label.
+        from mlflow.entities import AssessmentSource, Feedback
+        from mlflow.entities.assessment_source import AssessmentSourceType
+
+        class _Src(_FakeSource):
+            def __init__(self) -> None:
+                super().__init__()
+                self.returned: dict[str, Any] = {}
+
+            def get_trace(self, trace_id: str) -> NormalizedTrace | None:
+                raw = _RawTrace(trace_id)
+                raw.info.assessments = [
+                    Feedback(
+                        name="token_efficiency",
+                        value=2,  # the HUMAN gold the judge must NOT see
+                        source=AssessmentSource(
+                            source_type=AssessmentSourceType.HUMAN, source_id="austin"
+                        ),
+                    ),
+                    Feedback(
+                        name="token_efficiency",
+                        value=4,  # a prior LLM-judge score: not gold, kept
+                        source=AssessmentSource(
+                            source_type=AssessmentSourceType.LLM_JUDGE, source_id="judge"
+                        ),
+                    ),
+                ]
+                self.returned[trace_id] = raw
+                return NormalizedTrace(trace_id=trace_id, raw=raw)
+
+        src = _Src()
+        anchor = to_human_anchor([_te("t1", value=2)], name="token_efficiency", source=src)
+        item = anchor.items[0]
+
+        # The gold survives on the item (this is what agreement compares against)...
+        assert item.human_label == 2
+        # ...but the trace the judge sees carries NO human assessment.
+        seen = item.trace.info.assessments
+        assert [a for a in seen if str(a.source.source_type) == "HUMAN"] == []
+        # Non-human assessments are preserved (we blind only the human gold).
+        assert any(str(a.source.source_type) == "LLM_JUDGE" for a in seen)
+        # Blinding is a copy: the source's own trace object is left untouched.
+        assert len(src.returned["t1"].info.assessments) == 2
+
     def test_assemble_pools_returns_disjoint_pools(self) -> None:
         source = _FakeSource()
         labels = [
