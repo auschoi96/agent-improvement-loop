@@ -162,6 +162,20 @@ class TestGuidelinesAndAssets:
         v = parse_halo_report(report, subject_trace_id="t1")
         assert v.score_for("tooling_purpose") is None
         assert any("unparseable score" in w for w in v.parse_warnings)
+        # A present-but-unscorable guideline is reported once (its own warning), not
+        # also as if it were absent — the "no score" list omits it.
+        missing = next(w for w in v.parse_warnings if "no score for guideline" in w)
+        assert "tooling_purpose" not in missing
+
+    def test_boolean_guideline_score_dropped(self) -> None:
+        # bool is an int subclass; a boolean score must not silently become 1/0.
+        report = (
+            '```json\n{"token_efficiency": "fair", "token_waste_score": 20, "summary": "x", '
+            '"guideline_assessments": [{"guideline_id": "tooling_purpose", "score": true}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1")
+        assert v.score_for("tooling_purpose") is None
+        assert any("unparseable score" in w for w in v.parse_warnings)
 
     def test_missing_guideline_recorded_in_warnings(self) -> None:
         report = (
@@ -315,3 +329,14 @@ class TestFailLoud:
             '"summary": "x"}\n```'
         )
         assert parse_halo_report(report, subject_trace_id="t1").token_waste_score == ok
+
+    @pytest.mark.parametrize("boolean", ["true", "false"])
+    def test_boolean_score_raises(self, boolean: str) -> None:
+        # bool is an int subclass, so `false` would coerce to the fake-good score 0;
+        # the fail-closed path must reject it rather than read "perfectly efficient".
+        report = (
+            f'```json\n{{"token_efficiency": "poor", "token_waste_score": {boolean}, '
+            '"summary": "x"}\n```'
+        )
+        with pytest.raises(HaloReportParseError):
+            parse_halo_report(report, subject_trace_id="t1")

@@ -286,10 +286,12 @@ arbitrarily-large trace is reviewed without overflowing context. AIL adds only a
 thin layer, not an engine: `mlflow_trace_to_otlp_jsonl` (MLflow trace →
 OpenInference/OTLP `SpanRecord` JSONL that HALO indexes), `review_trace` (run
 HALO against an OpenAI-compatible Databricks FMAPI endpoint → parse its free-text
-`<final/>` report into a structured `HaloReviewVerdict`), and the attachment.
-HALO obeys rules 1–3 above: its verdict is an `LLM_JUDGE` assessment (name
-`l3_halo_review`) on the **subject** trace, and HALO's own work runs as a
-**separate** MLflow trace linked by `reviewer_trace_id` — never nested, so the
+`<final/>` report into a structured `HaloReviewVerdict` against a configurable
+rubric), and the attachment. HALO obeys rules 1–3 above: its verdict is attached
+as `LLM_JUDGE` assessments — one `rlm_<guideline_id>` per scored guideline, plus
+`rlm_recommended_assets` and an overall `rlm_review` — on the **subject** trace,
+and HALO's own work runs as a **separate** MLflow trace linked by
+`reviewer_trace_id` — never nested, so the
 subject's L0 `tokenUsage` stays exactly the agent's. (Demonstrated on the real
 549K-token trace `…/14da0deab1fee461c836a529d9f1e5ae`: subject `tokenUsage`
 unchanged at 549,300; verdict `token_waste_score=82` attached; HALO's review in

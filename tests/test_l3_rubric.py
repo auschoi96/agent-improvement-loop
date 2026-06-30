@@ -60,6 +60,12 @@ class TestValidation:
                 score_max=1,
             )
 
+    @pytest.mark.parametrize("reserved", ["review", "recommended_assets"])
+    def test_reserved_guideline_id_rejected(self, reserved: str) -> None:
+        # These collide with the fixed rlm_review / rlm_recommended_assets names.
+        with pytest.raises(ValueError, match="reserved"):
+            ReviewRubric(rubric_id="r", guidelines=(ScoredGuideline(reserved, "X", "d"),))
+
 
 class TestPrompt:
     def test_prompt_is_rubric_driven_and_unambiguous(self) -> None:

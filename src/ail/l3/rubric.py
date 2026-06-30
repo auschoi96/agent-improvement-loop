@@ -27,9 +27,17 @@ __all__ = [
     "DEFAULT_OBJECTIVE",
     "DEFAULT_GUIDELINES",
     "DEFAULT_RUBRIC",
+    "RESERVED_GUIDELINE_IDS",
     "ScoredGuideline",
     "ReviewRubric",
 ]
+
+#: Guideline ids that would collide with the reviewer's fixed assessment names.
+#: The reviewer attaches each guideline under ``rlm_<id>`` and the overall /
+#: assets verdicts under ``rlm_review`` / ``rlm_recommended_assets`` (see
+#: :mod:`ail.l3.reviewer`), so a guideline id of ``review`` or ``recommended_assets``
+#: would overwrite one of those on the subject trace. Rejected at construction.
+RESERVED_GUIDELINE_IDS = frozenset({"review", "recommended_assets"})
 
 #: The standing objective every default guideline pulls toward. Baked into the
 #: prompt so HALO judges and recommends against it, not against a vague notion of
@@ -85,6 +93,12 @@ class ReviewRubric:
         ids = [g.id for g in self.guidelines]
         if len(set(ids)) != len(ids):
             raise ValueError(f"ReviewRubric guideline ids must be unique; got {ids}")
+        reserved = sorted(set(ids) & RESERVED_GUIDELINE_IDS)
+        if reserved:
+            raise ValueError(
+                f"ReviewRubric guideline ids {reserved} are reserved (they collide with the "
+                f"reviewer's rlm_review / rlm_recommended_assets assessment names)"
+            )
         if self.score_min >= self.score_max:
             raise ValueError(
                 f"ReviewRubric score_min ({self.score_min}) must be < score_max ({self.score_max})"

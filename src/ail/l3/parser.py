@@ -168,6 +168,13 @@ def _coerce_score(value: Any) -> int:
     still read as a real verdict). No tolerance: a well-behaved judge emits an
     integer in range, so anything else is a broken review.
     """
+    # ``bool`` is an ``int`` subclass, so ``float(True) == 1.0`` would otherwise
+    # sneak a structural hallucination (``"token_waste_score": false``) past the
+    # range check as the fake-good score 0 — exactly what fail-closed must catch.
+    if isinstance(value, bool):
+        raise HaloReportParseError(
+            f"token_waste_score must be a number in 0-100, not a boolean; got {value!r}"
+        )
     try:
         score = int(round(float(value)))
     except (TypeError, ValueError) as exc:
@@ -213,6 +220,10 @@ def _coerce_guideline_score(
     only a non-numeric value degrades to ``None`` (the caller then drops that one
     assessment with a warning, rather than failing the whole verdict).
     """
+    # ``bool`` is an ``int`` subclass; treat a boolean score as unscored (dropped
+    # with a warning) rather than silently recording ``True`` -> 1 / ``False`` -> 0.
+    if isinstance(value, bool):
+        return None
     try:
         score = int(round(float(value)))
     except (TypeError, ValueError):
@@ -239,6 +250,10 @@ def _coerce_guideline_assessments(
     out: list[GuidelineAssessment] = []
     valid_ids = set(rubric.guideline_ids())
     seen: set[str] = set()
+    # Recognized guideline ids that appeared at all (scored or not): excluded from
+    # the "no score" list below so a present-but-unscorable guideline is reported
+    # once (its own warning), not also as if it were missing entirely.
+    attempted: set[str] = set()
     if not isinstance(items, list):
         if items not in (None, ""):
             warnings.append("guideline_assessments was not a list; ignored")
@@ -251,6 +266,7 @@ def _coerce_guideline_assessments(
             if gid not in valid_ids:
                 warnings.append(f"dropped guideline assessment for unknown id {gid!r}")
                 continue
+            attempted.add(gid)
             if gid in seen:
                 warnings.append(f"dropped duplicate guideline assessment for {gid!r}")
                 continue
@@ -269,7 +285,7 @@ def _coerce_guideline_assessments(
                     evidence_span_ids=_str_list(raw.get("evidence_span_ids")),
                 )
             )
-    missing = [gid for gid in rubric.guideline_ids() if gid not in seen]
+    missing = [gid for gid in rubric.guideline_ids() if gid not in attempted]
     if missing:
         warnings.append("no score for guideline(s): " + ", ".join(missing))
     return out
