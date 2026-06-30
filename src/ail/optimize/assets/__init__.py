@@ -19,6 +19,14 @@ the candidate's behaviour to exactly this asset).
 This is **not** a user skill: it is never written to a ``polly`` skills directory
 or to ``~/.claude/skills``. It lives in the framework package as a generated
 artifact and is loaded by path.
+
+Stage 6 adds the **generator** side of this package: an extensible
+:class:`~ail.optimize.assets.base.AssetGenerator` seam + registry
+(:mod:`ail.optimize.assets.base`) that turns L3/RLM ranked recommendations into
+concrete assets, with the ``metric_view`` generator
+(:mod:`ail.optimize.assets.metric_view`) implemented end-to-end and the other
+asset types raising a clear ``next`` signal
+(:class:`~ail.optimize.assets.base.AssetGeneratorNotImplemented`).
 """
 
 from __future__ import annotations
@@ -29,11 +37,69 @@ from pathlib import Path
 
 import yaml
 
+from ail.optimize.assets.asset_contract import (
+    DroppedMeasure,
+    GeneratedAsset,
+    GeneratedMetricView,
+    MetricViewDimension,
+    MetricViewMeasure,
+    MetricViewSpec,
+)
+from ail.optimize.assets.base import (
+    AssetGenerator,
+    AssetGeneratorNotImplemented,
+    generate_asset,
+    get_generator,
+    register,
+    registered_asset_types,
+)
+from ail.optimize.assets.l0_contract import (
+    L0_CONTRACT,
+    L0ColumnContract,
+    verify_against_publish,
+)
+from ail.optimize.assets.metric_view import (
+    GENERATOR_VERSION,
+    MEASURE_CATALOG,
+    MetricViewGenerator,
+    SpecValidationError,
+    generate_metric_view,
+    generate_metric_views_from_report,
+    validate_spec,
+)
+
 __all__ = [
+    # pre-authored skill assets (existing)
     "SkillAsset",
     "load_skill_asset",
     "skill_asset_path",
     "TOKEN_EFFICIENCY_SKILL",
+    # generator seam + registry
+    "AssetGenerator",
+    "AssetGeneratorNotImplemented",
+    "register",
+    "get_generator",
+    "registered_asset_types",
+    "generate_asset",
+    # metric-view generator (implemented end-to-end)
+    "MetricViewGenerator",
+    "generate_metric_view",
+    "generate_metric_views_from_report",
+    "validate_spec",
+    "SpecValidationError",
+    "MEASURE_CATALOG",
+    "GENERATOR_VERSION",
+    # typed asset output contract
+    "GeneratedAsset",
+    "GeneratedMetricView",
+    "MetricViewSpec",
+    "MetricViewDimension",
+    "MetricViewMeasure",
+    "DroppedMeasure",
+    # real L0 column contract the generator builds on
+    "L0_CONTRACT",
+    "L0ColumnContract",
+    "verify_against_publish",
 ]
 
 #: Slug of the Phase-2 token-efficiency skill (its directory under ``skills/``).
