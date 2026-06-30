@@ -70,6 +70,22 @@ from ail.optimize.phase2 import (
     make_command_check,
     run_phase2_comparison,
 )
+from ail.optimize.prompt_registry import (
+    DEFAULT_CATALOG,
+    DEFAULT_PROMPT_NAME,
+    DEFAULT_SCHEMA,
+    NonImprovingCandidateError,
+    PromptProvenance,
+    PromptRegistryClient,
+    PromptSource,
+    RegisteredPrompt,
+    candidate_improvement,
+    register_gepa_candidate,
+    register_prompt_body,
+    register_seed_prompt,
+    resolve_prompt_name,
+    search_registered_prompts,
+)
 
 __all__ = [
     # assets
@@ -111,4 +127,19 @@ __all__ = [
     "GEPA_SCHEMA_VERSION",
     "DEFAULT_REFLECTION_LM",
     "DEFAULT_COMPONENT",
+    # UC prompt registry (human-gated promote step)
+    "register_prompt_body",
+    "register_seed_prompt",
+    "register_gepa_candidate",
+    "search_registered_prompts",
+    "candidate_improvement",
+    "resolve_prompt_name",
+    "PromptProvenance",
+    "RegisteredPrompt",
+    "PromptSource",
+    "PromptRegistryClient",
+    "NonImprovingCandidateError",
+    "DEFAULT_CATALOG",
+    "DEFAULT_SCHEMA",
+    "DEFAULT_PROMPT_NAME",
 ]
