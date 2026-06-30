@@ -13,13 +13,18 @@ compaction. AIL contributes a *thin* layer around the engine, not a
 reimplementation:
 
 * :mod:`ail.l3.adapter` — MLflow trace → OpenInference/OTLP ``SpanRecord`` JSONL.
-* :mod:`ail.l3.contract` — the structured verdict (:class:`HaloReviewVerdict`).
+* :mod:`ail.l3.contract` — the structured verdict (:class:`HaloReviewVerdict`) and
+  the cohort aggregate (:class:`CohortReviewReport`).
+* :mod:`ail.l3.rubric` — the configurable review rubric (the user's five
+  guidelines by default).
 * :mod:`ail.l3.parser` — HALO's free-text ``<final/>`` report → verdict.
 * :mod:`ail.l3.reviewer` — run HALO under its **own** trace (token isolation),
-  parse, and attach the verdict to the subject trace as an ``LLM_JUDGE``
-  feedback assessment linked by ``reviewer_trace_id``.
+  parse against the rubric, and attach per-guideline / assets / overall
+  ``LLM_JUDGE`` assessments to the subject trace, linked by ``reviewer_trace_id``.
 * :mod:`ail.l3.selection` — choose which (biggest/most-interesting) traces to
   review, because L3 is expensive.
+* :mod:`ail.l3.cohort_review` — review a tag-defined cohort and roll the
+  recommended assets up into a deduped, recurrence-ranked report.
 
 The HALO engine itself is the optional ``l3`` extra (``pip install 'ail[l3]'``)
 and is lazy-imported, so importing this package never requires it.
@@ -33,19 +38,37 @@ from ail.l3.adapter import (
     normalized_trace_to_span_records,
     write_span_records_jsonl,
 )
+from ail.l3.cohort_review import aggregate_assets, review_cohort
 from ail.l3.contract import (
     SCHEMA_VERSION,
+    AssetRecommendation,
+    AssetType,
+    CohortReviewReport,
     FailureMode,
+    GuidelineAssessment,
     HaloReviewVerdict,
+    RankedAsset,
     RedundancyFinding,
+    TraceReviewOutcome,
+    TraceReviewStatus,
 )
 from ail.l3.parser import HaloReportParseError, parse_halo_report, strip_final_marker
 from ail.l3.reviewer import (
-    FEEDBACK_NAME,
-    REVIEW_PROMPT_TEMPLATE,
+    ASSETS_FEEDBACK_NAME,
+    GUIDELINE_FEEDBACK_PREFIX,
+    OVERALL_FEEDBACK_NAME,
     build_engine_config,
+    build_review_prompt,
+    guideline_feedback_name,
     review_trace,
     run_halo_review,
+)
+from ail.l3.rubric import (
+    DEFAULT_GUIDELINES,
+    DEFAULT_OBJECTIVE,
+    DEFAULT_RUBRIC,
+    ReviewRubric,
+    ScoredGuideline,
 )
 from ail.l3.selection import (
     TraceSelection,
@@ -57,8 +80,21 @@ __all__ = [
     # contract
     "SCHEMA_VERSION",
     "HaloReviewVerdict",
+    "GuidelineAssessment",
+    "AssetRecommendation",
+    "AssetType",
     "RedundancyFinding",
     "FailureMode",
+    "TraceReviewOutcome",
+    "TraceReviewStatus",
+    "RankedAsset",
+    "CohortReviewReport",
+    # rubric
+    "ReviewRubric",
+    "ScoredGuideline",
+    "DEFAULT_RUBRIC",
+    "DEFAULT_GUIDELINES",
+    "DEFAULT_OBJECTIVE",
     # adapter
     "OtlpExport",
     "normalized_trace_to_span_records",
@@ -69,13 +105,19 @@ __all__ = [
     "parse_halo_report",
     "strip_final_marker",
     # reviewer
-    "FEEDBACK_NAME",
-    "REVIEW_PROMPT_TEMPLATE",
+    "OVERALL_FEEDBACK_NAME",
+    "ASSETS_FEEDBACK_NAME",
+    "GUIDELINE_FEEDBACK_PREFIX",
+    "guideline_feedback_name",
     "build_engine_config",
+    "build_review_prompt",
     "run_halo_review",
     "review_trace",
     # selection
     "TraceSelection",
     "select_traces_to_review",
     "select_from_experiment",
+    # cohort review
+    "review_cohort",
+    "aggregate_assets",
 ]

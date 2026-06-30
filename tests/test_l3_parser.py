@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from ail.l3.parser import HaloReportParseError, parse_halo_report, strip_final_marker
+from ail.l3.rubric import DEFAULT_RUBRIC
 
 _GOOD_JSON = """\
 Here is my analysis of the trace. The agent re-read the same file repeatedly.
@@ -22,6 +23,19 @@ Here is my analysis of the trace. The agent re-read the same file repeatedly.
   "token_waste_score": 65,
   "estimated_wasted_tokens": 120000,
   "summary": "Large trace dominated by repeated reads of the same file.",
+  "guideline_assessments": [
+    {"guideline_id": "tool_calling_efficiency", "score": 2,
+     "rationale": "Read /repo/main.py 34x", "evidence_span_ids": ["span-1", "span-2"]},
+    {"guideline_id": "token_efficiency", "score": 2, "rationale": "Re-loaded context"},
+    {"guideline_id": "tooling_purpose", "score": 4, "rationale": "Mostly purposeful"},
+    {"guideline_id": "instruction_clarity", "score": 3,
+     "rationale": "Task prompt was ambiguous about scope", "evidence_span_ids": ["span-3"]}
+  ],
+  "recommended_assets": [
+    {"asset_type": "skill", "title": "Cache file reads",
+     "rationale": "Same file read 34x", "expected_benefit": "~90k tokens saved",
+     "evidence_span_ids": ["span-1"], "trace_pattern": "repeated identical Read"}
+  ],
   "redundancy_findings": [
     {
       "description": "Same file read many times",
@@ -85,11 +99,115 @@ class TestHappyPath:
         v = parse_halo_report(report, subject_trace_id="t1")
         assert v.token_efficiency == "good"
         assert v.token_waste_score == 10
-        assert v.parse_warnings == []
+        # The unfenced object is found and parsed; the only warnings are the
+        # rubric guidelines this minimal report left unscored (not a parse failure).
+        assert all("guideline" in w for w in v.parse_warnings)
 
     def test_keeps_full_raw_report(self) -> None:
         v = parse_halo_report(_GOOD_JSON, subject_trace_id="t1")
         assert v.raw_report == _GOOD_JSON
+
+    def test_records_rubric_id(self) -> None:
+        v = parse_halo_report(_GOOD_JSON, subject_trace_id="t1")
+        assert v.rubric_id == DEFAULT_RUBRIC.rubric_id
+
+
+class TestGuidelinesAndAssets:
+    """The v2 rubric fields: per-guideline scores (1–4) and recommended assets (5)."""
+
+    def test_parses_all_four_scored_guidelines(self) -> None:
+        v = parse_halo_report(_GOOD_JSON, subject_trace_id="t1")
+        scored = {g.guideline_id: g for g in v.guideline_assessments}
+        assert set(scored) == set(DEFAULT_RUBRIC.guideline_ids())
+        assert scored["tool_calling_efficiency"].score == 2
+        assert scored["tool_calling_efficiency"].evidence_span_ids == ["span-1", "span-2"]
+        assert scored["instruction_clarity"].rationale.startswith("Task prompt")
+        # All five guidelines accounted for: 4 scored + the recommended assets.
+        assert v.score_for("tooling_purpose") == 4
+
+    def test_parses_recommended_assets(self) -> None:
+        v = parse_halo_report(_GOOD_JSON, subject_trace_id="t1")
+        assert len(v.recommended_assets) == 1
+        asset = v.recommended_assets[0]
+        assert asset.asset_type == "skill"
+        assert asset.title == "Cache file reads"
+        assert asset.expected_benefit == "~90k tokens saved"
+        assert asset.evidence_span_ids == ["span-1"]
+        assert asset.trace_pattern == "repeated identical Read"
+
+    def test_out_of_range_guideline_score_clamped_with_warning(self) -> None:
+        report = (
+            '```json\n{"token_efficiency": "fair", "token_waste_score": 20, "summary": "x", '
+            '"guideline_assessments": [{"guideline_id": "token_efficiency", "score": 9, '
+            '"rationale": "r"}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1")
+        assert v.score_for("token_efficiency") == 5  # clamped to score_max
+        assert any("clamped" in w for w in v.parse_warnings)
+
+    def test_unknown_guideline_id_dropped_with_warning(self) -> None:
+        report = (
+            '```json\n{"token_efficiency": "fair", "token_waste_score": 20, "summary": "x", '
+            '"guideline_assessments": [{"guideline_id": "made_up", "score": 3}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1")
+        assert v.guideline_assessments == []
+        assert any("unknown id" in w for w in v.parse_warnings)
+
+    def test_unscorable_guideline_dropped_with_warning(self) -> None:
+        report = (
+            '```json\n{"token_efficiency": "fair", "token_waste_score": 20, "summary": "x", '
+            '"guideline_assessments": [{"guideline_id": "tooling_purpose", "score": "n/a"}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1")
+        assert v.score_for("tooling_purpose") is None
+        assert any("unparseable score" in w for w in v.parse_warnings)
+
+    def test_missing_guideline_recorded_in_warnings(self) -> None:
+        report = (
+            '```json\n{"token_efficiency": "fair", "token_waste_score": 20, "summary": "x", '
+            '"guideline_assessments": [{"guideline_id": "tooling_purpose", "score": 3}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1")
+        warning = next(w for w in v.parse_warnings if "no score for guideline" in w)
+        assert "tool_calling_efficiency" in warning
+        assert "tooling_purpose" not in warning  # it was scored
+
+    def test_unknown_asset_type_recorded_as_other(self) -> None:
+        report = (
+            '```json\n{"token_efficiency": "fair", "token_waste_score": 20, "summary": "x", '
+            '"recommended_assets": [{"asset_type": "spaceship", "title": "warp drive"}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1")
+        assert v.recommended_assets[0].asset_type == "other"
+        assert any("unrecognized asset_type" in w for w in v.parse_warnings)
+
+    def test_asset_type_synonym_mapped(self) -> None:
+        report = (
+            '```json\n{"token_efficiency": "fair", "token_waste_score": 20, "summary": "x", '
+            '"recommended_assets": [{"asset_type": "metric view", "title": "m"}, '
+            '{"asset_type": "instruction", "title": "p"}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1")
+        assert [a.asset_type for a in v.recommended_assets] == ["metric_view", "prompt_change"]
+
+    def test_custom_rubric_ids_and_scale(self) -> None:
+        from ail.l3.rubric import ReviewRubric, ScoredGuideline
+
+        rubric = ReviewRubric(
+            rubric_id="custom/v1",
+            guidelines=(ScoredGuideline("clarity", "Clarity", "d"),),
+            score_min=0,
+            score_max=10,
+        )
+        report = (
+            '```json\n{"token_efficiency": "good", "token_waste_score": 5, "summary": "x", '
+            '"guideline_assessments": [{"guideline_id": "clarity", "score": 8}]}\n```'
+        )
+        v = parse_halo_report(report, subject_trace_id="t1", rubric=rubric)
+        assert v.rubric_id == "custom/v1"
+        assert v.score_for("clarity") == 8  # in-range for the 0..10 scale, not clamped
+        assert not any("clamped" in w for w in v.parse_warnings)
 
 
 class TestParserOwnedFields:
