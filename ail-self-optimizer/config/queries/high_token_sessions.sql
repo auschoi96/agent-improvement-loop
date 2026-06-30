@@ -1,4 +1,5 @@
 -- Token heavy-tail: the highest-token sessions. Read-only from precomputed L0.
+-- @param experiment_id STRING
 SELECT
   substr(trace_id, -12) AS trace,
   model,
@@ -11,6 +12,6 @@ SELECT
   cost_priced,
   ROUND(redundancy_rate, 3) AS redundancy_rate
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.l0_session_metrics
-WHERE experiment_id = '660599403165942'
+WHERE experiment_id = :experiment_id
 ORDER BY total_tokens DESC
 LIMIT 25

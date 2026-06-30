@@ -1,0 +1,866 @@
+{
+  "schema_version": "ail.optimize.phase2/v1",
+  "generated_at": "2026-06-30T07:54:57.399568+00:00",
+  "suite_version": "phase2-mini-v1",
+  "suite_content_hash": "b0fb7c3230ad3c896e1d86fddc6c1013f7c0b83fd95f7f7d672d01b0273e4a45",
+  "baseline_config": "baseline-no-asset",
+  "candidate_config": "candidate-token-efficiency-skill",
+  "objective_metric": "total_tokens",
+  "min_token_reduction_pct": 0.0,
+  "experiment": null,
+  "profile": null,
+  "warehouse_id": null,
+  "n_tasks": 5,
+  "n_promote": 2,
+  "n_block": 3,
+  "n_errored": 0,
+  "realized_baseline_tokens": 2570.0,
+  "realized_candidate_tokens": 1660.0,
+  "realized_token_savings_absolute": 910.0,
+  "realized_token_savings_pct": 35.4086,
+  "outcomes": [
+    {
+      "task_id": "ts-fix-01",
+      "category": "repeated_target_boilerplate",
+      "difficulty": "medium",
+      "recommendation": "promote",
+      "objective_met": true,
+      "guardrails_passed": true,
+      "baseline_total_tokens": 1534.0,
+      "candidate_total_tokens": 936.0,
+      "token_delta_absolute": -598.0,
+      "token_delta_pct": -38.9831,
+      "token_improved": true,
+      "l1_outcome": "passed",
+      "l1_verification_configured": true,
+      "baseline_succeeded": true,
+      "candidate_succeeded": true,
+      "baseline_trace_id": "40e583b7-3f46-4a3f-a780-a2ba143d420f",
+      "candidate_trace_id": "284cdbb8-e046-4a44-a129-4dc4c67c41a9",
+      "blocking_reasons": [],
+      "error": null,
+      "comparison": {
+        "schema_version": "ail.compare/v1",
+        "task_id": "ts-fix-01",
+        "intervention": "token-efficiency-skill",
+        "objective_metric": "total_tokens",
+        "objective_met": true,
+        "guardrails_passed": true,
+        "recommendation": "promote",
+        "reasons": [
+          "objective met: total_tokens 1534 -> 936 (-38.98%)",
+          "guardrail 'execution' passed: both agent runs succeeded",
+          "guardrail 'programmatic' passed: L1 'verify' passes for the candidate"
+        ],
+        "baseline_trace_id": "40e583b7-3f46-4a3f-a780-a2ba143d420f",
+        "candidate_trace_id": "284cdbb8-e046-4a44-a129-4dc4c67c41a9",
+        "deltas": [
+          {
+            "metric": "input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 138.0,
+            "candidate": 26.0,
+            "delta_absolute": -112.0,
+            "delta_pct": -81.1594,
+            "improved": true
+          },
+          {
+            "metric": "output_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 1396.0,
+            "candidate": 910.0,
+            "delta_absolute": -486.0,
+            "delta_pct": -34.8138,
+            "improved": true
+          },
+          {
+            "metric": "total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 1534.0,
+            "candidate": 936.0,
+            "delta_absolute": -598.0,
+            "delta_pct": -38.9831,
+            "improved": true
+          },
+          {
+            "metric": "cache_creation_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 209710.0,
+            "candidate": 13776.0,
+            "delta_absolute": -195934.0,
+            "delta_pct": -93.4309,
+            "improved": true
+          },
+          {
+            "metric": "cache_read_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 2543314.0,
+            "candidate": 1067634.0,
+            "delta_absolute": -1475680.0,
+            "delta_pct": -58.0219,
+            "improved": true
+          },
+          {
+            "metric": "cache_total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 2753024.0,
+            "candidate": 1081410.0,
+            "delta_absolute": -1671614.0,
+            "delta_pct": -60.7192,
+            "improved": true
+          },
+          {
+            "metric": "total_tool_calls",
+            "unit": "calls",
+            "lower_is_better": true,
+            "baseline": 35.0,
+            "candidate": 16.0,
+            "delta_absolute": -19.0,
+            "delta_pct": -54.2857,
+            "improved": true
+          },
+          {
+            "metric": "redundancy_rate",
+            "unit": "rate",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "total_usd",
+            "unit": "usd",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "duration_seconds",
+            "unit": "seconds",
+            "lower_is_better": true,
+            "baseline": 219.27,
+            "candidate": 172.496,
+            "delta_absolute": -46.774,
+            "delta_pct": -21.3317,
+            "improved": true
+          }
+        ],
+        "guardrails": [
+          {
+            "name": "execution",
+            "passed": true,
+            "reason": "both agent runs succeeded",
+            "baseline_value": true,
+            "candidate_value": true,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          },
+          {
+            "name": "programmatic",
+            "passed": true,
+            "reason": "L1 'verify' passes for the candidate",
+            "baseline_value": true,
+            "candidate_value": true,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          }
+        ],
+        "generated_at": "2026-06-30T07:54:57.399568+00:00",
+        "notes": [
+          "cost delta is partial: baseline priced=False, candidate priced=False; an unpriced side contributes $0 and the total_usd delta understates the true change"
+        ]
+      }
+    },
+    {
+      "task_id": "ts-impl-02",
+      "category": "typical_short_session",
+      "difficulty": "medium",
+      "recommendation": "promote",
+      "objective_met": true,
+      "guardrails_passed": true,
+      "baseline_total_tokens": 1036.0,
+      "candidate_total_tokens": 724.0,
+      "token_delta_absolute": -312.0,
+      "token_delta_pct": -30.1158,
+      "token_improved": true,
+      "l1_outcome": "passed",
+      "l1_verification_configured": true,
+      "baseline_succeeded": true,
+      "candidate_succeeded": true,
+      "baseline_trace_id": "75a0ae08-dbcc-4648-9349-ddbe4cba8467",
+      "candidate_trace_id": "cd3f9d32-85d5-4fb1-bd53-b95ac55c3b3d",
+      "blocking_reasons": [],
+      "error": null,
+      "comparison": {
+        "schema_version": "ail.compare/v1",
+        "task_id": "ts-impl-02",
+        "intervention": "token-efficiency-skill",
+        "objective_metric": "total_tokens",
+        "objective_met": true,
+        "guardrails_passed": true,
+        "recommendation": "promote",
+        "reasons": [
+          "objective met: total_tokens 1036 -> 724 (-30.12%)",
+          "guardrail 'execution' passed: both agent runs succeeded",
+          "guardrail 'programmatic' passed: L1 'verify' passes for the candidate"
+        ],
+        "baseline_trace_id": "75a0ae08-dbcc-4648-9349-ddbe4cba8467",
+        "candidate_trace_id": "cd3f9d32-85d5-4fb1-bd53-b95ac55c3b3d",
+        "deltas": [
+          {
+            "metric": "input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 111.0,
+            "candidate": 33.0,
+            "delta_absolute": -78.0,
+            "delta_pct": -70.2703,
+            "improved": true
+          },
+          {
+            "metric": "output_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 925.0,
+            "candidate": 691.0,
+            "delta_absolute": -234.0,
+            "delta_pct": -25.2973,
+            "improved": true
+          },
+          {
+            "metric": "total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 1036.0,
+            "candidate": 724.0,
+            "delta_absolute": -312.0,
+            "delta_pct": -30.1158,
+            "improved": true
+          },
+          {
+            "metric": "cache_creation_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 112146.0,
+            "candidate": 32561.0,
+            "delta_absolute": -79585.0,
+            "delta_pct": -70.9655,
+            "improved": true
+          },
+          {
+            "metric": "cache_read_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 2164773.0,
+            "candidate": 1348879.0,
+            "delta_absolute": -815894.0,
+            "delta_pct": -37.6896,
+            "improved": true
+          },
+          {
+            "metric": "cache_total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 2276919.0,
+            "candidate": 1381440.0,
+            "delta_absolute": -895479.0,
+            "delta_pct": -39.3285,
+            "improved": true
+          },
+          {
+            "metric": "total_tool_calls",
+            "unit": "calls",
+            "lower_is_better": true,
+            "baseline": 29.0,
+            "candidate": 17.0,
+            "delta_absolute": -12.0,
+            "delta_pct": -41.3793,
+            "improved": true
+          },
+          {
+            "metric": "redundancy_rate",
+            "unit": "rate",
+            "lower_is_better": true,
+            "baseline": 0.103448,
+            "candidate": 0.0,
+            "delta_absolute": -0.103448,
+            "delta_pct": -100.0,
+            "improved": true
+          },
+          {
+            "metric": "total_usd",
+            "unit": "usd",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "duration_seconds",
+            "unit": "seconds",
+            "lower_is_better": true,
+            "baseline": 100.814,
+            "candidate": 86.66,
+            "delta_absolute": -14.154,
+            "delta_pct": -14.0397,
+            "improved": true
+          }
+        ],
+        "guardrails": [
+          {
+            "name": "execution",
+            "passed": true,
+            "reason": "both agent runs succeeded",
+            "baseline_value": true,
+            "candidate_value": true,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          },
+          {
+            "name": "programmatic",
+            "passed": true,
+            "reason": "L1 'verify' passes for the candidate",
+            "baseline_value": true,
+            "candidate_value": true,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          }
+        ],
+        "generated_at": "2026-06-30T07:54:57.399568+00:00",
+        "notes": [
+          "cost delta is partial: baseline priced=False, candidate priced=False; an unpriced side contributes $0 and the total_usd delta understates the true change"
+        ]
+      }
+    },
+    {
+      "task_id": "ts-refactor-03",
+      "category": "repeated_target_boilerplate",
+      "difficulty": "medium",
+      "recommendation": "block",
+      "objective_met": false,
+      "guardrails_passed": false,
+      "baseline_total_tokens": 30.0,
+      "candidate_total_tokens": 35.0,
+      "token_delta_absolute": 5.0,
+      "token_delta_pct": 16.6667,
+      "token_improved": false,
+      "l1_outcome": "no_verdict",
+      "l1_verification_configured": true,
+      "baseline_succeeded": true,
+      "candidate_succeeded": true,
+      "baseline_trace_id": "e58be157-8995-46d1-a523-5764f9b63c76",
+      "candidate_trace_id": "ea46c9b2-a2f6-4f1f-a947-a715cd80df80",
+      "blocking_reasons": [
+        "objective NOT met: total_tokens 30 -> 35 (+16.67%) (no qualifying reduction)",
+        "guardrail 'programmatic' failed: L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1; ap>:1324: ModuleNotFoundError\n=========================== short test summary info ============================\nFAILED verify/test_reports.py::test_currency_logic_extracted_to_common - Asse...\nFAILED verify/test_reports.py::test_all_reports_use_the_shared_helper - Modul...\n2 failed, 1 passed in 0.02s)"
+      ],
+      "error": null,
+      "comparison": {
+        "schema_version": "ail.compare/v1",
+        "task_id": "ts-refactor-03",
+        "intervention": "token-efficiency-skill",
+        "objective_metric": "total_tokens",
+        "objective_met": false,
+        "guardrails_passed": false,
+        "recommendation": "block",
+        "reasons": [
+          "objective NOT met: total_tokens 30 -> 35 (+16.67%) (no qualifying reduction)",
+          "guardrail 'programmatic' failed: L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1; ap>:1324: ModuleNotFoundError\n=========================== short test summary info ============================\nFAILED verify/test_reports.py::test_currency_logic_extracted_to_common - Asse...\nFAILED verify/test_reports.py::test_all_reports_use_the_shared_helper - Modul...\n2 failed, 1 passed in 0.02s)"
+        ],
+        "baseline_trace_id": "e58be157-8995-46d1-a523-5764f9b63c76",
+        "candidate_trace_id": "ea46c9b2-a2f6-4f1f-a947-a715cd80df80",
+        "deltas": [
+          {
+            "metric": "input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 10.0,
+            "candidate": 10.0,
+            "delta_absolute": 0.0,
+            "delta_pct": 0.0,
+            "improved": false
+          },
+          {
+            "metric": "output_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 20.0,
+            "candidate": 25.0,
+            "delta_absolute": 5.0,
+            "delta_pct": 25.0,
+            "improved": false
+          },
+          {
+            "metric": "total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 30.0,
+            "candidate": 35.0,
+            "delta_absolute": 5.0,
+            "delta_pct": 16.6667,
+            "improved": false
+          },
+          {
+            "metric": "cache_creation_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 9195.0,
+            "candidate": 9155.0,
+            "delta_absolute": -40.0,
+            "delta_pct": -0.435,
+            "improved": true
+          },
+          {
+            "metric": "cache_read_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 128936.0,
+            "candidate": 131732.0,
+            "delta_absolute": 2796.0,
+            "delta_pct": 2.1685,
+            "improved": false
+          },
+          {
+            "metric": "cache_total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 138131.0,
+            "candidate": 140887.0,
+            "delta_absolute": 2756.0,
+            "delta_pct": 1.9952,
+            "improved": false
+          },
+          {
+            "metric": "total_tool_calls",
+            "unit": "calls",
+            "lower_is_better": true,
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta_absolute": 0.0,
+            "delta_pct": 0.0,
+            "improved": false
+          },
+          {
+            "metric": "redundancy_rate",
+            "unit": "rate",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "total_usd",
+            "unit": "usd",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "duration_seconds",
+            "unit": "seconds",
+            "lower_is_better": true,
+            "baseline": 8.137,
+            "candidate": 7.191,
+            "delta_absolute": -0.946,
+            "delta_pct": -11.6259,
+            "improved": true
+          }
+        ],
+        "guardrails": [
+          {
+            "name": "execution",
+            "passed": true,
+            "reason": "both agent runs succeeded",
+            "baseline_value": true,
+            "candidate_value": true,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          },
+          {
+            "name": "programmatic",
+            "passed": false,
+            "reason": "L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1; ap>:1324: ModuleNotFoundError\n=========================== short test summary info ============================\nFAILED verify/test_reports.py::test_currency_logic_extracted_to_common - Asse...\nFAILED verify/test_reports.py::test_all_reports_use_the_shared_helper - Modul...\n2 failed, 1 passed in 0.02s)",
+            "baseline_value": false,
+            "candidate_value": false,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          }
+        ],
+        "generated_at": "2026-06-30T07:54:57.399568+00:00",
+        "notes": [
+          "cost delta is partial: baseline priced=False, candidate priced=False; an unpriced side contributes $0 and the total_usd delta understates the true change"
+        ]
+      }
+    },
+    {
+      "task_id": "ts-config-04",
+      "category": "typical_short_session",
+      "difficulty": "medium",
+      "recommendation": "block",
+      "objective_met": true,
+      "guardrails_passed": false,
+      "baseline_total_tokens": 894.0,
+      "candidate_total_tokens": 781.0,
+      "token_delta_absolute": -113.0,
+      "token_delta_pct": -12.6398,
+      "token_improved": true,
+      "l1_outcome": "no_verdict",
+      "l1_verification_configured": true,
+      "baseline_succeeded": true,
+      "candidate_succeeded": true,
+      "baseline_trace_id": "823a81dd-beff-4a3c-bd58-5eb26b0a2b52",
+      "candidate_trace_id": "545c119c-a747-48d9-880f-a9693c7d3c3a",
+      "blocking_reasons": [
+        "guardrail 'programmatic' failed: L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1;         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE ValueError\n\nverify/test_settings.py:28: Failed\n=========================== short test summary info ============================\nFAILED verify/test_settings.py::test_invalid_max_retries_raises - Failed: DID...\n1 failed, 4 passed in 0.02s)"
+      ],
+      "error": null,
+      "comparison": {
+        "schema_version": "ail.compare/v1",
+        "task_id": "ts-config-04",
+        "intervention": "token-efficiency-skill",
+        "objective_metric": "total_tokens",
+        "objective_met": true,
+        "guardrails_passed": false,
+        "recommendation": "block",
+        "reasons": [
+          "guardrail 'programmatic' failed: L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1;         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE ValueError\n\nverify/test_settings.py:28: Failed\n=========================== short test summary info ============================\nFAILED verify/test_settings.py::test_invalid_max_retries_raises - Failed: DID...\n1 failed, 4 passed in 0.02s)"
+        ],
+        "baseline_trace_id": "823a81dd-beff-4a3c-bd58-5eb26b0a2b52",
+        "candidate_trace_id": "545c119c-a747-48d9-880f-a9693c7d3c3a",
+        "deltas": [
+          {
+            "metric": "input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 302.0,
+            "candidate": 24.0,
+            "delta_absolute": -278.0,
+            "delta_pct": -92.053,
+            "improved": true
+          },
+          {
+            "metric": "output_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 592.0,
+            "candidate": 757.0,
+            "delta_absolute": 165.0,
+            "delta_pct": 27.8716,
+            "improved": false
+          },
+          {
+            "metric": "total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 894.0,
+            "candidate": 781.0,
+            "delta_absolute": -113.0,
+            "delta_pct": -12.6398,
+            "improved": true
+          },
+          {
+            "metric": "cache_creation_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 42275.0,
+            "candidate": 18539.0,
+            "delta_absolute": -23736.0,
+            "delta_pct": -56.1467,
+            "improved": true
+          },
+          {
+            "metric": "cache_read_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 1566593.0,
+            "candidate": 957097.0,
+            "delta_absolute": -609496.0,
+            "delta_pct": -38.9058,
+            "improved": true
+          },
+          {
+            "metric": "cache_total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 1608868.0,
+            "candidate": 975636.0,
+            "delta_absolute": -633232.0,
+            "delta_pct": -39.3589,
+            "improved": true
+          },
+          {
+            "metric": "total_tool_calls",
+            "unit": "calls",
+            "lower_is_better": true,
+            "baseline": 26.0,
+            "candidate": 13.0,
+            "delta_absolute": -13.0,
+            "delta_pct": -50.0,
+            "improved": true
+          },
+          {
+            "metric": "redundancy_rate",
+            "unit": "rate",
+            "lower_is_better": true,
+            "baseline": 0.076923,
+            "candidate": 0.0,
+            "delta_absolute": -0.076923,
+            "delta_pct": -100.0,
+            "improved": true
+          },
+          {
+            "metric": "total_usd",
+            "unit": "usd",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "duration_seconds",
+            "unit": "seconds",
+            "lower_is_better": true,
+            "baseline": 52.817,
+            "candidate": 44.977,
+            "delta_absolute": -7.84,
+            "delta_pct": -14.8437,
+            "improved": true
+          }
+        ],
+        "guardrails": [
+          {
+            "name": "execution",
+            "passed": true,
+            "reason": "both agent runs succeeded",
+            "baseline_value": true,
+            "candidate_value": true,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          },
+          {
+            "name": "programmatic",
+            "passed": false,
+            "reason": "L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1;         ^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE ValueError\n\nverify/test_settings.py:28: Failed\n=========================== short test summary info ============================\nFAILED verify/test_settings.py::test_invalid_max_retries_raises - Failed: DID...\n1 failed, 4 passed in 0.02s)",
+            "baseline_value": false,
+            "candidate_value": false,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          }
+        ],
+        "generated_at": "2026-06-30T07:54:57.399568+00:00",
+        "notes": [
+          "cost delta is partial: baseline priced=False, candidate priced=False; an unpriced side contributes $0 and the total_usd delta understates the true change"
+        ]
+      }
+    },
+    {
+      "task_id": "ts-route-05",
+      "category": "high_tool_call_volume",
+      "difficulty": "medium",
+      "recommendation": "block",
+      "objective_met": false,
+      "guardrails_passed": false,
+      "baseline_total_tokens": 16.0,
+      "candidate_total_tokens": 46.0,
+      "token_delta_absolute": 30.0,
+      "token_delta_pct": 187.5,
+      "token_improved": false,
+      "l1_outcome": "no_verdict",
+      "l1_verification_configured": true,
+      "baseline_succeeded": true,
+      "candidate_succeeded": true,
+      "baseline_trace_id": "d4be165c-d671-4638-8834-114eb0ade851",
+      "candidate_trace_id": "f2947d05-1c0e-43f5-b26e-0676691b1c86",
+      "blocking_reasons": [
+        "objective NOT met: total_tokens 16 -> 46 (+187.50%) (no qualifying reduction)",
+        "guardrail 'programmatic' failed: L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1; ter()\nE        +  and   User(id=1, name='Ada') = User(id=1, name='Ada')\n\nverify/test_api.py:14: AssertionError\n=========================== short test summary info ============================\nFAILED verify/test_api.py::test_existing_user_is_returned - AssertionError: a...\n1 failed, 1 passed in 0.02s)"
+      ],
+      "error": null,
+      "comparison": {
+        "schema_version": "ail.compare/v1",
+        "task_id": "ts-route-05",
+        "intervention": "token-efficiency-skill",
+        "objective_metric": "total_tokens",
+        "objective_met": false,
+        "guardrails_passed": false,
+        "recommendation": "block",
+        "reasons": [
+          "objective NOT met: total_tokens 16 -> 46 (+187.50%) (no qualifying reduction)",
+          "guardrail 'programmatic' failed: L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1; ter()\nE        +  and   User(id=1, name='Ada') = User(id=1, name='Ada')\n\nverify/test_api.py:14: AssertionError\n=========================== short test summary info ============================\nFAILED verify/test_api.py::test_existing_user_is_returned - AssertionError: a...\n1 failed, 1 passed in 0.02s)"
+        ],
+        "baseline_trace_id": "d4be165c-d671-4638-8834-114eb0ade851",
+        "candidate_trace_id": "f2947d05-1c0e-43f5-b26e-0676691b1c86",
+        "deltas": [
+          {
+            "metric": "input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 10.0,
+            "candidate": 11.0,
+            "delta_absolute": 1.0,
+            "delta_pct": 10.0,
+            "improved": false
+          },
+          {
+            "metric": "output_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 6.0,
+            "candidate": 35.0,
+            "delta_absolute": 29.0,
+            "delta_pct": 483.3333,
+            "improved": false
+          },
+          {
+            "metric": "total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 16.0,
+            "candidate": 46.0,
+            "delta_absolute": 30.0,
+            "delta_pct": 187.5,
+            "improved": false
+          },
+          {
+            "metric": "cache_creation_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 9197.0,
+            "candidate": 11743.0,
+            "delta_absolute": 2546.0,
+            "delta_pct": 27.6829,
+            "improved": false
+          },
+          {
+            "metric": "cache_read_input_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 128936.0,
+            "candidate": 179165.0,
+            "delta_absolute": 50229.0,
+            "delta_pct": 38.9565,
+            "improved": false
+          },
+          {
+            "metric": "cache_total_tokens",
+            "unit": "tokens",
+            "lower_is_better": true,
+            "baseline": 138133.0,
+            "candidate": 190908.0,
+            "delta_absolute": 52775.0,
+            "delta_pct": 38.2059,
+            "improved": false
+          },
+          {
+            "metric": "total_tool_calls",
+            "unit": "calls",
+            "lower_is_better": true,
+            "baseline": 1.0,
+            "candidate": 1.0,
+            "delta_absolute": 0.0,
+            "delta_pct": 0.0,
+            "improved": false
+          },
+          {
+            "metric": "redundancy_rate",
+            "unit": "rate",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "total_usd",
+            "unit": "usd",
+            "lower_is_better": true,
+            "baseline": 0.0,
+            "candidate": 0.0,
+            "delta_absolute": 0.0,
+            "delta_pct": null,
+            "improved": false
+          },
+          {
+            "metric": "duration_seconds",
+            "unit": "seconds",
+            "lower_is_better": true,
+            "baseline": 7.86,
+            "candidate": 7.026,
+            "delta_absolute": -0.834,
+            "delta_pct": -10.6107,
+            "improved": true
+          }
+        ],
+        "guardrails": [
+          {
+            "name": "execution",
+            "passed": true,
+            "reason": "both agent runs succeeded",
+            "baseline_value": true,
+            "candidate_value": true,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          },
+          {
+            "name": "programmatic",
+            "passed": false,
+            "reason": "L1 'verify' did not pass at baseline; failing closed — a failed baseline is not a valid anchor, so a token reduction against it proves nothing (exit=1; ter()\nE        +  and   User(id=1, name='Ada') = User(id=1, name='Ada')\n\nverify/test_api.py:14: AssertionError\n=========================== short test summary info ============================\nFAILED verify/test_api.py::test_existing_user_is_returned - AssertionError: a...\n1 failed, 1 passed in 0.02s)",
+            "baseline_value": false,
+            "candidate_value": false,
+            "regressed": false,
+            "judge_name": null,
+            "interim": false,
+            "interim_note": null
+          }
+        ],
+        "generated_at": "2026-06-30T07:54:57.399568+00:00",
+        "notes": [
+          "cost delta is partial: baseline priced=False, candidate priced=False; an unpriced side contributes $0 and the total_usd delta understates the true change"
+        ]
+      }
+    }
+  ],
+  "notes": [
+    "Correctness is gated by deterministic L1 programmatic checks (NO_LLM_JUDGE); no uncalibrated LLM judge is in the decision path.",
+    "Realized token savings are summed over PROMOTE tasks only; a blocked or crashed task's token delta is never counted as a win."
+  ]
+}

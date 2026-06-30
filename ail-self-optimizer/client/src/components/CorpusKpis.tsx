@@ -1,10 +1,7 @@
 import { useAnalyticsQuery, Card, CardContent, Badge, Skeleton } from '@databricks/appkit-ui/react';
-import type { ReactNode } from 'react';
+import { sql } from '@databricks/appkit-ui/js';
+import { useMemo, type ReactNode } from 'react';
 import { fmtInt, fmtUsd, fmtPct } from '../lib/formatters';
-
-// Stable reference: a fresh {} each render would retrigger the query (see AppKit
-// SDK guidance on memoizing parameters).
-const EMPTY_PARAMS = {};
 
 function Kpi({ label, value, sub }: { label: string; value: string; sub?: ReactNode }) {
   return (
@@ -18,8 +15,10 @@ function Kpi({ label, value, sub }: { label: string; value: string; sub?: ReactN
   );
 }
 
-export function CorpusKpis() {
-  const { data, loading, error } = useAnalyticsQuery('corpus_summary', EMPTY_PARAMS);
+export function CorpusKpis({ experimentId }: { experimentId: string }) {
+  // Memoize so a re-render doesn't retrigger the query (AppKit parameter guidance).
+  const params = useMemo(() => ({ experiment_id: sql.string(experimentId) }), [experimentId]);
+  const { data, loading, error } = useAnalyticsQuery('corpus_summary', params);
 
   if (loading) {
     return (

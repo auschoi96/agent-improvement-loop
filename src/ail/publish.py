@@ -384,16 +384,22 @@ def _atomic_replace_table(
     table: str,
     columns: list[str],
     rows: list[list[Any]],
-    experiment_id: str,
+    where_predicate: str,
 ) -> int:
-    """Atomically replace one experiment's rows in ``table`` with ``rows``.
+    """Atomically replace the rows matching ``where_predicate`` in ``table``.
+
+    ``where_predicate`` is the (already-rendered, safely-escaped) boolean that
+    scopes the swap — e.g. ``experiment_id = '660599403165942'`` for the
+    per-experiment L0 tables, or a composite ``agent_name = '…' AND agent_version
+    = '…'`` for the unified per-version tables (:mod:`ail.publish_versions`). It
+    must select *exactly* the slice ``rows`` belongs to.
 
     The new snapshot is loaded into a transient staging clone (batched — those
     writes are not visible to readers of the live table), then swapped in with a
     single ``INSERT INTO … REPLACE WHERE`` Delta transaction. The live table is
     therefore mutated exactly once, atomically: if staging fails the live table
     keeps its prior complete snapshot. Empty ``rows`` is handled correctly — the
-    swap removes any prior rows for the experiment and writes nothing.
+    swap removes any prior rows for the slice and writes nothing.
 
     Returns the number of rows written.
     """
@@ -411,8 +417,7 @@ def _atomic_replace_table(
         _execute(
             client,
             warehouse_id,
-            f"INSERT INTO {main} REPLACE WHERE experiment_id = {_lit(experiment_id)} "
-            f"SELECT * FROM {staging}",
+            f"INSERT INTO {main} REPLACE WHERE {where_predicate} SELECT * FROM {staging}",
         )
     finally:
         # Best-effort cleanup; never mask a failure from the steps above.
@@ -471,6 +476,7 @@ def publish(
     # 2. Atomically replace each table's slice for this experiment. Each call
     #    mutates its live table exactly once (staging clone -> REPLACE WHERE
     #    swap), so a mid-run failure never leaves empty/partial data.
+    experiment_predicate = f"experiment_id = {_lit(experiment_id)}"
     n_session = _atomic_replace_table(
         client,
         warehouse_id,
@@ -478,7 +484,7 @@ def publish(
         SESSION_TABLE,
         SESSION_COLUMNS,
         _session_rows(report),
-        experiment_id,
+        experiment_predicate,
     )
     n_summary = _atomic_replace_table(
         client,
@@ -487,7 +493,7 @@ def publish(
         SUMMARY_TABLE,
         SUMMARY_COLUMNS,
         [_summary_row(report)],
-        experiment_id,
+        experiment_predicate,
     )
     n_diag = _atomic_replace_table(
         client,
@@ -496,7 +502,7 @@ def publish(
         DIAGNOSIS_TABLE,
         DIAGNOSIS_COLUMNS,
         _diagnosis_rows(report),
-        experiment_id,
+        experiment_predicate,
     )
 
     print(

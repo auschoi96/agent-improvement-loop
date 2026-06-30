@@ -1,0 +1,16 @@
+# Agent registry — the observability app's primary key onto agents.
+#
+# One MLflow experiment per agent (docs/OBSERVABILITY_APP.md). This file is the
+# operator-facing, config-driven mirror of ail.registry.DEFAULT_REGISTRY; a test
+# (tests/test_registry.py) keeps the two in sync. The publish tier
+# (ail.publish_versions) writes this into the `agent_registry` UC table the app's
+# agent switcher reads.
+#
+# Each agent: a friendly unique `agent_name`, its dedicated `experiment_id`, an
+# optional `description`, an optional `judge_config` (per-agent L2 judges), and an
+# optional `tag_filter` (within-experiment sub-selection; omit for the whole
+# experiment).
+agents:
+  - agent_name: claude_code
+    experiment_id: "660599403165942"
+    description: Claude Code CLI sessions (the reference agent).
