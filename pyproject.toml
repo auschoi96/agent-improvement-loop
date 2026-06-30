@@ -117,6 +117,8 @@ strict_equality = true
 # ``engine.*`` is HALO (the optional ``l3`` extra); ``agents.*`` is the OpenAI
 # Agents SDK it pulls in — neither is installed in CI (core install only), so
 # their imports (lazy, inside the reviewer) must not fail the typecheck.
-module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*", "agents.*", "yaml"]
+# ``gepa.*`` is the GEPA optimizer (ships with the ``align`` extra via dspy);
+# only the GEPA loop's lazy ``gepa.optimize`` resolver imports it.
+module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*", "agents.*", "yaml", "gepa.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
