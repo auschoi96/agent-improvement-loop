@@ -55,9 +55,11 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from ail.optimize.prompt_registry import (
+    CHAMPION_ALIASES,
     DEFAULT_CATALOG,
     DEFAULT_PROMPT_NAME,
     DEFAULT_SCHEMA,
+    PROMPT_TAG_PREFIX,
     REGISTRY_URI,
     TRACKING_URI,
     PromptSource,
@@ -70,7 +72,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "LINEAGE_TABLE",
     "LINEAGE_COLUMNS",
-    "CHAMPION_ALIASES",
     "PromptLineageRow",
     "LineageRegistryClient",
     "build_lineage_rows",
@@ -85,16 +86,10 @@ SCHEMA_VERSION = "ail.observability/v1"
 #: Unified, agent-keyed lineage table the app reads (one table for all agents).
 LINEAGE_TABLE = "agent_prompt_lineage"
 
-#: The aliases that designate the production champion of a prompt. ``champion`` is
-#: the canonical one (see ``docs/PROMPT_REGISTRY.md``); ``production`` is accepted
-#: as a synonym so a version promoted under either reads as the champion.
-CHAMPION_ALIASES: tuple[str, ...] = ("champion", "production")
-
-#: The ``ail.prompt.*`` tag namespace the promote step stamps provenance under.
-#: Read back here (the single source of the tag schema lives in
-#: :class:`ail.optimize.prompt_registry.PromptProvenance`; this mirrors its prefix
-#: so a rename there is a one-line change rather than a duplicated literal).
-_TAG_PREFIX = "ail.prompt"
+# The provenance tag prefix (``ail.prompt.*``) and the champion alias names are owned
+# by :mod:`ail.optimize.prompt_registry` (imported above): the promote step writes the
+# tags / sets the alias under those names, and this module reads them back under the
+# same names — a single source of truth, not a duplicated literal.
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +168,7 @@ class LineageRegistryClient(Protocol):
 
 def _tag(tags: dict[str, str], field: str) -> str | None:
     """Read one ``ail.prompt.<field>`` tag (``None`` when absent)."""
-    return tags.get(f"{_TAG_PREFIX}.{field}")
+    return tags.get(f"{PROMPT_TAG_PREFIX}.{field}")
 
 
 def _bool_tag(tags: dict[str, str], field: str) -> bool | None:

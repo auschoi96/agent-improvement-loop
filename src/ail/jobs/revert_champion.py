@@ -32,13 +32,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ail.optimize.prompt_registry import (
+    CHAMPION_ALIASES,
     DEFAULT_CATALOG,
     DEFAULT_PROMPT_NAME,
     DEFAULT_SCHEMA,
     resolve_prompt_name,
 )
 from ail.publish_lineage import (
-    CHAMPION_ALIASES,
     LineageRegistryClient,
     new_lineage_client,
 )
