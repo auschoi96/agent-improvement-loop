@@ -1,0 +1,77 @@
+{
+  "schema_version": "l3.halo/v2",
+  "rubric_id": "ail.l3.five-guidelines/v2",
+  "cohort_name": "claude_code",
+  "location": "660599403165942",
+  "tag_filter": "ail.agent=claude_code",
+  "judge_model": "databricks-gpt-5-mini",
+  "guideline_ids": ["g1", "g2", "g3", "g4", "g5"],
+  "n_selected": 12,
+  "n_reviewed": 11,
+  "n_failed": 1,
+  "outcomes": [],
+  "ranked_assets": [
+    {
+      "asset_type": "skill",
+      "title": "Cache and reuse file reads instead of re-reading",
+      "rank": 1,
+      "n_traces": 9,
+      "occurrences": 14,
+      "trace_ids": ["tr-1", "tr-2", "tr-3", "tr-4", "tr-5", "tr-6", "tr-7", "tr-8", "tr-9"],
+      "expected_benefits": ["~30% fewer input tokens on long sessions"],
+      "rationales": ["Agents re-read the same files and re-embed full file contents across LLM calls."],
+      "evidence_span_ids": ["5b97e7bef91a8119", "88fdc11dd1b38dcf"]
+    },
+    {
+      "asset_type": "metric_view",
+      "title": "Token efficiency and tool-call redundancy metric view",
+      "rank": 2,
+      "n_traces": 7,
+      "occurrences": 9,
+      "trace_ids": ["tr-1", "tr-2", "tr-3", "tr-5", "tr-8", "tr-10", "tr-11"],
+      "expected_benefits": [
+        "Track redundancy rate and tokens-per-task to quantify avoidable spend and cost over time."
+      ],
+      "rationales": [
+        "Repeated tool calls and re-read files inflate tokens; a governed metric view over the L0 tables would make the redundant tool-call rate and tokens-per-task visible per model.",
+        "Surface tool-call volume and estimated cost so regressions in token efficiency are caught early."
+      ],
+      "evidence_span_ids": ["64c05976a3ad7102", "7252e3fe2a8de43b", "0a67c3da1b54f368"]
+    },
+    {
+      "asset_type": "metric_view",
+      "title": "Cache token churn dashboard metric",
+      "rank": 3,
+      "n_traces": 3,
+      "occurrences": 3,
+      "trace_ids": ["tr-1", "tr-2", "tr-8"],
+      "expected_benefits": ["Spot ephemeral cache re-creation churn driving avoidable input tokens."],
+      "rationales": ["Large cache_creation/cache_read churn across iterations indicates repeated re-ingestion of context."],
+      "evidence_span_ids": ["5b97e7bef91a8119"]
+    },
+    {
+      "asset_type": "prompt_change",
+      "title": "Instruct the agent to send diffs, not whole files",
+      "rank": 4,
+      "n_traces": 4,
+      "occurrences": 5,
+      "trace_ids": ["tr-1", "tr-3", "tr-6", "tr-9"],
+      "expected_benefits": ["Lower input tokens per edit"],
+      "rationales": ["The agent re-embeds full file contents instead of concise diffs."],
+      "evidence_span_ids": ["88fdc11dd1b38dcf"]
+    },
+    {
+      "asset_type": "tool",
+      "title": "A grep/summarize helper tool",
+      "rank": 5,
+      "n_traces": 2,
+      "occurrences": 2,
+      "trace_ids": ["tr-4", "tr-7"],
+      "expected_benefits": ["Avoid full-file reads when only a span is needed"],
+      "rationales": ["Repeated full reads where a targeted search would do."],
+      "evidence_span_ids": []
+    }
+  ],
+  "generated_at": "2026-06-29T20:00:00+00:00",
+  "notes": ["1 trace(s) recorded as review_failed (skipped, not a pass)"]
+}
