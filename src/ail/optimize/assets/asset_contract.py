@@ -17,6 +17,7 @@ reason** rather than fabricated.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,24 @@ __all__ = [
     "DroppedMeasure",
     "GeneratedAsset",
     "GeneratedMetricView",
+    "strip_dollar_quote",
 ]
+
+#: A run of two-or-more ``$`` — the token that closes a SQL ``$$``-quoted block.
+_DOLLAR_QUOTE_RUN = re.compile(r"\${2,}")
+
+
+def strip_dollar_quote(text: str) -> str:
+    """Collapse any ``$$`` run to a single ``$`` so it cannot close a dollar-quote.
+
+    The metric-view DDL embeds the YAML body in a ``CREATE ... AS $$ ... $$``
+    dollar-quoted block. Free-text that lands inside it (a ``comment`` derived from
+    an L3/RLM *recommendation title* — untrusted LLM output) could contain ``$$``
+    (e.g. "Cut $$ waste") and prematurely terminate the quote, emitting broken SQL.
+    Collapsing every ``$$+`` run to one ``$`` removes the delimiter while keeping a
+    harmless single ``$``; it is idempotent and generalises to ``$$$`` etc.
+    """
+    return _DOLLAR_QUOTE_RUN.sub("$", text)
 
 
 class _Contract(BaseModel):
@@ -102,13 +120,20 @@ class MetricViewSpec(_Contract):
         )
 
     def to_create_sql(self) -> str:
-        """The full ``CREATE OR REPLACE VIEW ... WITH METRICS LANGUAGE YAML`` DDL."""
+        """The full ``CREATE OR REPLACE VIEW ... WITH METRICS LANGUAGE YAML`` DDL.
+
+        The rendered YAML body is run through :func:`strip_dollar_quote` so no
+        ``$$`` it may contain (e.g. from a recommendation-derived ``comment``) can
+        prematurely close the ``$$``-quoted block — a final safety net independent
+        of how the spec was constructed.
+        """
+        body = strip_dollar_quote(self.to_yaml().rstrip())
         return (
             f"CREATE OR REPLACE VIEW {self.qualified_name_sql}\n"
             "WITH METRICS\n"
             "LANGUAGE YAML\n"
             "AS $$\n"
-            f"{self.to_yaml().rstrip()}\n"
+            f"{body}\n"
             "$$"
         )
 

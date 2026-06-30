@@ -44,6 +44,7 @@ from ail.optimize.assets.asset_contract import (
     MetricViewDimension,
     MetricViewMeasure,
     MetricViewSpec,
+    strip_dollar_quote,
 )
 from ail.optimize.assets.base import AssetGenerator
 from ail.optimize.assets.l0_contract import (
@@ -280,8 +281,9 @@ def validate_spec(spec: MetricViewSpec, contract: L0ColumnContract = L0_CONTRACT
     Checks (all static — no Databricks call): a supported YAML version; a
     3-level ``source`` that names a real L0 table; at least one dimension and one
     measure with unique names; every measure carries an aggregate and every
-    dimension does not; **every column referenced by any expression exists in the
-    L0 contract** (the fabrication gate); and the rendered YAML round-trips.
+    dimension/filter does not; **every column referenced by any expression — a
+    measure, a dimension, or the global filter — exists in the L0 contract** (the
+    fabrication gate); and the rendered YAML round-trips.
     """
     problems: list[str] = []
 
@@ -325,6 +327,17 @@ def validate_spec(spec: MetricViewSpec, contract: L0ColumnContract = L0_CONTRACT
                 problems.append(
                     f"dimension {d.name!r} references unknown column(s) {sorted(bad)} "
                     f"not in {table.name}"
+                )
+        # The global filter is a WHERE clause: no aggregate, and (like measures /
+        # dimensions) every column it names must be in the L0 allow-list — so a
+        # filter cannot smuggle a fabricated column past the guard.
+        if spec.filter:
+            if _AGG_FUNCS & _expr_tokens(spec.filter):
+                problems.append("filter must not use an aggregate function")
+            bad = _referenced_columns(spec.filter) - valid
+            if bad:
+                problems.append(
+                    f"filter references unknown column(s) {sorted(bad)} not in {table.name}"
                 )
 
     try:
@@ -454,9 +467,12 @@ def generate_metric_view(
     ]
 
     view_name = full_name or f"{table.catalog}.{table.schema}.{_slug(asset.title)}"
+    # asset.title is free-text LLM output; sanitize the ``$$`` run before it is
+    # embedded in the dollar-quoted DDL so a title like "Cut $$ waste" cannot
+    # break the generated SQL (also keeps the stored comment / YAML / JSON clean).
     comment = (
         f"Auto-generated (Stage 6) from L3/RLM recommendation rank {asset.rank}"
-        f" (recurs across {asset.n_traces} trace(s)): {asset.title}."
+        f" (recurs across {asset.n_traces} trace(s)): {strip_dollar_quote(asset.title)}."
         f" Token-efficiency / tool-call-redundancy metrics over {table.name}."
     )
     spec = MetricViewSpec(

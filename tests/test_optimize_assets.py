@@ -261,3 +261,70 @@ class TestSpecValidation:
         with pytest.raises(SpecValidationError) as exc:
             validate_spec(spec)
         assert any("not a known L0 table" in p for p in exc.value.problems)
+
+    def test_filter_referencing_unknown_column_is_rejected(self) -> None:
+        # A global filter is also column-checked against the L0 allow-list, so a
+        # filter cannot smuggle a fabricated column past the guard.
+        spec = MetricViewSpec(
+            full_name="austin_choi_omni_agent_catalog.agent_improvement_loop.mv_filt",
+            source=L0_CONTRACT.get_table(SESSION_TABLE).fqn,  # type: ignore[union-attr]
+            filter="ghost_column > 0 AND status = 'OK'",
+            dimensions=[MetricViewDimension(name="Model", expr="model")],
+            measures=[MetricViewMeasure(name="Cnt", expr="COUNT(1)")],
+        )
+        with pytest.raises(SpecValidationError) as exc:
+            validate_spec(spec)
+        assert any("filter" in p and "ghost_column" in p for p in exc.value.problems)
+
+    def test_filter_referencing_real_columns_is_accepted(self) -> None:
+        # A filter over real columns (with literals/operators) passes — the check
+        # is column-membership, not a blanket ban on filters.
+        spec = MetricViewSpec(
+            full_name="austin_choi_omni_agent_catalog.agent_improvement_loop.mv_filt_ok",
+            source=L0_CONTRACT.get_table(SESSION_TABLE).fqn,  # type: ignore[union-attr]
+            filter="status = 'OK' AND total_tokens > 1000",
+            dimensions=[MetricViewDimension(name="Model", expr="model")],
+            measures=[MetricViewMeasure(name="Cnt", expr="COUNT(1)")],
+        )
+        validate_spec(spec)  # does not raise
+
+
+# --- SQL-injection / dollar-quote safety (untrusted LLM title) -------------
+
+
+class TestDollarQuoteSafety:
+    def test_title_with_dollar_dollar_produces_valid_sql(self) -> None:
+        # asset.title is free-text LLM output; a literal "$$" must not break out of
+        # the CREATE ... AS $$ ... $$ dollar-quoted block.
+        rec = _rec(
+            "metric_view",
+            title="Cut $$ waste tracking view",
+            rationales=["track tokens and redundancy"],
+        )
+        gen = generate_metric_view(rec)
+        sql = gen.spec.to_create_sql()
+
+        # Exactly two "$$" sequences remain: the opening and closing delimiters,
+        # i.e. none survive inside the body.
+        assert sql.count("$$") == 2
+        assert sql.startswith("CREATE OR REPLACE VIEW ")
+        assert "\nAS $$\n" in sql and sql.endswith("\n$$")
+
+        # The body between the delimiters is free of any "$$".
+        body = sql.split("\nAS $$\n", 1)[1].rsplit("\n$$", 1)[0]
+        assert "$$" not in body
+        # The comment kept the recommendation, just with the "$$" run collapsed.
+        assert "Cut $ waste tracking view" in body
+
+    def test_to_create_sql_sanitizes_manually_built_spec(self) -> None:
+        # The render boundary is defensive even for a hand-built spec whose comment
+        # was never run through the generator's source-level sanitize.
+        spec = MetricViewSpec(
+            full_name="austin_choi_omni_agent_catalog.agent_improvement_loop.mv_dq",
+            source=L0_CONTRACT.get_table(SESSION_TABLE).fqn,  # type: ignore[union-attr]
+            comment="spend $$ here $$$ now",
+            dimensions=[MetricViewDimension(name="Model", expr="model")],
+            measures=[MetricViewMeasure(name="Cnt", expr="COUNT(1)")],
+        )
+        sql = spec.to_create_sql()
+        assert sql.count("$$") == 2
