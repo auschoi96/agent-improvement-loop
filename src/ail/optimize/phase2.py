@@ -16,6 +16,19 @@ consumes, (2) turns a caller-supplied verification command into the L1
 :class:`~ail.compare.ProgrammaticSignal` the harness gates on, and (3) shapes the
 output artifact.
 
+**Per-arm isolation for real, file-mutating tasks.** A task with a live fixture
+(``eval/phase2_fixtures/<task_id>/``; see :mod:`ail.optimize.fixtures`) is run in
+two **separate, freshly-seeded** workspaces — one per arm — so the candidate's
+edits never land on top of the baseline's (no cross-arm contamination), and each
+arm is verified *in its own workspace* against the **restored pristine**
+``verify/`` files (so a test the agent edited or deleted cannot fake a pass). The
+guardrail logic is unchanged: the two per-arm L1 signals feed the same
+:func:`~ail.compare.compare_candidate` programmatic guardrail. A task with **no**
+fixture falls back to the legacy arm-blind path (sound only for mock / trace-only
+tasks). All of this flows through :func:`compare_candidate` /
+:func:`run_phase2_comparison` — the unchanged seam — via
+:class:`~ail.compare.ArmWorkspaces`.
+
 **Fail-closed, everywhere.** Every path that means "did not run / errored / no
 data" maps to ``BLOCK`` and is never counted as a token win:
 
@@ -32,17 +45,21 @@ data" maps to ``BLOCK`` and is never counted as a token win:
   so a blocked task's token delta is never aggregated into the headline.
 
 This module performs **no** network I/O and runs no live agent: the live, costly
-run is driven by the CLI against a real workspace. Unit tests drive it with a
-mocked adapter and recorded L1 signals.
+run is driven by the CLI against a real workspace. It does do **local** filesystem
+I/O for a fixture-backed task — copying ``seed/`` into per-arm temp workspaces and
+restoring ``verify/`` — and tears those workspaces down after each task (even on
+error). Unit tests drive it with a mocked adapter and recorded L1 signals.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -50,6 +67,8 @@ from ail.compare import (
     EXECUTION_GUARDRAIL,
     NO_LLM_JUDGE,
     PROGRAMMATIC_GUARDRAIL,
+    ArmVerifier,
+    ArmWorkspaces,
     ComparisonConfig,
     ComparisonResult,
     GuardrailCheck,
@@ -60,6 +79,12 @@ from ail.compare import (
 )
 from ail.groundtruth.schema import GroundTruthCase, Source, SourceKind, TaskInput
 from ail.ingest.base import AgentAdapter, AgentRunResult
+from ail.optimize.fixtures import (
+    TaskFixture,
+    isolated_arm_workspaces,
+    load_fixture,
+    restore_verify,
+)
 from ail.optimize.lever import BASELINE, CANDIDATE, LeverConfig
 from ail.task_suite.schema import Task, TaskSuite
 
@@ -135,14 +160,52 @@ class VerifySpec:
     timeout_seconds: int = 600
 
 
-def make_command_check(spec: VerifySpec) -> ProgrammaticCheck:
-    """Build an L1 :data:`~ail.compare.ProgrammaticCheck` from a :class:`VerifySpec`.
+def _run_command_signal(spec: VerifySpec, *, cwd: str | None) -> ProgrammaticSignal:
+    """Run ``spec.command`` in ``cwd`` and map the outcome to a :class:`ProgrammaticSignal`.
 
-    The returned check runs ``spec.command`` (in ``spec.cwd``) and reports
-    ``passed = (exit code == 0)``. Crucially it **fails closed on a no-verdict**:
-    if the command cannot be launched, times out, or crashes, the signal is marked
+    The shared verification core for both the arm-blind
+    :func:`make_command_check` (``cwd = spec.cwd``) and the arm-aware verifier
+    :func:`_make_arm_verifier` (``cwd`` = the arm's workspace). Reports
+    ``passed = (exit code == 0)`` and **fails closed on a no-verdict**: a command
+    that cannot launch, times out, or crashes is marked
     :attr:`~ail.compare.ProgrammaticSignal.errored` so the programmatic guardrail
     blocks rather than mistaking an un-runnable verifier for "no regression".
+    """
+    try:
+        proc = subprocess.run(
+            spec.command,
+            cwd=cwd,
+            shell=spec.shell,
+            capture_output=True,
+            text=True,
+            timeout=spec.timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ProgrammaticSignal(
+            name=spec.name,
+            passed=False,
+            details=f"verification could not run: {exc}",
+            errored=True,
+        )
+    passed = proc.returncode == 0
+    tail = (proc.stderr or proc.stdout or "").strip()
+    details = f"exit={proc.returncode}"
+    if tail and not passed:
+        details += f"; {tail[-300:]}"
+    return ProgrammaticSignal(name=spec.name, passed=passed, details=details, errored=False)
+
+
+def make_command_check(spec: VerifySpec) -> ProgrammaticCheck:
+    """Build an **arm-blind** L1 :data:`~ail.compare.ProgrammaticCheck` from a :class:`VerifySpec`.
+
+    The returned check runs ``spec.command`` (in the fixed ``spec.cwd``) and
+    reports ``passed = (exit code == 0)``, failing closed on a no-verdict (see
+    :func:`_run_command_signal`). It is **arm-blind** — it ignores which arm
+    produced the workspace state — so it is only sound for a non-file-mutating
+    (mock / trace-only) task. For a file-mutating task use the arm-aware verifier
+    (:func:`_make_arm_verifier`) via :class:`~ail.compare.ArmWorkspaces`, which
+    runs the check in *each arm's own* workspace.
 
     The signal is independent of the agent run's own success (the execution
     guardrail handles a crashed run); the verification reflects the *task's*
@@ -150,31 +213,29 @@ def make_command_check(spec: VerifySpec) -> ProgrammaticCheck:
     """
 
     def check(_result: AgentRunResult) -> ProgrammaticSignal:
-        try:
-            proc = subprocess.run(
-                spec.command,
-                cwd=spec.cwd,
-                shell=spec.shell,
-                capture_output=True,
-                text=True,
-                timeout=spec.timeout_seconds,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return ProgrammaticSignal(
-                name=spec.name,
-                passed=False,
-                details=f"verification could not run: {exc}",
-                errored=True,
-            )
-        passed = proc.returncode == 0
-        tail = (proc.stderr or proc.stdout or "").strip()
-        details = f"exit={proc.returncode}"
-        if tail and not passed:
-            details += f"; {tail[-300:]}"
-        return ProgrammaticSignal(name=spec.name, passed=passed, details=details, errored=False)
+        return _run_command_signal(spec, cwd=spec.cwd)
 
     return check
+
+
+def _make_arm_verifier(fixture: TaskFixture, spec: VerifySpec) -> ArmVerifier:
+    """Build an **arm-aware**, tamper-proof verifier for a fixture-backed task.
+
+    Returns a callable ``(arm_cwd, result) -> ProgrammaticSignal`` the harness
+    invokes once per arm, in that arm's workspace. It first **restores** the
+    fixture's pristine ``verify/`` files into ``arm_cwd`` — overwriting any agent
+    edits, so a deleted or rewritten test cannot fake a pass
+    (:func:`~ail.optimize.fixtures.restore_verify`) — and then runs
+    ``spec.command`` with ``cwd = arm_cwd``. ``spec.cwd`` is deliberately ignored:
+    the per-arm workspace is the cwd, set by the harness, not a fixed path in the
+    run plan.
+    """
+
+    def verify(arm_cwd: str, _result: AgentRunResult) -> ProgrammaticSignal:
+        restore_verify(fixture.verify_dir, Path(arm_cwd))
+        return _run_command_signal(spec, cwd=arm_cwd)
+
+    return verify
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +426,42 @@ def _errored_outcome(
 # ---------------------------------------------------------------------------
 
 
+def _compare_isolated(
+    *,
+    task: Task,
+    adapter: AgentAdapter,
+    candidate: LeverConfig,
+    fixture: TaskFixture,
+    spec: VerifySpec | None,
+    cfg: ComparisonConfig,
+    stamp: str,
+) -> ComparisonResult:
+    """Compare one fixture-backed task with per-arm isolation + arm-aware verify.
+
+    Seeds two fresh, separate workspaces from ``fixture.seed_dir`` (so the arms
+    never contaminate each other), runs the baseline in one and the candidate in
+    the other, and — when a ``spec`` is supplied — verifies each arm in its own
+    workspace against the restored pristine ``verify/`` files. Cleanup (R5): the
+    workspaces are torn down on exit of the context manager **even if
+    ``compare_candidate`` raises**, so a crashed run never leaks a temp directory.
+    """
+    with isolated_arm_workspaces(fixture) as ws:
+        verifier = _make_arm_verifier(fixture, spec) if spec is not None else None
+        return compare_candidate(
+            case_from_task(task),
+            adapter,
+            intervention=candidate.intervention,
+            correctness_judge=NO_LLM_JUDGE,
+            workspace=ArmWorkspaces(
+                baseline_cwd=str(ws.baseline),
+                candidate_cwd=str(ws.candidate),
+                verify=verifier,
+            ),
+            config=cfg,
+            generated_at=stamp,
+        )
+
+
 def run_phase2_comparison(
     *,
     suite: TaskSuite,
@@ -377,6 +474,7 @@ def run_phase2_comparison(
     profile: str | None = None,
     warehouse_id: str | None = None,
     task_ids: Collection[str] | None = None,
+    fixtures_root: str | os.PathLike[str] | None = None,
     generated_at: str | None = None,
 ) -> Phase2Artifact:
     """Run baseline-vs-candidate across the frozen suite and emit a :class:`Phase2Artifact`.
@@ -392,11 +490,20 @@ def run_phase2_comparison(
             arm as the un-intervened task).
         verify_specs: Per-task L1 verification commands keyed by ``task_id``. A
             task with no entry has no correctness signal and fails closed (BLOCK).
+            For a **fixture-backed** task the command runs in each arm's isolated
+            workspace (``cwd`` set by the harness) against the restored pristine
+            ``verify/`` files; ``spec.cwd`` is ignored. For a task with no fixture
+            the command runs arm-blind in ``spec.cwd`` (mock / trace-only tasks).
         config: Objective metric + reduction threshold. Defaults to a strict
             ``total_tokens`` reduction with a 0% floor.
         experiment, profile, warehouse_id: Recorded on the artifact for provenance
             (the CLI does the actual workspace wiring; this function does no I/O).
         task_ids: Optional subset of task ids to run; ``None`` runs all.
+        fixtures_root: Optional root containing ``eval/phase2_fixtures`` (see
+            :func:`ail.optimize.fixtures.phase2_fixtures_root`). A task with a
+            fixture there runs each arm in its own isolated, seeded workspace with
+            tamper-proof, arm-aware verification; a task with no fixture falls back
+            to the legacy arm-blind path. ``None`` uses repo discovery.
         generated_at: ISO-8601 stamp recorded on the artifact and each comparison
             (caller-supplied so a run is reproducible/deterministic in tests).
 
@@ -425,17 +532,32 @@ def run_phase2_comparison(
     outcomes: list[TaskOutcome] = []
     for task in selected:
         spec = specs.get(task.task_id)
-        check = make_command_check(spec) if spec is not None else None
+        fixture = load_fixture(task.task_id, root=fixtures_root)
         try:
-            result = compare_candidate(
-                case_from_task(task),
-                adapter,
-                intervention=candidate.intervention,
-                correctness_judge=NO_LLM_JUDGE,
-                programmatic_check=check,
-                config=cfg,
-                generated_at=stamp,
-            )
+            if fixture is not None:
+                # Live, file-mutating task: per-arm isolated workspaces +
+                # arm-aware, tamper-proof verification (cleanup is guaranteed).
+                result = _compare_isolated(
+                    task=task,
+                    adapter=adapter,
+                    candidate=candidate,
+                    fixture=fixture,
+                    spec=spec,
+                    cfg=cfg,
+                    stamp=stamp,
+                )
+            else:
+                # Legacy arm-blind path (no fixture): mock / trace-only tasks.
+                check = make_command_check(spec) if spec is not None else None
+                result = compare_candidate(
+                    case_from_task(task),
+                    adapter,
+                    intervention=candidate.intervention,
+                    correctness_judge=NO_LLM_JUDGE,
+                    programmatic_check=check,
+                    config=cfg,
+                    generated_at=stamp,
+                )
         except Exception as exc:  # noqa: BLE001 - a single task error must not abort the run
             outcomes.append(_errored_outcome(task, exc, verification_configured=spec is not None))
             continue
