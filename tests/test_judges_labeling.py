@@ -27,10 +27,14 @@ from ail.pools import PoolOverlapError
 
 
 class _RawTrace:
-    """Minimal raw-MLflow-trace shape carrying a resolvable id (``info.trace_id``)."""
+    """Minimal raw-MLflow-trace shape: a resolvable id plus a settable assessments list.
+
+    Mirrors the surface MemAlign reads off an MLflow ``Trace``: ``info.trace_id``
+    and ``info.assessments`` (the human feedback the optimizer learns from).
+    """
 
     def __init__(self, trace_id: str) -> None:
-        self.info = type("Info", (), {"trace_id": trace_id})()
+        self.info = type("Info", (), {"trace_id": trace_id, "assessments": []})()
 
 
 class _FakeSource(TraceSource):
@@ -170,17 +174,93 @@ class TestSplitLabels:
 # ---------------------------------------------------------------------------
 
 
+def _te(trace_id: str, value: int = 3, **kw: Any) -> TraceLabel:
+    """A token_efficiency TraceLabel (the demo's graded judge) for ``trace_id``."""
+    return TraceLabel(trace_id=trace_id, name="token_efficiency", value=value, **kw)
+
+
+def _human_assessments(raw: Any, name: str) -> list[Any]:
+    """The HUMAN assessments of ``name`` on a raw trace — exactly what MemAlign reads.
+
+    Mirrors ``mlflow.genai.judges.optimizers.dspy_utils.trace_to_dspy_example``'s
+    filter: ``trace.info.assessments`` where the source is HUMAN and the name
+    matches the judge.
+    """
+    return [
+        a
+        for a in (raw.info.assessments or [])
+        if a.name == name and str(a.source.source_type) == "HUMAN"
+    ]
+
+
 class TestPoolAssembly:
     def test_to_alignment_set_uses_raw_traces(self) -> None:
         source = _FakeSource()
-        aset = to_alignment_set(source, ["t1", "t2", "t1"])  # duplicate de-duped
+        # duplicate trace de-duped to one fetch
+        aset = to_alignment_set(source, [_te("t1"), _te("t2"), _te("t1", value=4)])
         assert aset.ids == frozenset({"t1", "t2"})
         assert source.fetched == ["t1", "t2"]  # de-duped before fetch
 
     def test_to_alignment_set_skips_unfetchable(self) -> None:
         source = _FakeSource(missing=frozenset({"gone"}))
-        aset = to_alignment_set(source, ["t1", "gone"])
+        aset = to_alignment_set(source, [_te("t1"), _te("gone")])
         assert aset.ids == frozenset({"t1"})
+
+    def test_alignment_set_traces_carry_human_assessments(self) -> None:
+        # The MemAlign bug: the raw traces dropped their human assessments, so
+        # alignment failed with "No valid feedback records found". The fix attaches
+        # each label's value as a HUMAN feedback the optimizer can read back.
+        source = _FakeSource()
+        labels = [
+            _te("t1", value=2, rationale="re-read foo.py 34x for no gain"),
+            _te("t2", value=5),
+        ]
+        aset = to_alignment_set(source, labels, labeler_id="austin")
+        by_id = {raw.info.trace_id: raw for raw in aset.traces}
+
+        human = _human_assessments(by_id["t1"], "token_efficiency")
+        assert len(human) == 1
+        # The value MemAlign learns from is the human's grade...
+        assert human[0].feedback.value == 2
+        # ...with its rationale and HUMAN attribution intact.
+        assert human[0].rationale == "re-read foo.py 34x for no gain"
+        assert human[0].source.source_id == "austin"
+        assert _human_assessments(by_id["t2"], "token_efficiency")[0].feedback.value == 5
+
+    def test_alignment_set_replaces_only_same_named_human_assessment(self) -> None:
+        # Re-assembly is idempotent for the written name and leaves other
+        # assessments (a different judge, an LLM-sourced one) untouched.
+        class _Src(_FakeSource):
+            def get_trace(self, trace_id: str) -> NormalizedTrace | None:
+                from mlflow.entities import AssessmentSource, Feedback
+                from mlflow.entities.assessment_source import AssessmentSourceType
+
+                raw = _RawTrace(trace_id)
+                raw.info.assessments = [
+                    Feedback(
+                        name="token_efficiency",
+                        value=1,
+                        source=AssessmentSource(
+                            source_type=AssessmentSourceType.HUMAN, source_id="stale"
+                        ),
+                    ),
+                    Feedback(
+                        name="correctness",
+                        value="yes",
+                        source=AssessmentSource(
+                            source_type=AssessmentSourceType.HUMAN, source_id="austin"
+                        ),
+                    ),
+                ]
+                return NormalizedTrace(trace_id=trace_id, raw=raw)
+
+        aset = to_alignment_set(_Src(), [_te("t1", value=4)])
+        raw = aset.traces[0]
+        te = _human_assessments(raw, "token_efficiency")
+        assert len(te) == 1  # the stale value-1 assessment was replaced, not doubled
+        assert te[0].feedback.value == 4
+        # The unrelated correctness label is preserved.
+        assert _human_assessments(raw, "correctness")[0].feedback.value == "yes"
 
     def test_to_human_anchor_filters_by_judge_name(self) -> None:
         labels = [

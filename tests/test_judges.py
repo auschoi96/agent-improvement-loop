@@ -460,6 +460,46 @@ class TestComputeAgreement:
         assert report.cohen_kappa is None  # omitted for float-tolerance comparison
         assert report.numeric_tolerance == 0.5
 
+    def test_numeric_string_judge_value_agrees_with_numeric_human_label(self) -> None:
+        # A graded judge often returns its score as a STRING ("3") while the human
+        # gold is a number (3.0). The old string-vs-float "==" never matched, so a
+        # perfectly-agreeing judge looked fully distrusted. It must now compare
+        # numerically, honouring the tolerance.
+        report = compute_agreement(
+            [
+                ScorePair(item_id="a", judge_value="3", human_value=3.0),  # exact, tol 0
+                ScorePair(item_id="b", judge_value="4", human_value=5.0),  # |4-5|=1 > tol 0
+            ],
+            judge_name="token_efficiency",
+        )
+        assert report.items[0].agree is True
+        assert report.items[1].agree is False
+        assert report.numeric_tolerance == 0.0  # tolerance was in play (float human label)
+
+    def test_numeric_string_within_tolerance(self) -> None:
+        report = compute_agreement(
+            [
+                ScorePair(item_id="a", judge_value="4", human_value=5.0),  # |4-5|=1 <= 1
+                ScorePair(item_id="b", judge_value="2", human_value=5.0),  # |2-5|=3 > 1
+            ],
+            judge_name="token_efficiency",
+            config=AgreementConfig(numeric_tolerance=1.0, floor=0.0),
+        )
+        assert report.items[0].agree is True
+        assert report.items[1].agree is False
+        assert report.agreement_rate == 0.5
+        assert report.cohen_kappa is None  # tolerance used → kappa omitted
+
+    def test_non_numeric_string_still_compares_as_string(self) -> None:
+        # The numeric path must not swallow genuine categorical labels.
+        report = compute_agreement(
+            _pairs(("a", "yes", "yes"), ("b", "no", 3.0)),
+            judge_name="correctness",
+            config=AgreementConfig(floor=0.0),
+        )
+        assert report.items[0].agree is True  # "yes" == "yes"
+        assert report.items[1].agree is False  # "no" is not numeric → no false numeric match
+
     def test_errored_item_counts_as_non_agreement(self) -> None:
         report = compute_agreement(
             [
@@ -579,6 +619,89 @@ class TestScoreAnchor:
         assert bad.error is not None and "blew up" in bad.error
         assert bad.agree is False
         assert report.n_agreements == 1  # the good item still scored
+
+
+class _JudgeField:
+    """Duck-typed stand-in for an MLflow ``JudgeField`` (exposes ``.name``)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _ScoredTrace:
+    """A fake raw trace carrying the score a ``{{ trace }}`` judge would derive."""
+
+    def __init__(self, score: int) -> None:
+        self.score = score
+
+
+class FakeTraceJudge:
+    """A ``{{ trace }}``-based judge: declares a single ``trace`` input field.
+
+    Like MLflow's ``InstructionsJudge`` for a ``{{ trace }}`` rubric, it requires a
+    ``trace`` (not ``inputs``/``outputs``) and raises if scored field-based. It
+    reads its score straight off the trace, standing in for a real agentic judge.
+    """
+
+    name = "token_efficiency"
+
+    def get_input_fields(self) -> list[_JudgeField]:
+        return [_JudgeField("trace")]
+
+    def __call__(
+        self,
+        *,
+        inputs: Any = None,
+        outputs: Any = None,
+        expectations: Any = None,
+        trace: Any = None,
+        session: Any = None,
+    ) -> Any:
+        if trace is None:
+            raise RuntimeError("Must specify 'trace' - required by template variables")
+        return _Feedback(trace.score)
+
+
+class TestScoreAnchorTraceJudge:
+    def test_trace_judge_is_scored_from_its_trace(self) -> None:
+        # Regression: a {{ trace }} judge was never actually scored because
+        # score_anchor only ever passed inputs/outputs/expectations, so the judge
+        # raised "Must specify 'trace'" on every item → 0 scored → distrusted.
+        anchor = HumanAnchor.of(
+            [
+                AnchorItem(item_id="t1", human_label=4, trace=_ScoredTrace(4)),
+                AnchorItem(item_id="t2", human_label=2, trace=_ScoredTrace(5)),
+            ]
+        )
+        report = score_anchor(FakeTraceJudge(), anchor)
+        assert report.judge_name == "token_efficiency"
+        # Both items are actually SCORED (the bug left n_scored == 0).
+        assert report.n_scored == 2
+        assert all(item.error is None for item in report.items)
+        # t1 agrees (4 == 4); t2 disagrees (judge 5 vs human 2).
+        assert report.n_agreements == 1
+        assert report.agreement_rate == 0.5
+        # The regression: the judge is MEASURED, not flagged for insufficient data
+        # (the bug left every item unscored → insufficient_data → distrusted).
+        assert report.insufficient_data is False
+
+    def test_trace_judge_only_receives_the_trace_field(self) -> None:
+        # The judge declares only `trace`, so score_anchor must not pass it the
+        # field-based args (which would make a strict judge raise on unexpected
+        # input). Here the judge would mis-score if given outputs instead of trace.
+        seen: dict[str, Any] = {}
+
+        class _StrictTraceJudge(FakeTraceJudge):
+            def __call__(self, **kwargs: Any) -> Any:
+                seen.update(kwargs)
+                return super().__call__(**kwargs)
+
+        anchor = HumanAnchor.of(
+            [AnchorItem(item_id="t1", human_label=3, outputs="ignored", trace=_ScoredTrace(3))]
+        )
+        report = score_anchor(_StrictTraceJudge(), anchor)
+        assert set(seen) == {"trace"}  # only the declared field was passed
+        assert report.n_agreements == 1
 
 
 # ---------------------------------------------------------------------------

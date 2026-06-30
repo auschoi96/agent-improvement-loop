@@ -179,9 +179,12 @@ log_agreement(report)   # best-effort MLflow logging (metrics + JSON artifact)
   human_value, error)` pairs.
 - `score_anchor(judge, anchor, *, config=None, generated_at=None) -> AgreementReport`
   — runs the judge over the anchor, coerces each result (`coerce_score`), pairs
-  it with the human label, and delegates to `compute_agreement`. A per-item judge
-  exception is captured (recorded as an `error`, counted as a non-agreement) so
-  one bad item never aborts the measurement.
+  it with the human label, and delegates to `compute_agreement`. It calls the
+  judge with **only the input fields it declares** (`Judge.get_input_fields`): a
+  field-based judge gets `inputs`/`outputs`/`expectations`, a `{{ trace }}`-based
+  judge gets the item's `trace`. A per-item judge exception is captured (recorded
+  as an `error`, counted as a non-agreement) so one bad item never aborts the
+  measurement.
 - `AgreementConfig(floor=0.7, numeric_tolerance=0.0, case_insensitive=True, min_samples=1)`.
   `case_insensitive` is applied **uniformly** — the agreement decision *and* the
   Cohen's-kappa discretization / label space honour it, so kappa never folds
@@ -269,12 +272,17 @@ alignment_set, anchor = assemble_pools(source, labels, judge_name="token_efficie
   partitions labels into `(alignment_labels, anchor_labels)` **by trace** (every
   label of a trace lands in one pool), so a trace can never be in both the
   Alignment Set and the Human Anchor.
-- `to_alignment_set(source, trace_ids) -> AlignmentSet` — fetches the **raw**
-  MLflow traces (carrying the human assessments MemAlign reads) via the ingest
-  seam.
-- `to_human_anchor(labels, *, name=None) -> HumanAnchor` — builds anchor items
-  (one per trace for a given judge `name`) carrying the human label + the
-  `inputs`/`outputs`/`expectations` to re-run the judge.
+- `to_alignment_set(source, labels, *, labeler_id="expert") -> AlignmentSet` —
+  fetches the **raw** MLflow traces via the ingest seam and **attaches each
+  label's value** onto the trace as a `HUMAN` `Feedback` (`trace.info.assessments`),
+  because MemAlign reads its feedback there and the re-fetched raw trace does not
+  reliably carry it (alignment otherwise fails with *"No valid feedback records
+  found"*).
+- `to_human_anchor(labels, *, name=None, source=None) -> HumanAnchor` — builds
+  anchor items (one per trace for a given judge `name`) carrying the human label +
+  the `inputs`/`outputs`/`expectations` to re-run the judge. Pass `source` to also
+  carry each item's **raw trace** (without the gold label), so a `{{ trace }}`-based
+  judge can be scored on the anchor.
 - `assemble_pools(source, labels, *, judge_name=None, anchor_fraction=0.3, seed=0) -> (AlignmentSet, HumanAnchor)`
   — does the split, builds both pools, and calls `assert_pools_disjoint(...)` to
   **prove** no trace id leaked across the `Pool`-keyed wall before returning.
