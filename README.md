@@ -51,6 +51,16 @@ per-cohort L0 metrics (`ail.metrics.compute_cohort_l0`) are strictly **additive*
 over the existing read/metrics surfaces. Documented in
 [`docs/COHORTS.md`](docs/COHORTS.md).
 
+## Codex tracing (onboard a second agent)
+
+`ail.ingest.adapters.codex` onboards the codex-native CLI harness alongside
+Claude Code: `enable_codex_tracing` configures MLflow's native `@mlflow/codex`
+notify hook, and `normalize_codex_rollout` / `CodexAdapter` capture Codex
+rollout transcripts as `NormalizedTrace`s tagged `ail.agent=codex`. Both are
+additive (import-only over the shared ingest seam). Setup, the Omnigent/GPT‑5
+worker specifics, live-verify steps, and a Pi-feasibility note are documented in
+[`docs/CONNECT_CODEX.md`](docs/CONNECT_CODEX.md).
+
 ## Scheduled refresh (living dashboard)
 
 `ail.publish` (Tier A) computes the L0 contract via `ail.metrics` and writes the
