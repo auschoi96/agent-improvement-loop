@@ -49,13 +49,16 @@ export function AgentSwitcher({ value, onChange }: { value: string | null; onCha
           if (next) onChange(next);
         }}
       >
-        <SelectTrigger className="w-64">
-          <SelectValue placeholder="Select an agent" />
+        <SelectTrigger className="w-72">
+          <SelectValue placeholder="Select an agent">{selected.agent_name}</SelectValue>
         </SelectTrigger>
         <SelectContent>
           {data.map((a) => (
             <SelectItem key={a.agent_name} value={a.agent_name}>
-              {a.agent_name}
+              <span className="flex flex-col">
+                <span>{a.agent_name}</span>
+                <span className="text-xs text-muted-foreground">experiment {a.experiment_id}</span>
+              </span>
             </SelectItem>
           ))}
         </SelectContent>
