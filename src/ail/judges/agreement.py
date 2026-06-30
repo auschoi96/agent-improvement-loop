@@ -129,17 +129,43 @@ def coerce_score(value: Any) -> ScoreValue | None:
     return str(value)
 
 
+def _as_number(value: ScoreValue) -> float | None:
+    """Numeric value of an ``int``/``float`` or a numeric-looking ``str``; else ``None``.
+
+    A judge backed by a graded rubric often returns its score as a **string**
+    (e.g. ``"3"``) even though the human gold label is a number (``5.0``). Reducing
+    both sides through this lets such a judge be compared numerically against a
+    numeric human label instead of failing a string-vs-number ``==`` it can never
+    pass. ``bool`` is excluded on purpose: it is an ``int`` subclass, but a yes/no
+    guardrail must match exactly, never numerically.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _values_agree(
     judge_value: ScoreValue, human_value: ScoreValue, config: AgreementConfig
 ) -> bool:
     """Whether one judge value agrees with one human label under ``config``."""
-    # Float labels: agree within tolerance (only when neither is a bool, since
-    # bool is an int subclass and a yes/no guardrail must match exactly).
-    numeric = (isinstance(judge_value, (int, float)) and not isinstance(judge_value, bool)) and (
-        isinstance(human_value, (int, float)) and not isinstance(human_value, bool)
-    )
-    if numeric and (isinstance(judge_value, float) or isinstance(human_value, float)):
-        return abs(float(judge_value) - float(human_value)) <= config.numeric_tolerance
+    # Numeric comparison: both sides reduce to numbers (a numeric-looking judge
+    # string like "3" compares against a numeric human label like 5.0). Apply the
+    # tolerance when either side is a *float* (a graded/continuous label); int-vs-int
+    # requires exact equality, matching the documented "tolerance ignored for
+    # int/bool labels" rule.
+    judge_num = _as_number(judge_value)
+    human_num = _as_number(human_value)
+    if judge_num is not None and human_num is not None:
+        if isinstance(judge_value, float) or isinstance(human_value, float):
+            return abs(judge_num - human_num) <= config.numeric_tolerance
+        return judge_num == human_num
     if config.case_insensitive and isinstance(judge_value, str) and isinstance(human_value, str):
         return judge_value.strip().casefold() == human_value.strip().casefold()
     return judge_value == human_value
@@ -304,10 +330,13 @@ def compute_agreement(
 
 
 def _is_float_compare(a: ScoreValue, b: ScoreValue) -> bool:
-    numeric = (isinstance(a, (int, float)) and not isinstance(a, bool)) and (
-        isinstance(b, (int, float)) and not isinstance(b, bool)
-    )
-    return numeric and (isinstance(a, float) or isinstance(b, float))
+    # Mirrors the tolerance branch of ``_values_agree``: a numeric comparison
+    # (both sides reduce to numbers, including numeric-looking strings) where the
+    # tolerance applies because at least one side is a float. Used to flag
+    # ``used_tolerance`` and omit Cohen's kappa (defined for categorical agreement).
+    if _as_number(a) is None or _as_number(b) is None:
+        return False
+    return isinstance(a, float) or isinstance(b, float)
 
 
 def score_anchor(
@@ -319,12 +348,19 @@ def score_anchor(
 ) -> AgreementReport:
     """Score a judge against a Human-Anchor slice and report agreement.
 
-    For each :class:`~ail.pools.AnchorItem`, calls
-    ``judge(inputs=, outputs=, expectations=)``, normalizes the result with
-    :func:`coerce_score`, pairs it with the item's ``human_label``, and delegates
-    to :func:`compute_agreement`. A judge call that raises is captured per-item
-    (recorded as an error, counted as a non-agreement) so one bad item never
-    aborts the whole measurement.
+    For each :class:`~ail.pools.AnchorItem`, calls the judge with **only the input
+    fields it declares** (:meth:`Judge.get_input_fields`), normalizes the result
+    with :func:`coerce_score`, pairs it with the item's ``human_label``, and
+    delegates to :func:`compute_agreement`. A judge call that raises is captured
+    per-item (recorded as an error, counted as a non-agreement) so one bad item
+    never aborts the whole measurement.
+
+    Honouring the judge's declared fields is what lets a ``{{ trace }}``-based
+    judge be scored at all: such a judge requires a ``trace`` field (not
+    ``inputs``/``outputs``), so it is passed the item's
+    :attr:`~ail.pools.AnchorItem.trace`. Passing it the field-based arguments
+    instead (the old behaviour) made every trace judge raise "Must specify
+    'trace'", which read as a per-item error → no scored items → distrusted.
 
     This is the only model-touching function in the module. Offline tests pass a
     mock judge; a live measurement is gated behind ``@pytest.mark.live``.
@@ -338,13 +374,50 @@ def score_anchor(
     )
 
 
+#: The field-based call used when a judge does not declare its input fields (a
+#: duck-typed mock, or any judge without ``get_input_fields``): the historical
+#: ``inputs``/``outputs``/``expectations`` signature.
+_FIELD_BASED_INPUTS = ("inputs", "outputs", "expectations")
+
+
+def _required_input_field_names(judge: Judge) -> set[str] | None:
+    """The judge's declared input-field names, or ``None`` if it declares none.
+
+    Reads :meth:`Judge.get_input_fields` (each :class:`JudgeField` exposes a
+    ``.name``; bare strings are tolerated). ``None`` means "this object does not
+    declare its inputs" — distinct from an empty set — so the caller falls back to
+    the field-based signature rather than calling the judge with no arguments.
+    """
+    get_fields = getattr(judge, "get_input_fields", None)
+    if not callable(get_fields):
+        return None
+    try:
+        fields = get_fields()
+    except Exception:  # noqa: BLE001 - a judge that cannot report fields → field-based fallback
+        return None
+    if not fields:
+        return None
+    return {str(getattr(field, "name", field)) for field in fields}
+
+
+def _judge_call_kwargs(judge: Judge, item: AnchorItem) -> dict[str, Any]:
+    """Build the judge ``__call__`` kwargs from the fields the judge declares."""
+    required = _required_input_field_names(judge)
+    if required is None:
+        # Unknown interface: preserve the field-based call (mocks, older judges).
+        return {name: getattr(item, name) for name in _FIELD_BASED_INPUTS}
+    kwargs: dict[str, Any] = {}
+    if "trace" in required:
+        kwargs["trace"] = item.trace
+    for name in _FIELD_BASED_INPUTS:
+        if name in required:
+            kwargs[name] = getattr(item, name)
+    return kwargs
+
+
 def _score_one(judge: Judge, item: AnchorItem) -> ScorePair:
     try:
-        result = judge(
-            inputs=item.inputs,
-            outputs=item.outputs,
-            expectations=item.expectations,
-        )
+        result = judge(**_judge_call_kwargs(judge, item))
         judge_value = coerce_score(result)
     except Exception as exc:  # noqa: BLE001 - one bad item must not abort the slice
         return ScorePair(item_id=item.item_id, human_value=item.human_label, error=str(exc))

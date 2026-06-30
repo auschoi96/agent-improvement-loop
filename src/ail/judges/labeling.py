@@ -67,6 +67,7 @@ Workflow (label ~30–50 traces, then align + audit)::
 
 from __future__ import annotations
 
+import copy
 import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -219,25 +220,93 @@ def split_labels(
     return alignment_labels, anchor_labels
 
 
-def to_alignment_set(source: TraceSource, trace_ids: Sequence[str]) -> AlignmentSet:
-    """Fetch the raw MLflow traces for ``trace_ids`` and wrap them as an AlignmentSet.
+def to_alignment_set(
+    source: TraceSource,
+    labels: Iterable[TraceLabel],
+    *,
+    labeler_id: str = DEFAULT_LABELER_ID,
+) -> AlignmentSet:
+    """Fetch the raw MLflow traces for ``labels`` and wrap them as an AlignmentSet.
 
     Reuses the ingest seam (:class:`~ail.ingest.base.TraceSource`) to read each
-    trace, then takes the **raw** MLflow ``Trace`` object
-    (:attr:`ail.ingest.base.NormalizedTrace.raw`) because MemAlign's
-    ``judge.align(traces=...)`` consumes MLflow traces (carrying their human
-    assessments), not the normalized projection. Duplicate ids are de-duped;
-    traces that cannot be fetched (or carry no raw object) are skipped.
+    labeled trace and takes the **raw** MLflow ``Trace`` object
+    (:attr:`ail.ingest.base.NormalizedTrace.raw`), because MemAlign's
+    ``judge.align(traces=...)`` consumes MLflow traces, not the normalized
+    projection. Crucially, MemAlign learns *only* from a trace's **human
+    assessments** — it reads ``trace.info.assessments`` for ``HUMAN``-sourced
+    feedback whose name matches the judge — and the raw object fetched back does
+    **not** reliably carry those (the just-recorded feedback is dropped from the
+    re-read trace), so alignment fails with "No valid feedback records found".
+
+    This attaches the human assessment we already hold (in each
+    :class:`TraceLabel`) onto its raw trace's ``info.assessments`` as a ``HUMAN``
+    :class:`mlflow.entities.Feedback`, so the Alignment Set always carries the
+    feedback MemAlign reads — independent of what the backend echoes back. Labels
+    are grouped by ``trace_id`` (one fetch per trace, order preserved); a
+    pre-existing human assessment of the same name is replaced by the label's, and
+    other assessments are left untouched. Traces that cannot be fetched (or carry
+    no raw object) are skipped.
     """
+    by_trace: dict[str, list[TraceLabel]] = {}
+    for label in labels:
+        by_trace.setdefault(label.trace_id, []).append(label)
+
     raws: list[Any] = []
-    for tid in dict.fromkeys(trace_ids):  # de-dupe, preserve order
+    for tid, group in by_trace.items():  # de-duped by trace, insertion order preserved
         normalized = source.get_trace(tid)
         if normalized is not None and normalized.raw is not None:
+            _attach_human_assessments(normalized.raw, group, labeler_id=labeler_id)
             raws.append(normalized.raw)
     return AlignmentSet.of(raws)
 
 
-def to_human_anchor(labels: Iterable[TraceLabel], *, name: str | None = None) -> HumanAnchor:
+def _attach_human_assessments(raw: Any, labels: Sequence[TraceLabel], *, labeler_id: str) -> None:
+    """Attach each label's value to ``raw.info.assessments`` as a HUMAN feedback.
+
+    This is the read shape MemAlign expects (``trace.info.assessments`` filtered
+    to ``HUMAN`` source and the judge's name). A pre-existing human assessment of a
+    name we are writing is dropped first so re-assembly is idempotent; assessments
+    of other names (and non-human assessments) are preserved.
+    """
+    from mlflow.entities import AssessmentSource, Feedback
+    from mlflow.entities.assessment_source import AssessmentSourceType
+
+    info = getattr(raw, "info", None)
+    if info is None:  # no place to carry assessments; nothing we can do for this trace
+        return
+    source = AssessmentSource(source_type=AssessmentSourceType.HUMAN, source_id=labeler_id)
+    trace_id = getattr(info, "trace_id", None)
+    written_names = {label.name for label in labels}
+    feedbacks = [
+        Feedback(
+            name=label.name,
+            value=label.value,
+            rationale=label.rationale,
+            source=source,
+            trace_id=trace_id,
+        )
+        for label in labels
+    ]
+    existing = [
+        assessment
+        for assessment in (getattr(info, "assessments", None) or [])
+        if not (_is_human(assessment) and getattr(assessment, "name", None) in written_names)
+    ]
+    info.assessments = existing + feedbacks
+
+
+def _is_human(assessment: Any) -> bool:
+    """Whether an assessment is HUMAN-sourced (best-effort, by source type name)."""
+    source = getattr(assessment, "source", None)
+    return str(getattr(source, "source_type", "")) == "HUMAN"
+
+
+def to_human_anchor(
+    labels: Iterable[TraceLabel],
+    *,
+    name: str | None = None,
+    source: TraceSource | None = None,
+) -> HumanAnchor:
     """Build a Human Anchor from labels (optionally filtered to one judge ``name``).
 
     Each label becomes an :class:`~ail.pools.AnchorItem` keyed by its
@@ -246,6 +315,17 @@ def to_human_anchor(labels: Iterable[TraceLabel], *, name: str | None = None) ->
     to keep only that assessment's labels (so each trace contributes one item).
     A trace labeled twice for the same judge raises (duplicate ``item_id``), the
     same guard :class:`~ail.pools.HumanAnchor` already enforces.
+
+    When ``source`` is given, each item also carries its **raw trace**, so a
+    ``{{ trace }}``-based judge can be scored on the anchor (see
+    :func:`ail.judges.agreement.score_anchor`). That trace is **blinded** first:
+    its ``HUMAN`` assessments are stripped, so the human gold the agreement is
+    measured against (which the live trace still carries, e.g. a label added in
+    the MLflow UI) is never visible to the judge. The gold lives only on
+    :attr:`~ail.pools.AnchorItem.human_label`. This is the inverse of the
+    Alignment Set, whose traces deliberately *carry* their human assessments for
+    MemAlign to learn from — measuring agreement on a trace the judge can read the
+    answer off would be circular (``docs/ARCHITECTURE.md`` §2).
     """
     selected = [lab for lab in labels if name is None or lab.name == name]
     return HumanAnchor.of(
@@ -255,9 +335,43 @@ def to_human_anchor(labels: Iterable[TraceLabel], *, name: str | None = None) ->
             inputs=lab.inputs,
             outputs=lab.outputs,
             expectations=lab.expectations,
+            trace=_blind_anchor_trace(source, lab.trace_id) if source is not None else None,
         )
         for lab in selected
     )
+
+
+def _blind_anchor_trace(source: TraceSource, trace_id: str) -> Any:
+    """Raw MLflow trace for the anchor with its human gold stripped (``None`` if unfetchable).
+
+    Fetches the trace and removes every ``HUMAN`` assessment, so the judge that
+    scores the anchor cannot read the human label it is being graded against off
+    ``trace.info.assessments``. Non-human (LLM-judge/AI) assessments are kept.
+    """
+    normalized = source.get_trace(trace_id)
+    if normalized is None or normalized.raw is None:
+        return None
+    return _strip_human_assessments(normalized.raw)
+
+
+def _strip_human_assessments(raw: Any) -> Any:
+    """Return a copy of ``raw`` with its ``HUMAN`` assessments removed (else ``raw``).
+
+    Shallow-copies the trace and its ``info`` so the source's object is left
+    untouched, then reassigns ``info.assessments`` to the non-human subset. When
+    there is nothing human to strip, the original is returned unchanged.
+    """
+    info = getattr(raw, "info", None)
+    assessments = getattr(info, "assessments", None) if info is not None else None
+    if not assessments:
+        return raw
+    kept = [assessment for assessment in assessments if not _is_human(assessment)]
+    if len(kept) == len(assessments):
+        return raw  # nothing human to strip; avoid a needless copy
+    blinded = copy.copy(raw)
+    blinded.info = copy.copy(info)
+    blinded.info.assessments = kept
+    return blinded
 
 
 def assemble_pools(
@@ -267,23 +381,27 @@ def assemble_pools(
     judge_name: str | None = None,
     anchor_fraction: float = DEFAULT_ANCHOR_FRACTION,
     seed: int = 0,
+    labeler_id: str = DEFAULT_LABELER_ID,
 ) -> tuple[AlignmentSet, HumanAnchor]:
     """Split labels into a disjoint ``(AlignmentSet, HumanAnchor)`` and prove it.
 
     Partitions ``labels`` by trace (:func:`split_labels`), fetches the alignment
-    traces as raw MLflow traces (:func:`to_alignment_set`), builds the anchor
-    (:func:`to_human_anchor`, filtered to ``judge_name`` when given), then calls
-    :func:`~ail.pools.assert_pools_disjoint` to **prove** no trace id
+    traces as raw MLflow traces **carrying their human assessments**
+    (:func:`to_alignment_set`), builds the anchor (:func:`to_human_anchor`,
+    filtered to ``judge_name`` when given, with each item carrying its raw trace),
+    then calls :func:`~ail.pools.assert_pools_disjoint` to **prove** no trace id
     leaked across the two pools before returning — disjointness is guaranteed by
     construction and re-checked by the Pool-keyed wall.
 
     Args:
-        source: Trace source used to fetch the alignment traces.
+        source: Trace source used to fetch the alignment and anchor traces.
         labels: Human labels recorded on the slice (see :func:`record_labels`).
         judge_name: When set, the anchor keeps only this assessment's labels (a
             per-judge anchor). The Alignment Set holds all alignment-pool traces;
             each judge's ``align`` reads its own assessment name off them.
         anchor_fraction / seed: Forwarded to :func:`split_labels`.
+        labeler_id: Recorded as the ``source_id`` of the human assessments
+            attached to the Alignment Set's traces.
 
     Returns:
         ``(alignment_set, human_anchor)`` — disjoint by trace id.
@@ -291,8 +409,8 @@ def assemble_pools(
     alignment_labels, anchor_labels = split_labels(
         labels, anchor_fraction=anchor_fraction, seed=seed
     )
-    alignment_set = to_alignment_set(source, [lab.trace_id for lab in alignment_labels])
-    anchor = to_human_anchor(anchor_labels, name=judge_name)
+    alignment_set = to_alignment_set(source, alignment_labels, labeler_id=labeler_id)
+    anchor = to_human_anchor(anchor_labels, name=judge_name, source=source)
     # Prove the wall: no trace id may appear in both pools.
     assert_pools_disjoint(alignment_set=alignment_set, human_anchor=anchor)
     return alignment_set, anchor

@@ -102,6 +102,13 @@ class AnchorItem:
     meaningful). ``inputs``/``outputs``/``expectations`` are passed to a judge's
     ``__call__`` verbatim; ``human_label`` is the gold value the judge's score is
     measured against — it is **never** shown to the judge.
+
+    ``trace`` carries the raw MLflow trace so a ``{{ trace }}``-based judge (which
+    requires a ``trace`` input field, not ``inputs``/``outputs``) can be scored on
+    the anchor: :func:`ail.judges.agreement.score_anchor` passes it when the judge
+    declares it needs a trace. It is the *raw* trace only — the human gold label
+    lives in ``human_label`` and is never attached to the trace the judge sees.
+    Typed ``Any`` to keep this module import-light and producer-agnostic.
     """
 
     item_id: str
@@ -109,6 +116,7 @@ class AnchorItem:
     inputs: Any = None
     outputs: Any = None
     expectations: dict[str, Any] | None = None
+    trace: Any = None
 
 
 @dataclass(frozen=True, slots=True)
