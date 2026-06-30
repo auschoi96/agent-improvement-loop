@@ -539,9 +539,12 @@ class TestNoLLMJudge:
         execution = result.guardrail_for(EXECUTION_GUARDRAIL)
         assert execution is not None and execution.passed is False
 
-    def test_l1_failed_both_is_not_a_regression(self) -> None:
-        # Both arms fail the check (a pre-existing deficiency, not caused by the lever):
-        # not a regression, so the guardrail passes and a token drop can promote.
+    def test_l1_failed_baseline_blocks(self) -> None:
+        # A failed baseline is not a valid anchor, so promotion fails closed: the
+        # objective is "same quality for fewer tokens", and if the no-skill baseline
+        # never passed the L1 check, its token count cannot anchor the comparison and
+        # a token reduction proves nothing. Both arms failing here must BLOCK, not
+        # promote on a spurious "fails for both, no regression".
         result = compare_candidate(
             _case(),
             self._adapter(),
@@ -550,8 +553,11 @@ class TestNoLLMJudge:
             programmatic_check=lambda r: ProgrammaticSignal(name="pytest", passed=False),
         )
         l1 = result.guardrail_for(PROGRAMMATIC_GUARDRAIL)
-        assert l1 is not None and l1.passed is True and l1.regressed is False
-        assert result.recommendation is Recommendation.PROMOTE
+        assert l1 is not None and l1.passed is False and l1.regressed is False
+        assert l1.baseline_value is False
+        assert "not a valid anchor" in l1.reason
+        assert result.objective_met is True  # tokens dropped...
+        assert result.recommendation is Recommendation.BLOCK  # ...but baseline never passed
 
 
 # ---------------------------------------------------------------------------

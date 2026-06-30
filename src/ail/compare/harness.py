@@ -195,11 +195,14 @@ class ProgrammaticSignal:
     ``errored`` distinguishes "the check **ran** and reported a fail"
     (``passed=False, errored=False``) from "the check could **not** produce a
     verdict" (``errored=True`` — the verification command could not be launched,
-    timed out, or crashed). The two must not be conflated: a check that merely
-    *failed* on both baseline and candidate is not a regression (the non-regression
-    guardrail passes), but a check that produced **no verdict** is missing data and
-    fails the guardrail closed — an unmeasured guardrail never certifies a
-    promotion (see :func:`_programmatic_guardrail`).
+    timed out, or crashed). The two must not be conflated: a check that *ran* and
+    failed is real data the guardrail acts on — a **failed baseline** is not a valid
+    anchor (the objective is "same quality for fewer tokens", and a token reduction
+    against a baseline that never passed proves nothing), so it fails closed, while
+    a failed candidate against a passing baseline is a regression. A check that
+    produced **no verdict** is missing data and likewise fails the guardrail closed
+    — an unmeasured guardrail never certifies a promotion (see
+    :func:`_programmatic_guardrail`).
     """
 
     name: str
@@ -531,18 +534,25 @@ def _no_correctness_signal_guardrail() -> GuardrailCheck:
 def _programmatic_guardrail(
     baseline: ProgrammaticSignal, candidate: ProgrammaticSignal
 ) -> GuardrailCheck:
-    """Optional L1 non-regression guardrail: candidate must not break what passed.
+    """Optional L1 guardrail anchored on a PASSING baseline: fail closed otherwise.
 
-    Same non-regression semantics as correctness: a programmatic check that the
-    baseline already failed does not block (the gate guards against the
-    intervention *causing* a failure), but a check that passed at baseline and
-    fails for the candidate is a regression.
+    The objective is "same quality for fewer tokens", so the baseline's token count
+    only anchors a reduction if the baseline actually **passed** its L1 check. A
+    baseline that did not pass is not a valid anchor: a token drop measured against
+    a failed baseline proves nothing, so it fails closed (``BLOCK``) regardless of
+    the candidate — independently of whether the candidate also failed. This is the
+    same fail-closed treatment the execution guardrail applies to a failed baseline;
+    a failed baseline that *also* fails for the candidate must never read as "fails
+    for both, no regression" and certify a promotion.
 
     Fails closed first on a **no-verdict** signal: if either side's check could
     not run (:attr:`ProgrammaticSignal.errored`), there is no measurement to
     compare, so the guardrail fails regardless of the ``passed`` flags — a broken
-    or un-runnable verification must never read as "fails for both, no regression"
-    and certify a promotion.
+    or un-runnable verification is missing data, not a verdict.
+
+    With a passing baseline as the anchor, the candidate must not break what passed:
+    a check that passed at baseline and fails for the candidate is a regression and
+    ``BLOCK``s.
     """
     if baseline.errored or candidate.errored:
         problems = []
@@ -570,13 +580,30 @@ def _programmatic_guardrail(
             interim=False,
             interim_note=None,
         )
+    if not baseline.passed:
+        reason = (
+            f"L1 '{baseline.name}' did not pass at baseline; failing closed — a failed baseline "
+            "is not a valid anchor, so a token reduction against it proves nothing"
+            + (f" ({baseline.details})" if baseline.details else "")
+        )
+        return GuardrailCheck(
+            name=PROGRAMMATIC_GUARDRAIL,
+            passed=False,
+            reason=reason,
+            baseline_value=baseline.passed,
+            candidate_value=candidate.passed,
+            regressed=False,
+            judge_name=None,
+            interim=False,
+            interim_note=None,
+        )
+    # Baseline passed: it is a valid anchor. Only a candidate that breaks what
+    # passed is a regression.
     regressed = baseline.passed and not candidate.passed
     if regressed:
         reason = f"L1 '{candidate.name}' REGRESSED: passed at baseline, fails for candidate" + (
             f" ({candidate.details})" if candidate.details else ""
         )
-    elif not candidate.passed:
-        reason = f"L1 '{candidate.name}' fails for both baseline and candidate (no regression)"
     else:
         reason = f"L1 '{candidate.name}' passes for the candidate"
     return GuardrailCheck(
