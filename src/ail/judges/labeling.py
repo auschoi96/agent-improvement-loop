@@ -89,10 +89,13 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_LABELER_ID",
     "DEFAULT_ANCHOR_FRACTION",
+    "DEFAULT_LOW_GRADE_THRESHOLD",
     "TraceLabel",
+    "StratifiedAnchorSplit",
     "record_label",
     "record_labels",
     "split_labels",
+    "stratified_split_labels",
     "to_alignment_set",
     "to_human_anchor",
     "assemble_pools",
@@ -107,6 +110,14 @@ DEFAULT_LABELER_ID = "expert"
 #: a larger anchor measures agreement more tightly but leaves fewer traces to
 #: align from. ~0.3 keeps a useful audit slice while leaving the majority to align.
 DEFAULT_ANCHOR_FRACTION = 0.3
+
+#: Human grades at or below this are treated as *discriminating low* examples on
+#: the 1–5 graded scale (1–2 = wasteful). :func:`stratified_split_labels` reports
+#: whether the held-out anchor it built includes any such example, because an
+#: anchor that is all high grades cannot detect a judge biased toward high
+#: scores — the exact blind spot that hid the overfit→rollback dynamic. A knob,
+#: not a constant: a judge on a different scale tunes where "low" begins.
+DEFAULT_LOW_GRADE_THRESHOLD = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +229,206 @@ def split_labels(
     ]
     anchor_labels = [lab for tid in anchor_ids for lab in by_trace[tid]]
     return alignment_labels, anchor_labels
+
+
+@dataclass(frozen=True, slots=True)
+class StratifiedAnchorSplit:
+    """A grade-stratified ``(alignment, anchor)`` partition plus what spread it achieved.
+
+    :func:`stratified_split_labels` returns this so a caller can both consume the
+    two disjoint pools and *inspect* the held-out anchor's grade coverage. The
+    coverage matters: an anchor that is all high grades cannot detect a judge
+    pushed toward high scores (it would agree with the manipulation, not catch
+    it), so :attr:`includes_low` / :attr:`is_discriminating` let a demo or a
+    cadence refuse to claim a result the labels cannot support and surface the
+    limitation honestly instead.
+    """
+
+    alignment_labels: list[TraceLabel]
+    anchor_labels: list[TraceLabel]
+    #: The numeric human grade of each anchor *trace*, sorted ascending (one per
+    #: held-out trace, with repeats). Empty when no anchor trace carried a
+    #: numeric grade for the stratified judge.
+    anchor_grades: tuple[float, ...]
+    low_grade_threshold: float
+
+    @property
+    def distinct_anchor_grades(self) -> tuple[float, ...]:
+        """The distinct grades present in the anchor (sorted ascending)."""
+        return tuple(sorted(set(self.anchor_grades)))
+
+    @property
+    def grade_span(self) -> float:
+        """Max minus min anchor grade — ``0.0`` with fewer than two graded items."""
+        if len(self.anchor_grades) < 2:
+            return 0.0
+        return max(self.anchor_grades) - min(self.anchor_grades)
+
+    @property
+    def includes_low(self) -> bool:
+        """Whether the anchor holds a discriminating low-grade example."""
+        return any(grade <= self.low_grade_threshold for grade in self.anchor_grades)
+
+    @property
+    def is_discriminating(self) -> bool:
+        """Whether the anchor both spans a grade range and includes a low example.
+
+        The condition under which a judge biased toward high scores will
+        *disagree* with the anchor (so OVERFIT agreement can measurably drop). A
+        false value is the honest signal that the available labels cannot make
+        the overfit→rollback dynamic visible.
+        """
+        return self.includes_low and self.grade_span > 0.0
+
+
+def stratified_split_labels(
+    labels: Iterable[TraceLabel],
+    *,
+    name: str | None = None,
+    anchor_fraction: float = DEFAULT_ANCHOR_FRACTION,
+    seed: int = 0,
+    low_grade_threshold: float = DEFAULT_LOW_GRADE_THRESHOLD,
+) -> StratifiedAnchorSplit:
+    """Partition labels into disjoint ``(alignment, anchor)`` pools, stratified by grade.
+
+    Like :func:`split_labels` this is a **trace-level**, deterministic
+    (``seed``-reproducible) partition with the same anchor-size rule
+    (``round(n * anchor_fraction)``, clamped so both pools stay non-empty for
+    ``n >= 2``). It differs in *which* traces it holds out: instead of a uniform
+    random draw — which on a corpus skewed toward one grade yields an anchor of
+    only that grade — it samples **evenly across the grade-sorted traces**, always
+    including the lowest- and highest-graded trace. So a corpus that is mostly
+    "efficient" (grade 5) with a few "wasteful" (grade 1–2) still yields an
+    anchor that *includes* the discriminating low examples, which is what lets the
+    anchor detect a judge manipulated toward high scores.
+
+    The grade of a trace is the numeric value of its label whose ``name`` matches
+    (or, with ``name=None``, its first numerically-valued label). Booleans and
+    non-numeric labels are not gradable; a trace with no numeric grade for the
+    judge cannot be stratified, so it is kept in the **alignment** pool (never
+    silently dropped) and excluded from :attr:`StratifiedAnchorSplit.anchor_grades`.
+
+    Args:
+        labels: Human labels to partition (see :class:`TraceLabel`).
+        name: When set, stratify on this judge's label per trace; otherwise the
+            trace's first numeric label.
+        anchor_fraction: Fraction of *gradable* traces held out as the anchor.
+        seed: Seeds the within-grade tie-break so the split is reproducible.
+        low_grade_threshold: Grades at or below this count as discriminating-low
+            in the returned :class:`StratifiedAnchorSplit`.
+
+    Returns:
+        A :class:`StratifiedAnchorSplit` carrying the two disjoint label pools and
+        the anchor's achieved grade coverage.
+    """
+    if not 0.0 <= anchor_fraction <= 1.0:
+        raise ValueError(f"anchor_fraction must be in [0, 1], got {anchor_fraction!r}")
+
+    by_trace: dict[str, list[TraceLabel]] = {}
+    for label in labels:
+        by_trace.setdefault(label.trace_id, []).append(label)
+
+    # Traces with no numeric grade for the judge are not gradable: they are left
+    # out of ``graded`` (so they cannot be anchored) and fall through to the
+    # alignment pool below — never silently dropped.
+    graded: dict[str, float] = {}
+    for tid, group in by_trace.items():
+        grade = _trace_grade(group, name)
+        if grade is not None:
+            graded[tid] = grade
+
+    n = len(graded)
+    if n == 0:
+        # Nothing gradable to stratify: keep every label in the alignment pool
+        # rather than fabricate an anchor with no grade coverage.
+        return StratifiedAnchorSplit(
+            alignment_labels=[lab for group in by_trace.values() for lab in group],
+            anchor_labels=[],
+            anchor_grades=(),
+            low_grade_threshold=low_grade_threshold,
+        )
+
+    # Order gradable traces by grade, breaking ties with a seeded shuffle so the
+    # selection is reproducible yet not biased by trace-id ordering.
+    rng = random.Random(seed)
+    jitter = {tid: rng.random() for tid in graded}
+    order = sorted(graded, key=lambda tid: (graded[tid], jitter[tid]))
+
+    n_anchor = 0 if n == 1 else min(max(1, round(n * anchor_fraction)), n - 1)
+    anchor_positions = _evenly_spaced_indices(n, n_anchor)
+    anchor_ids = {order[i] for i in anchor_positions}
+
+    anchor_labels = [lab for tid in order if tid in anchor_ids for lab in by_trace[tid]]
+    alignment_labels = [
+        lab for tid, group in by_trace.items() if tid not in anchor_ids for lab in group
+    ]
+    anchor_grades = tuple(sorted(graded[tid] for tid in anchor_ids))
+    return StratifiedAnchorSplit(
+        alignment_labels=alignment_labels,
+        anchor_labels=anchor_labels,
+        anchor_grades=anchor_grades,
+        low_grade_threshold=low_grade_threshold,
+    )
+
+
+def _trace_grade(group: Sequence[TraceLabel], name: str | None) -> float | None:
+    """Numeric grade for a trace: its ``name`` label's value (or first numeric one)."""
+    for label in group:
+        if name is None or label.name == name:
+            grade = _as_grade(label.value)
+            if grade is not None:
+                return grade
+    return None
+
+
+def _as_grade(value: Any) -> float | None:
+    """Float value of a numeric grade; ``None`` for booleans or non-numeric labels.
+
+    ``bool`` is excluded on purpose: a yes/no guardrail is categorical, not a
+    graded scale, so it cannot be stratified by magnitude.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _evenly_spaced_indices(n: int, k: int) -> list[int]:
+    """``k`` indices spread evenly over ``range(n)``, always including ``0`` and ``n-1``.
+
+    Picking ``round(i * (n-1) / (k-1))`` for ``i in 0..k-1`` gives an even spread
+    whose endpoints are the lowest (``0``) and highest (``n-1``) positions — so a
+    grade-sorted selection always holds out the most and least efficient traces.
+    Rounding can collide on a heavily-tied distribution; collisions are de-duped
+    and the result topped up with the nearest unused indices so exactly
+    ``min(k, n)`` distinct indices come back.
+    """
+    if k <= 0:
+        return []
+    if k >= n:
+        return list(range(n))
+    if k == 1:
+        return [0]  # the single held-out trace is the lowest-graded one
+    seen: set[int] = set()
+    chosen: list[int] = []
+    for i in range(k):
+        idx = round(i * (n - 1) / (k - 1))
+        if idx not in seen:
+            seen.add(idx)
+            chosen.append(idx)
+    fill = 0
+    while len(chosen) < k and fill < n:
+        if fill not in seen:
+            seen.add(fill)
+            chosen.append(fill)
+        fill += 1
+    return sorted(chosen)
 
 
 def to_alignment_set(
