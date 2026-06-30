@@ -247,55 +247,73 @@ def run_cycle(
         ak = decision.action_kind.value
         tk = decision.trigger.kind.value
 
-        candidate = candidate_builder(decision, goal=goal, agent=agent)
-        if candidate is None:
-            skipped.append(
-                SkippedDecision(ak, tk, "candidate builder produced no candidate (fail-closed)")
-            )
-            continue
+        # Per-decision fault isolation: an unexpected error on ONE decision (e.g. an
+        # MLflow/network timeout inside the frozen-suite prove, or a candidate builder
+        # that raised) must not crash the whole cycle and drop proposals already proven
+        # earlier in this pass. The body below builds → proves → gates → emits; any
+        # exception is caught, recorded as a fail-closed skip *with the error*, and the
+        # loop continues. Fail-closed is preserved exactly: an errored decision yields
+        # NO proposal, only a SkippedDecision — and the error reason is recorded so a
+        # genuine bug stays visible/auditable rather than being silently swallowed.
+        try:
+            candidate = candidate_builder(decision, goal=goal, agent=agent)
+            if candidate is None:
+                skipped.append(
+                    SkippedDecision(ak, tk, "candidate builder produced no candidate (fail-closed)")
+                )
+                continue
 
-        artifact = prover(candidate, goal=goal, agent=agent)
-        proof = ProofSummary.from_phase2_artifact(artifact)
-        if not (proof.proved_improvement and proof.correctness_held):
+            artifact = prover(candidate, goal=goal, agent=agent)
+            proof = ProofSummary.from_phase2_artifact(artifact)
+            if not (proof.proved_improvement and proof.correctness_held):
+                skipped.append(
+                    SkippedDecision(
+                        ak,
+                        tk,
+                        f"not proven on the frozen suite (promote={proof.n_promote}, "
+                        f"block={proof.n_block}, errored={proof.n_errored}, "
+                        f"correctness_held={proof.correctness_held}) — fail-closed, no proposal",
+                    )
+                )
+                continue
+
+            judge_name = decision.trigger.judge_name
+            gated, gate_reasons = evaluate_gate(readiness, judge_name=judge_name)
+            gate_status = GateStatus.from_readiness(
+                readiness, gated=gated, reasons=gate_reasons, judge_name=judge_name
+            )
+            if not gated:
+                skipped.append(SkippedDecision(ak, tk, "not gated: " + "; ".join(gate_reasons)))
+                continue
+
+            proposal = ProposedAction(
+                proposal_id=derive_proposal_id(
+                    agent_name=agent.agent_name,
+                    action_kind=decision.action_kind,
+                    change=candidate.change,
+                ),
+                agent_name=agent.agent_name,
+                action_kind=decision.action_kind,
+                risk_class=decision.risk_class,
+                status=ProposalStatus.PENDING,
+                objective_metric=goal.objective_metric,
+                goal_cohort=goal.cohort_name,
+                trigger=decision.trigger,
+                change=candidate.change,
+                proof=proof,
+                gate_status=gate_status,
+                created_at=stamp,
+            )
+            proposals.append(proposal)
+        except Exception as exc:  # noqa: BLE001 - one decision's failure must not torpedo the rest
             skipped.append(
                 SkippedDecision(
                     ak,
                     tk,
-                    f"not proven on the frozen suite (promote={proof.n_promote}, "
-                    f"block={proof.n_block}, errored={proof.n_errored}, "
-                    f"correctness_held={proof.correctness_held}) — fail-closed, no proposal",
+                    f"errored ({type(exc).__name__}: {exc}) — fail-closed, no proposal",
                 )
             )
             continue
-
-        judge_name = decision.trigger.judge_name
-        gated, gate_reasons = evaluate_gate(readiness, judge_name=judge_name)
-        gate_status = GateStatus.from_readiness(
-            readiness, gated=gated, reasons=gate_reasons, judge_name=judge_name
-        )
-        if not gated:
-            skipped.append(SkippedDecision(ak, tk, "not gated: " + "; ".join(gate_reasons)))
-            continue
-
-        proposal = ProposedAction(
-            proposal_id=derive_proposal_id(
-                agent_name=agent.agent_name,
-                action_kind=decision.action_kind,
-                change=candidate.change,
-            ),
-            agent_name=agent.agent_name,
-            action_kind=decision.action_kind,
-            risk_class=decision.risk_class,
-            status=ProposalStatus.PENDING,
-            objective_metric=goal.objective_metric,
-            goal_cohort=goal.cohort_name,
-            trigger=decision.trigger,
-            change=candidate.change,
-            proof=proof,
-            gate_status=gate_status,
-            created_at=stamp,
-        )
-        proposals.append(proposal)
 
     return CycleResult(
         agent_name=agent.agent_name,

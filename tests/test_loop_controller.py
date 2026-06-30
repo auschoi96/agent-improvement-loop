@@ -324,6 +324,51 @@ def test_candidate_builder_returning_none_yields_zero_proposals() -> None:
     assert "no candidate" in result.skipped[0].reason
 
 
+# -- per-decision fault isolation: one failure does not torpedo the others -
+
+
+def test_one_decision_error_does_not_drop_the_others() -> None:
+    # Two decisions this cycle: a metric_view (additive) and a gepa_prompt (judge),
+    # both of which would prove + gate. The prover raises ONLY for the gepa_prompt
+    # candidate (e.g. an MLflow/network timeout in the frozen-suite run). The earlier,
+    # already-proven metric_view proposal must survive; the failing decision must be a
+    # fail-closed skip carrying the error (never a proposal, never a crashed cycle).
+    feedback = FeedbackBundle(
+        objective_metric_value=900.0,
+        objective_baseline_value=1000.0,
+        rlm_assets=(RlmAssetSignal(asset_type="metric_view", title="v", n_traces=5),),
+        judge_dimensions=(
+            JudgeDimensionSignal(
+                judge_name="modularity", dimension="modularity", score=2.0, trusted=True
+            ),
+        ),
+    )
+
+    def _flaky_prover(candidate, *, goal, agent):  # type: ignore[no-untyped-def]
+        if candidate.prover_input == ActionKind.GEPA_PROMPT.value:
+            raise RuntimeError("frozen-suite prove timed out")
+        return _proven_artifact()
+
+    result = run_cycle(
+        _agent(),
+        _goal(),
+        feedback_source=lambda: feedback,
+        candidate_builder=_build_candidate,
+        prover=_flaky_prover,
+        gate=lambda *, goal, agent: _ready(),
+        now="2026-06-30T00:00:00+00:00",
+    )
+
+    # the metric_view decision still produced its proposal despite the later failure
+    assert [p.action_kind for p in result.proposals] == [ActionKind.METRIC_VIEW]
+    # the failing gepa_prompt decision is a fail-closed skip carrying the error
+    errored = [s for s in result.skipped if s.action_kind == ActionKind.GEPA_PROMPT.value]
+    assert len(errored) == 1
+    assert "errored" in errored[0].reason
+    assert "RuntimeError" in errored[0].reason
+    assert "frozen-suite prove timed out" in errored[0].reason
+
+
 # -- the controller refuses an unconfirmed goal ----------------------------
 
 
