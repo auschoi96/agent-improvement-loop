@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -215,18 +216,33 @@ def build_review_prompt(trace_id: str, rubric: ReviewRubric = DEFAULT_RUBRIC) ->
             "not invent assets the trace does not motivate."
         )
     guidelines_block = "\n".join(lines)
-    assets_schema = _ASSETS_SCHEMA_FRAGMENT if rubric.recommend_assets else ""
-
-    return (
-        _PROMPT_TEMPLATE.replace("<<TRACE_ID>>", trace_id)
-        .replace("<<OBJECTIVE>>", rubric.objective)
-        .replace("<<GUIDELINES_BLOCK>>", guidelines_block)
-        .replace("<<ASSETS_SCHEMA>>", assets_schema)
-        .replace("<<ASSET_TYPES>>", asset_types)
-        .replace("<<IDS>>", " | ".join(rubric.guideline_ids()))
-        .replace("<<LO>>", lo)
-        .replace("<<HI>>", hi)
+    # Resolve the assets fragment's own structural <<ASSET_TYPES>> here (framework
+    # content only) so no sentinel survives inside any substituted *value*.
+    assets_schema = (
+        _ASSETS_SCHEMA_FRAGMENT.replace("<<ASSET_TYPES>>", asset_types)
+        if rubric.recommend_assets
+        else ""
     )
+
+    # Single-pass substitution: one regex sweep replaces each sentinel exactly once
+    # and never re-scans the text it inserts. So user-supplied content (guideline
+    # ids, titles, objective) that happens to contain a sentinel literal is emitted
+    # verbatim — it can't be re-scanned and corrupted by a later replacement,
+    # regardless of substitution order. The rendering is hermetic to arbitrary
+    # rubric content.
+    substitutions = {
+        "<<TRACE_ID>>": trace_id,
+        "<<OBJECTIVE>>": rubric.objective,
+        "<<LO>>": lo,
+        "<<HI>>": hi,
+        "<<GUIDELINES_BLOCK>>": guidelines_block,
+        "<<IDS>>": " | ".join(rubric.guideline_ids()),
+        "<<ASSETS_SCHEMA>>": assets_schema,
+    }
+    sentinel_re = re.compile(
+        "|".join(re.escape(s) for s in sorted(substitutions, key=len, reverse=True))
+    )
+    return sentinel_re.sub(lambda m: substitutions[m.group(0)], _PROMPT_TEMPLATE)
 
 
 def build_engine_config(
@@ -517,14 +533,19 @@ def _assets_metadata(verdict: HaloReviewVerdict) -> dict[str, str]:
     return metadata
 
 
-def _attach_verdict(verdict: HaloReviewVerdict, *, source_id: str) -> None:
+def _attach_verdict(
+    verdict: HaloReviewVerdict, *, source_id: str, recommend_assets: bool = True
+) -> None:
     """Attach ``verdict`` to the subject trace as a set of LLM-judge assessments.
 
     Writes one ``rlm_<guideline_id>`` feedback per scored guideline (value = the
-    bounded score), one ``rlm_recommended_assets`` feedback (value = the asset
-    count; the assets ride as JSON in metadata since the v4 store rejects struct
-    values), and one overall ``rlm_review`` feedback (value = the headline
-    token-waste score; the full verdict in metadata).
+    bounded score), one overall ``rlm_review`` feedback (value = the headline
+    token-waste score; the full verdict in metadata), and — when
+    ``recommend_assets`` (the rubric asked for assets) — one
+    ``rlm_recommended_assets`` feedback (value = the asset count, ``0`` meaning
+    "asked, found none"; the assets ride as JSON in metadata since the v4 store
+    rejects struct values). A rubric that opted out of assets attaches no
+    ``rlm_recommended_assets`` assessment at all.
 
     The source type is ``LLM_JUDGE``: in ``mlflow>=3`` the older ``AI_JUDGE``
     spelling is a **deprecated alias** coerced to ``LLM_JUDGE`` (and emits a
@@ -556,12 +577,13 @@ def _attach_verdict(verdict: HaloReviewVerdict, *, source_id: str) -> None:
             _guideline_metadata(verdict, assessment),
         )
 
-    _log(
-        ASSETS_FEEDBACK_NAME,
-        len(verdict.recommended_assets),
-        "; ".join(f"[{a.asset_type}] {a.title}" for a in verdict.recommended_assets) or None,
-        _assets_metadata(verdict),
-    )
+    if recommend_assets:
+        _log(
+            ASSETS_FEEDBACK_NAME,
+            len(verdict.recommended_assets),
+            "; ".join(f"[{a.asset_type}] {a.title}" for a in verdict.recommended_assets) or None,
+            _assets_metadata(verdict),
+        )
 
     _log(
         OVERALL_FEEDBACK_NAME,
@@ -694,6 +716,8 @@ def review_trace(
         )
 
     if attach:
-        _attach_verdict(verdict, source_id=model or "halo")
+        _attach_verdict(
+            verdict, source_id=model or "halo", recommend_assets=rubric.recommend_assets
+        )
 
     return verdict
