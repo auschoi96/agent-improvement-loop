@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -215,23 +216,33 @@ def build_review_prompt(trace_id: str, rubric: ReviewRubric = DEFAULT_RUBRIC) ->
             "not invent assets the trace does not motivate."
         )
     guidelines_block = "\n".join(lines)
-    assets_schema = _ASSETS_SCHEMA_FRAGMENT if rubric.recommend_assets else ""
-
-    # Resolve the structural sentinels FIRST (splice the assets schema before its
-    # own <<ASSET_TYPES>> token), then substitute the user-supplied content
-    # (guideline text, objective) and the trace id LAST — so rubric text that
-    # happened to contain a sentinel literal cannot be re-scanned and corrupted by
-    # a later replace. The rendering is then hermetic to arbitrary rubric content.
-    return (
-        _PROMPT_TEMPLATE.replace("<<ASSETS_SCHEMA>>", assets_schema)
-        .replace("<<ASSET_TYPES>>", asset_types)
-        .replace("<<IDS>>", " | ".join(rubric.guideline_ids()))
-        .replace("<<LO>>", lo)
-        .replace("<<HI>>", hi)
-        .replace("<<GUIDELINES_BLOCK>>", guidelines_block)
-        .replace("<<OBJECTIVE>>", rubric.objective)
-        .replace("<<TRACE_ID>>", trace_id)
+    # Resolve the assets fragment's own structural <<ASSET_TYPES>> here (framework
+    # content only) so no sentinel survives inside any substituted *value*.
+    assets_schema = (
+        _ASSETS_SCHEMA_FRAGMENT.replace("<<ASSET_TYPES>>", asset_types)
+        if rubric.recommend_assets
+        else ""
     )
+
+    # Single-pass substitution: one regex sweep replaces each sentinel exactly once
+    # and never re-scans the text it inserts. So user-supplied content (guideline
+    # ids, titles, objective) that happens to contain a sentinel literal is emitted
+    # verbatim — it can't be re-scanned and corrupted by a later replacement,
+    # regardless of substitution order. The rendering is hermetic to arbitrary
+    # rubric content.
+    substitutions = {
+        "<<TRACE_ID>>": trace_id,
+        "<<OBJECTIVE>>": rubric.objective,
+        "<<LO>>": lo,
+        "<<HI>>": hi,
+        "<<GUIDELINES_BLOCK>>": guidelines_block,
+        "<<IDS>>": " | ".join(rubric.guideline_ids()),
+        "<<ASSETS_SCHEMA>>": assets_schema,
+    }
+    sentinel_re = re.compile(
+        "|".join(re.escape(s) for s in sorted(substitutions, key=len, reverse=True))
+    )
+    return sentinel_re.sub(lambda m: substitutions[m.group(0)], _PROMPT_TEMPLATE)
 
 
 def build_engine_config(

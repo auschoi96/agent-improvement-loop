@@ -31,6 +31,7 @@ search runs.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -86,7 +87,7 @@ def _render_filter(tag_filter: TagFilter) -> str:
 
 @dataclass(slots=True)
 class _AssetAccumulator:
-    """Running aggregate for one ``(asset_type, normalized title)`` across the cohort."""
+    """Running aggregate for one ``(asset_type, title keyword signal)`` across the cohort."""
 
     asset_type: str
     title: str
@@ -112,22 +113,55 @@ def _append_capped(items: list[str], value: str, cap: int) -> None:
         items.append(value)
 
 
-def _asset_key(asset_type: str, title: str) -> tuple[str, str]:
-    """Dedup key: asset type + case/whitespace-normalized title."""
-    return (asset_type, " ".join(title.lower().split()))
+#: Connective / filler tokens that carry no disambiguating signal in an asset
+#: title. Dropping them lets wording-only variants of the *same* recommendation
+#: ("Add an input-validation runbook", "Input Validation Runbook", "create the
+#: input validation runbook!") collapse onto one keyword signal.
+_TITLE_STOPWORDS = frozenset(
+    "a an the to for of and or with without on in into by via from at as is are be "
+    "that this add adds adding create creates creating build builds building use "
+    "uses using make makes making new".split()
+)
+
+#: Significant token = a run of alphanumerics (so punctuation/hyphenation can't
+#: fork a cluster); lowercased upstream.
+_TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _title_keywords(title: str) -> tuple[str, ...]:
+    """A normalized, order-independent keyword signal for a free-text asset title.
+
+    Lowercase, split on non-alphanumeric runs (punctuation/hyphenation can't fork
+    a cluster), drop connective filler, then sort the unique remaining tokens so
+    word order doesn't matter. Two titles naming the same recommendation in
+    different words collapse to the same signal. If every token is filler, fall
+    back to the full token set so unrelated all-stopword titles don't all merge.
+    """
+    tokens = _TITLE_TOKEN_RE.findall(title.lower())
+    significant = [t for t in tokens if t not in _TITLE_STOPWORDS]
+    return tuple(sorted(set(significant or tokens)))
+
+
+def _asset_key(asset_type: str, title: str) -> tuple[str, tuple[str, ...]]:
+    """Dedup key: asset type + a normalized keyword signal of the title."""
+    return (asset_type, _title_keywords(title))
 
 
 def aggregate_assets(verdicts: Iterable[HaloReviewVerdict]) -> list[RankedAsset]:
     """Dedupe and recurrence-rank recommended assets across a cohort's verdicts.
 
-    Assets are grouped by ``(asset_type, normalized title)``; an asset's
-    ``n_traces`` is the number of **distinct** subject traces that recommended it
-    (the recurrence signal). The result is ranked by ``n_traces`` (then total
-    ``occurrences``, then type/title for a stable order) and assigned a 1-based
-    ``rank`` — the most-recurring asset first.
+    Assets are clustered by ``(asset_type, title keyword signal)`` — a normalized
+    keyword fingerprint of the title (see :func:`_title_keywords`), so wording-only
+    variants of the same recommendation collapse into one entry rather than each
+    counting once. An asset's ``n_traces`` is the number of **distinct** subject
+    traces that recommended it (the recurrence signal) and ``occurrences`` is the
+    total count across all title variants. The result is ranked by ``n_traces``
+    (then total ``occurrences``, then type/title for a stable order) and assigned a
+    1-based ``rank`` — the most-recurring asset first. The merged entry's display
+    title is the first-seen (canonical) variant.
     """
-    acc: dict[tuple[str, str], _AssetAccumulator] = {}
-    order: list[tuple[str, str]] = []
+    acc: dict[tuple[str, tuple[str, ...]], _AssetAccumulator] = {}
+    order: list[tuple[str, tuple[str, ...]]] = []
     for verdict in verdicts:
         for asset in verdict.recommended_assets:
             key = _asset_key(asset.asset_type, asset.title)

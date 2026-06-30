@@ -83,6 +83,46 @@ class TestAggregateAssets:
     def test_empty_when_no_assets(self) -> None:
         assert aggregate_assets([_verdict("tr-1", [])]) == []
 
+    def test_clusters_keyword_variants_across_traces(self) -> None:
+        # Highest-risk path: three traces recommend the SAME skill under different
+        # wording / word order / punctuation. Real clustering must collapse them
+        # into ONE ranked entry (merged trace_ids, occurrences = total across
+        # variants) — not three occurrences==1 rows keyed on the exact free text.
+        verdicts = [
+            _verdict(
+                "tr-1",
+                [_asset("skill", "Add an input-validation runbook", rationale="r1")],
+            ),
+            _verdict("tr-2", [_asset("skill", "Input Validation Runbook", rationale="r2")]),
+            _verdict(
+                "tr-3",
+                [_asset("skill", "create the input validation runbook!", rationale="r3")],
+            ),
+        ]
+        ranked = aggregate_assets(verdicts)
+
+        assert len(ranked) == 1
+        merged = ranked[0]
+        assert merged.asset_type == "skill"
+        assert merged.occurrences == 3
+        assert merged.n_traces == 3
+        assert set(merged.trace_ids) == {"tr-1", "tr-2", "tr-3"}
+        # The merged entry carries a real, human-readable variant (the first seen),
+        # never a normalized keyword signal.
+        assert merged.title == "Add an input-validation runbook"
+        # Sample rationales from every variant are preserved for auditability.
+        assert {"r1", "r2", "r3"} <= set(merged.rationales)
+
+    def test_same_keywords_different_type_do_not_merge(self) -> None:
+        # The asset_type is still part of the cluster key: identical keywords under
+        # different types must remain distinct (a skill is not a tool).
+        verdicts = [
+            _verdict("tr-1", [_asset("skill", "Cache reads")]),
+            _verdict("tr-2", [_asset("tool", "cache reads")]),
+        ]
+        ranked = aggregate_assets(verdicts)
+        assert {(a.asset_type, a.n_traces) for a in ranked} == {("skill", 1), ("tool", 1)}
+
 
 # --- review_cohort: orchestration over a fake source -----------------------
 

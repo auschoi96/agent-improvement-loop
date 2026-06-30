@@ -282,6 +282,39 @@ class TestReviewTrace:
         assert seen["base_url"] == "http://fmapi"
 
 
+class TestBuildReviewPrompt:
+    def test_sentinel_in_guideline_id_survives_substitution(self) -> None:
+        from ail.l3.rubric import ReviewRubric, ScoredGuideline
+
+        # A user-supplied guideline id that contains a framework sentinel literal
+        # must render verbatim. The old chained order substituted <<IDS>> (user
+        # content) BEFORE <<LO>>/<<HI>>, so a later replace re-scanned and
+        # corrupted the id; the single-pass render never re-scans inserted text.
+        rubric = ReviewRubric(
+            rubric_id="hermetic/v1",
+            guidelines=(
+                ScoredGuideline(
+                    id="sentinel_<<LO>>_<<HI>>_guard",
+                    title="Sentinel-laden",
+                    description="d",
+                ),
+            ),
+            score_min=1,
+            score_max=5,
+        )
+        prompt = rv.build_review_prompt("trace-1", rubric=rubric)
+
+        # The id is emitted intact wherever it appears (the <<IDS>> schema slots
+        # AND the numbered guideline block) ...
+        assert "sentinel_<<LO>>_<<HI>>_guard" in prompt
+        # ... and is NEVER corrupted by the later <<LO>>/<<HI>> score-scale
+        # substitution (the bug: <<IDS>>-injected sentinels rewritten to 1/5).
+        assert "sentinel_1_5_guard" not in prompt
+        # The genuine score-scale sentinels still resolved, and the trace id too.
+        assert "from 1 (worst) to 5 (best)" in prompt
+        assert "trace-1" in prompt
+
+
 class TestFeedbackProjection:
     def _verdict(self, **kw: Any) -> HaloReviewVerdict:
         base: dict[str, Any] = {
