@@ -119,8 +119,9 @@ own PR with cross-vendor review; the human merges.
 
 ## What shipped (Phases A + B)
 
-This PR delivers Phase A (minimal) and Phase B (the priority visual). Phase C is
-out of scope.
+This section covers Phase A (minimal) and Phase B (the priority visual). The Phase-C
+lineage / audit / revert surface is documented under *What shipped (Phase C — lineage
++ revert)* below.
 
 **Phase A — agent registry + multi-agent landing.**
 - `src/ail/registry.py` — the typed, config-driven registry (`Agent` /
@@ -155,3 +156,93 @@ out of scope.
 **Liveness.** "Live" = the publish cadence; the view notes the controlled-proof
 provenance and the organic-readiness state honestly. The publish is
 per-version-capable and idempotent; the scheduled-publish job is not built here.
+
+## What shipped (Phase C — lineage + revert)
+
+This delivers the Phase-C *lineage / audit / revert* surface: *see what changed,
+traceably and auditably, and revert anything that did not actually improve*. It is the
+**prompt registry made visible** — the lineage is sourced straight from the
+human-gated promote step (`src/ail/optimize/prompt_registry.py`), not recomputed —
+plus a guarded CLI to roll the champion back. The two-tier discipline is unchanged:
+Python computes and writes; the app SQL is `SELECT`-only.
+
+**Lineage source of truth — reuse, not reimplementation.** Each registered prompt
+*version* already carries its provenance as `ail.prompt.*` version tags, stamped at
+promote time by `register_gepa_candidate` / `register_seed_prompt`
+(`PromptProvenance`): `source` (seed vs gepa-evolved), `changed`, `gepa_best_val_score`,
+`gepa_num_candidates`, the held-out `holdout_evolved_savings_pct` /
+`holdout_seed_savings_pct` / `holdout_savings_delta_pct`, the `candidate_artifact`
+pointer, the `suite_version`, and — for a force-registered non-improving candidate —
+`forced` + the recorded `registration_reason`. Phase C **reads those versions back**;
+it does not re-derive provenance or alias logic.
+
+**Publish (`src/ail/publish_lineage.py`).** For each registered agent
+(`ail.registry`), reads its prompt versions through a version-level registry seam
+(`LineageRegistryClient`: `search_prompt_versions` + `get_prompt_version_by_alias` —
+`mlflow.genai` has no version listing, so this complements
+`prompt_registry`'s name-level `search_registered_prompts`), parses the `ail.prompt.*`
+tags, and writes one **unified UC table `agent_prompt_lineage`** keyed by
+`(agent_name, version)`:
+
+- `version`, `source`, `changed`, `gepa_best_val_score`, `gepa_num_candidates`,
+  `holdout_evolved_savings_pct`, `holdout_seed_savings_pct`,
+  `holdout_savings_delta_pct`, `candidate_artifact`, `suite_version`, `uri`,
+  `registered_at`.
+- `is_champion` — true iff the `champion`/`production` alias points at this version,
+  resolved **authoritatively** from the registry (`get_prompt_version_by_alias`),
+  never inferred from a version number, so a revert is reflected the next publish.
+- `is_forced_non_improving` (+ `registration_reason`) — true iff the version was
+  force-registered despite `changed=False` / no held-out improvement. Read from the
+  `ail.prompt.forced` tag the promote step sets **only** on a forced non-improving
+  candidate, so a legitimate seed (`changed=False` but never forced) is correctly
+  *not* flagged.
+
+Writes reuse `ail.publish`'s atomic staging→`REPLACE WHERE` swap, scoped by an
+**`agent_name` predicate**: re-publishing one agent replaces that agent's whole slice
+(so a version removed upstream is dropped) and never disturbs another agent's rows.
+
+```
+python -m ail.publish_lineage --registry config/agents.yaml \
+    --warehouse-id <SQL_WAREHOUSE_ID> --profile dais-demo
+```
+
+**Query + view.** `config/queries/prompt_lineage.sql` is `SELECT`-only from
+`agent_prompt_lineage`, newest version first (a row type is added to the appkit
+analytics types). The app's `client/src/components/LineageTimeline.tsx` (sibling of
+`VersionComparison.tsx`, wired into the selected agent) renders the version history
+newest-first: each version's source, *what changed* (the proven held-out delta with
+evolved-vs-seed savings), GEPA scores, the candidate-artifact label, and a clear
+**CHAMPION** marker.
+
+- **Audit honesty (the whole point).** A `is_forced_non_improving` version is flagged
+  with a warning badge ("forced / not a proven improvement") + the recorded reason and
+  is **never** styled like a genuine improvement — the honesty rule lives in
+  `client/src/lib/lineage.ts` (`deltaTone` returns `warning` for any forced version
+  regardless of the recorded delta; the green `positive` tone is reserved for a real
+  gepa-evolved version whose held-out delta beat its seed) and is unit-tested.
+- **Honest empty state.** With no registered version: *"No registered prompt versions
+  yet — nothing has been promoted for this agent."*
+
+**Revert CLI (`ail-revert` → `src/ail/jobs/revert_champion.py`).** Revert = re-point a
+prompt's champion alias to a prior version via `set_prompt_alias`. It is a **guarded
+CLI, not an in-app write button**:
+
+```
+ail-revert <agent_name> --to-version <n> [--profile ...] [--yes]
+```
+
+- **Fail-closed.** Refuses an unknown agent and an unknown target version (exit 2) —
+  it never points the champion at a version that does not exist.
+- **Explicit audit.** Prints what the champion **WAS** (version + uri) and what it
+  **BECOMES** (version + uri) before acting.
+- **Dry-run by default.** Prints the planned change and writes nothing unless `--yes`
+  is passed; the alias write is the only side effect.
+- **No auto-publish.** Re-pointing the alias does not refresh `agent_prompt_lineage` —
+  the CLI reminds the operator to re-run `python -m ail.publish_lineage` so the app
+  reflects the reverted champion. (Revert stays a guarded CLI in this lane — not an
+  in-app write button.)
+
+**Discipline.** Two-tier `SELECT`-only SQL; `prompt_registry` provenance/alias logic
+reused (not reimplemented); fail-closed everywhere; typed, ruff/mypy clean,
+`pytest -m 'not live'` green; app gates green. No live MLflow call on import or in
+tests — the registry seam is injected/faked throughout.
