@@ -4,15 +4,20 @@
 `scripts/demo_memalign_rollback.py`
 
 This showcase runs the real MLflow MemAlign path end to end on a live Databricks
-workspace and proves one mechanic of the L2 judge layer (`src/ail/judges/`):
+workspace to exercise two mechanics of the L2 judge layer (`src/ail/judges/`):
 
 > Adding human-feedback **memory** to a judge moves its agreement with held-out
-> humans, and **retracting** that memory (`unalign`) moves it back.
+> humans (**proven live: 0.400 distrusted -> 0.800 trusted**), and **retracting**
+> that memory (`unalign`) moves it back.
 
 It aligns a judge on **genuine human feedback**, deliberately **overfits** it on
-a biased subset so held-out agreement drops, then **rolls back** exactly that
-biased memory and shows agreement recover — four measurements on one frozen,
-held-out Human Anchor.
+a biased subset, then **rolls back** exactly that biased memory — four
+measurements on one frozen, held-out Human Anchor. The **alignment** half is
+proven on the reference corpus; the **overfit→rollback visual** is implemented and
+unit-tested but does **not** fire on `token_efficiency` with this corpus (a
+data-dimension limitation, not a code bug — see
+[Live results](#live-results-observed) and
+[Honest limitation](#honest-limitation-this-dimension-resists-the-rollback-visual)).
 
 The overfit→rollback dynamic only becomes *visible* with two design choices that
 fix the earlier blind spot (see
@@ -23,9 +28,13 @@ fix the earlier blind spot (see
    grade range so the anchor **includes the discriminating low-efficiency
    examples** (grade 1–2), not only the high ones a uniform draw yields on a
    small-trace corpus that skews efficient.
-2. **A known-wrong-direction bias.** The bias subset is relabeled to a constant
-   **high** grade (`BIAS_TARGET_GRADE = 5`), which *disagrees* with those low
-   anchor examples — so OVERFIT measurably drops, and the rollback recovers.
+2. **A known-wrong-direction bias.** The bias subset's human grades are
+   **inverted across the scale midpoint** (`invert_grade`, `g -> 6 - g`, so
+   5<->1, 4<->2, 3->3) — a maximally-wrong signal that *disagrees* with the
+   anchor's off-midpoint grades regardless of skew, so OVERFIT can measurably
+   drop and the rollback recover. (Earlier versions used a constant-high bias,
+   `BIAS_TARGET_GRADE = 5`; see
+   [Why earlier runs couldn't show the drop](#why-earlier-runs-couldnt-show-the-drop).)
 
 It is also the live exercise that surfaced three pipeline bugs the mock tests
 missed; those are fixed (with offline tests) in `src/ail/judges/` — see
@@ -83,7 +92,7 @@ Key flags (all have defaults):
 | `--token-cap` | `50000` | drop traces whose `total_tokens` exceed this (a `{{ trace }}` judge must fit the trace in context) |
 | `--max-traces` | `200` | trace fetch ceiling |
 | `--anchor-fraction` | `0.3` | fraction held out as the (stratified) Human Anchor |
-| `--bias-fraction` | `0.4` | fraction of the alignment pool to relabel constant-high then retract |
+| `--bias-fraction` | `0.4` | fraction of the alignment pool to label-invert (`g -> 6 - g`) then retract |
 | `--reflection-lm` | `databricks:/databricks-claude-sonnet-4-6` | MemAlign guideline-distillation model |
 | `--embedding-model` | `databricks:/databricks-gte-large-en` | MemAlign episodic-memory embeddings |
 | `--embedding-dim` | `1024` | embedding dimension |
@@ -118,11 +127,11 @@ built from these and passed to `build_memalign_optimizer`.
    - **ALIGNED** — `align_judge(base, genuine_set, optimizer)` → a
      `MemoryAugmentedJudge` carrying distilled guidelines + episodic examples.
 4. **Manipulate, then roll back.**
-   - **OVERFIT** — `align_judge(aligned, biased_set, optimizer)`. The bias subset
-     is relabeled to a constant **high** grade (`BIAS_TARGET_GRADE = 5`), which
-     teaches the judge to call every run maximally efficient — a known-wrong
-     direction that *disagrees* with the anchor's low examples, dragging held-out
-     agreement DOWN.
+   - **OVERFIT** — `align_judge(aligned, biased_set, optimizer)`. The bias subset's
+     grades are **inverted** (`invert_grade`, `g -> 6 - g`): efficient runs are
+     taught as wasteful and vice-versa — a maximally-wrong signal that conflicts
+     with the anchor's true grades on every off-midpoint example, intended to drag
+     held-out agreement DOWN.
    - **ROLLED-BACK** — `overfit.unalign(traces=biased_set.traces)` retracts
      exactly those traces, leaving the genuine memory intact, so agreement
      recovers to ≈ ALIGNED.
@@ -185,36 +194,79 @@ could not fire (it reported `manipulation moved agreement DOWN = False`), and th
 old version fabricated grades from an L0 redundancy heuristic rather than reading
 real human labels.
 
-This version fixes both: it reads **real** human labels, and holds the anchor out
-with `stratified_split_labels`, which always includes the lowest-graded trace. A
-constant-high bias then *disagrees* with those held-out low examples, so OVERFIT
-drops and `unalign` recovers it.
+Later versions fixed both: they read **real** human labels and hold the anchor out
+with `stratified_split_labels`, which always includes the lowest-graded trace.
+Two bias strategies were then tried, live, to make the drop appear — a
+constant-high relabel, then label-inversion (`g -> 6 - g`). **Neither fired on
+`token_efficiency`** (see [Live results](#live-results-observed) below): even
+with a discriminating anchor `{1, 4, 5}`, OVERFIT agreement stayed identical to
+ALIGNED. The reason is deeper than anchor coverage — see
+[Honest limitation](#honest-limitation-this-dimension-resists-the-rollback-visual).
 
-## Honest limitation: label availability
+## Live results (observed)
 
-The fix depends on there being **discriminating low-efficiency examples among the
-judge-ingestible (small) traces**. If the labeled, under-cap slice genuinely has
-none — every small trace was graded efficient — then no honest anchor can detect a
-high-score bias, and the demo says so:
+Run live against experiment `660599403165942` (31 traces tagged
+`labeling_set='v1'`, 18 under the 50K cap, ~27–31 human `token_efficiency`
+grades) on 2026-06-30. Held-out anchor = 5 items, grade coverage `{1, 4, 5}`
+(span 4, discriminating). Both bias strategies were run:
 
-```
-  anchor grade coverage: {4, 5}, span=1, includes low-efficiency example=False
-  -> WARNING: this anchor has no discriminating low-efficiency example ... The
-     overfit->rollback dynamic CANNOT be shown on these labels. This is a
-     label-availability limit ..., NOT a MemAlign failure.
-...
-DYNAMIC FIRED = False
-  (Expected: the held-out labels were not discriminating enough ...)
-```
+| Stage | agreement (held-out, blinded) | trust |
+|---|---|---|
+| BASE (unaligned) | **0.400** | DISTRUSTED |
+| **ALIGNED** (MemAlign on genuine human labels) | **0.800** | trusted |
+| OVERFIT (constant-high *and*, separately, label-inversion) | 0.800 | trusted |
+| ROLLED-BACK (`unalign`) | 0.800 | trusted |
 
-The demo never fakes a drop to make the story land. To make the dynamic fire,
-label some low-efficiency, *small* traces with `tags.labeling_set='v1'` (or use a
-dimension whose discriminating examples are naturally small — a focused
-correctness, groundedness, or tool-selection judge — which keeps the same
-machinery while making the numbers sharp). The production `token_efficiency`
-scorer (`ail.judges.scorers`) sidesteps the cap entirely by judging an **L0
-summary** instead of the raw trace; the `{{ trace }}` variant exists here only to
-exercise the trace-judge path.
+**The alignment win is proven and is the core MemAlign result:** human feedback
+moved a *distrusted* judge (0.400, disagreeing with the human) to *trusted*
+(0.800) on a blinded held-out anchor. This is the load-bearing capability — a
+judge calibrated to a human and a real, blinded agreement metric to police it.
+
+**The overfit→rollback *visual* did not fire**, with either bias direction
+(`DYNAMIC FIRED = False`). ALIGNED and OVERFIT produced the *identical* 0.800,
+scoring the same 5/5 items the same way — i.e. the injected biased memory did not
+change the judge's scores on the held-out anchor *at all*.
+
+## Honest limitation: this dimension resists the rollback visual
+
+The non-firing is **not** a code bug (the mechanism is cross-reviewed, the
+self-check is honest, `unalign` is unit-tested) and it is **deeper than anchor
+coverage** — it persisted even with a discriminating `{1, 4, 5}` anchor and a
+maximally-wrong (inverted) bias. Two compounding properties of
+`token_efficiency` on this corpus cause it:
+
+1. **The discriminating low examples are the big traces the cap drops.** Genuinely
+   wasteful runs are the 500K–900K-token sessions; a `{{ trace }}` judge can't fit
+   them, so the labeled under-cap slice skews efficient and is *coarse*.
+2. **On the small traces that remain, the judge's score is dominated by the trace
+   content, not the episodic memory.** Adding biased feedback (high or inverted)
+   to the memory does not override what the judge reads off the trace, so held-out
+   agreement does not move — in either direction. The manipulation has nothing to
+   bite on.
+
+The demo never fakes a drop to make the story land — it prints the real numbers
+and `DYNAMIC FIRED = False`. **To demonstrate the rollback visual live, use a
+dimension whose discriminating good *and* bad examples are both naturally small
+(judge-ingestible) and reasonably balanced** — a focused correctness,
+groundedness, instruction-following, or tool-selection judge — with ~12 balanced
+human labels. That keeps the exact same machinery (`align` → overfit → `unalign`)
+while giving the judge memory something it will actually act on. The production
+`token_efficiency` scorer (`ail.judges.scorers`) sidesteps the cap entirely by
+judging an **L0 summary** instead of the raw trace; the `{{ trace }}` variant
+exists here only to exercise the trace-judge path.
+
+### Operational note (live runs)
+
+Long or repeated live runs must **not** depend on profile OAuth: the
+`databricks auth token` session refreshes ~hourly and the in-process SDK refresh
+is flaky (`exit status 45`), which 401s a mid-run trace read or reflection-LM
+call. Run with a **static bearer matched to the right workspace** — set
+`DATABRICKS_HOST` + `DATABRICKS_TOKEN` (and leave `--profile` unset / clear
+`DATABRICKS_CONFIG_PROFILE`) so no refresh is attempted — and keep the run inside
+the token's lifetime. The reflection/judge endpoint host **must** match the
+token's workspace (a dais-demo token against the e2-demo-field-eng host, or vice
+versa, returns `403 Invalid Token`). The durable fix for deployments is the
+single service-principal credential from `docs/DEPLOY.md`, not a user OAuth token.
 
 ## Related
 
