@@ -94,6 +94,8 @@ __all__ = [
     "CallableIntervention",
     "ProgrammaticSignal",
     "ProgrammaticCheck",
+    "ArmVerifier",
+    "ArmWorkspaces",
     "ComparisonConfig",
     "NO_LLM_JUDGE",
     "compare_candidate",
@@ -213,8 +215,44 @@ class ProgrammaticSignal:
 
 #: A caller-supplied L1 check: derive a :class:`ProgrammaticSignal` from a run's
 #: result. The harness applies the *same* check to the baseline and the candidate
-#: so the programmatic guardrail compares like with like.
+#: so the programmatic guardrail compares like with like. **Arm-blind**: the check
+#: sees only the run result, not which workspace produced it — fine for a mock
+#: trace, but for a file-mutating task use :data:`ArmVerifier` via
+#: :class:`ArmWorkspaces` so the verdict is measured in the arm's own workspace.
 ProgrammaticCheck = Callable[[AgentRunResult], ProgrammaticSignal]
+
+#: An **arm-aware** L1 verification callable: given one arm's workspace path and
+#: that arm's run result, produce a :class:`ProgrammaticSignal`. Unlike
+#: :data:`ProgrammaticCheck` (arm-blind — the same closure run against both
+#: results), this receives the arm's own ``cwd``, so the live runner can restore
+#: the pristine verify files into *that* workspace and run the check *there* — the
+#: baseline verdict reflects the baseline's edits and the candidate verdict the
+#: candidate's, never a single fixed-cwd run.
+ArmVerifier = Callable[[str, AgentRunResult], ProgrammaticSignal]
+
+
+@dataclass(frozen=True, slots=True)
+class ArmWorkspaces:
+    """Per-arm isolated workspaces (+ optional arm-aware verifier) for one comparison.
+
+    For a **real, file-mutating** coding task the two arms must edit *separate*
+    copies of the starting repo state: ``baseline_cwd`` and ``candidate_cwd`` are
+    distinct directories the harness sets as each arm's
+    :attr:`~ail.ingest.base.AgentTask.cwd` (via :func:`dataclasses.replace`), so
+    the candidate's edits can never land on top of the baseline's and vice-versa
+    (no cross-arm contamination).
+
+    ``verify`` is the arm-aware L1 check run *after* each arm's agent run, in that
+    arm's workspace (see :data:`ArmVerifier`). ``None`` leaves correctness to the
+    LLM judge or, under :data:`NO_LLM_JUDGE` with no verifier, fails closed — the
+    same no-signal rule a missing ``programmatic_check`` triggers. Passing both a
+    ``programmatic_check`` and a ``verify`` to :func:`compare_candidate` is a
+    programmer error (two different L1 seams) and raises.
+    """
+
+    baseline_cwd: str
+    candidate_cwd: str
+    verify: ArmVerifier | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,6 +662,34 @@ def _programmatic_guardrail(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_programmatic_signals(
+    *,
+    programmatic_check: ProgrammaticCheck | None,
+    workspace: ArmWorkspaces | None,
+    baseline_result: AgentRunResult,
+    candidate_result: AgentRunResult,
+) -> tuple[ProgrammaticSignal, ProgrammaticSignal] | None:
+    """The (baseline, candidate) L1 signals, arm-aware when a workspace verifier is set.
+
+    Arm-aware (live) verification wins when a workspace carries a verifier: each
+    arm is verified in its **own** workspace (``baseline_cwd`` / ``candidate_cwd``),
+    so the baseline signal reflects the baseline's edits and the candidate signal
+    the candidate's — never one fixed-cwd run that ignores which arm produced the
+    state. Otherwise the legacy arm-blind ``programmatic_check`` (the same callable
+    applied to both results) is used; ``None`` means no L1 signal at all. The two
+    signals feed the *unchanged* :func:`_programmatic_guardrail`, so the fail-closed
+    semantics are identical regardless of which seam produced them.
+    """
+    if workspace is not None and workspace.verify is not None:
+        return (
+            workspace.verify(workspace.baseline_cwd, baseline_result),
+            workspace.verify(workspace.candidate_cwd, candidate_result),
+        )
+    if programmatic_check is not None:
+        return (programmatic_check(baseline_result), programmatic_check(candidate_result))
+    return None
+
+
 def compare_candidate(
     case: GroundTruthCase,
     adapter: AgentAdapter,
@@ -631,6 +697,7 @@ def compare_candidate(
     intervention: Intervention | None = None,
     correctness_judge: Judge | _NoLLMJudge | None = None,
     programmatic_check: ProgrammaticCheck | None = None,
+    workspace: ArmWorkspaces | None = None,
     config: ComparisonConfig | None = None,
     pricebook: dict[str, PriceBookEntry] | None = None,
     generated_at: str | None = None,
@@ -657,9 +724,18 @@ def compare_candidate(
             whose tasks carry no human-authored expectations to score against. With
             ``NO_LLM_JUDGE`` and no ``programmatic_check`` the gate fails closed
             (a failed correctness guardrail, ``BLOCK``).
-        programmatic_check: Optional L1 check applied to **both** runs to add a
-            programmatic non-regression guardrail. ``None`` omits it (unless
-            ``NO_LLM_JUDGE`` is set, in which case its absence fails closed).
+        programmatic_check: Optional **arm-blind** L1 check applied to **both**
+            runs to add a programmatic non-regression guardrail. ``None`` omits it
+            (unless ``NO_LLM_JUDGE`` is set with no ``workspace`` verifier either,
+            in which case its absence fails closed). For a file-mutating task use
+            ``workspace`` instead — passing both raises.
+        workspace: Optional :class:`ArmWorkspaces` giving each arm its **own**
+            ``cwd`` (so a file-mutating agent edits isolated copies — no cross-arm
+            contamination) and an optional **arm-aware** verifier run in each arm's
+            workspace. When its ``verify`` is set it is the programmatic guardrail
+            source (mutually exclusive with ``programmatic_check``); its absence
+            under ``NO_LLM_JUDGE`` fails closed exactly like a missing
+            ``programmatic_check``.
         config: Objective metric + reduction threshold knobs.
         pricebook: Optional L0 price-book override (passed to
             :func:`ail.metrics.l0_deterministic.compute_trace_metrics`).
@@ -674,6 +750,13 @@ def compare_candidate(
     """
     cfg = config or ComparisonConfig()
 
+    if programmatic_check is not None and workspace is not None and workspace.verify is not None:
+        raise ValueError(
+            "pass either programmatic_check (arm-blind) or workspace.verify (arm-aware), "
+            "not both: they are two different L1 verification seams and supplying both is "
+            "ambiguous about which produces the programmatic guardrail"
+        )
+
     # Build a fresh task per run so the intervention can never alias / mutate the
     # baseline's task (interventions are contractually pure, but do not rely on it).
     baseline_task = _baseline_task(case)
@@ -681,6 +764,11 @@ def compare_candidate(
     if intervention is not None:
         # ``replace()`` with no changes hands the intervention an independent copy.
         candidate_task = intervention.apply(replace(candidate_task))
+    if workspace is not None:
+        # Per-arm isolation: each arm runs in its OWN workspace, so a file-mutating
+        # candidate edits a separate copy and the arms never see each other's edits.
+        baseline_task = replace(baseline_task, cwd=workspace.baseline_cwd)
+        candidate_task = replace(candidate_task, cwd=workspace.candidate_cwd)
 
     baseline_result = adapter.run(baseline_task)
     candidate_result = adapter.run(candidate_task)
@@ -698,14 +786,25 @@ def compare_candidate(
         )
     objective_met = _objective_met(objective_delta, cfg.min_token_reduction_pct)
 
+    # Resolve the two L1 signals once, from whichever verification seam is wired
+    # (arm-aware workspace verifier or legacy arm-blind check); ``None`` means no
+    # L1 signal at all. They feed the unchanged _programmatic_guardrail below.
+    prog_signals = _resolve_programmatic_signals(
+        programmatic_check=programmatic_check,
+        workspace=workspace,
+        baseline_result=baseline_result,
+        candidate_result=candidate_result,
+    )
+
     # Execution success is the most fundamental gate (a failed run is untrustworthy
     # and its token "savings" are not real), so it leads the guardrail list.
     guardrails = [_execution_guardrail(baseline_result, candidate_result)]
     if isinstance(correctness_judge, _NoLLMJudge):
         # No LLM judge in the decision path: the L1 programmatic check is the
-        # correctness guardrail. With no check supplied there is no correctness
-        # signal at all, so fail closed with an explicit failed guardrail.
-        if programmatic_check is None:
+        # correctness guardrail. With no L1 signal at all (no check and no
+        # arm-aware verifier) there is no correctness signal, so fail closed with
+        # an explicit failed guardrail.
+        if prog_signals is None:
             guardrails.append(_no_correctness_signal_guardrail())
     else:
         judge = correctness_judge if correctness_judge is not None else _default_correctness_judge()
@@ -717,12 +816,8 @@ def compare_candidate(
                 candidate_result=candidate_result,
             )
         )
-    if programmatic_check is not None:
-        guardrails.append(
-            _programmatic_guardrail(
-                programmatic_check(baseline_result), programmatic_check(candidate_result)
-            )
-        )
+    if prog_signals is not None:
+        guardrails.append(_programmatic_guardrail(*prog_signals))
 
     guardrails_passed = all(g.passed for g in guardrails)
     # PROMOTE requires the objective met AND every guardrail passed — which now

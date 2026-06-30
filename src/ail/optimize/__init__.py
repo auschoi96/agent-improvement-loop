@@ -18,7 +18,10 @@ per session). It ships:
 * :mod:`ail.optimize.phase2` — the runner that drives a baseline-vs-candidate
   comparison across the frozen Task Suite with a deterministic **L1 programmatic**
   correctness guardrail (no LLM judge), and emits the
-  :class:`~ail.optimize.phase2.Phase2Artifact`.
+  :class:`~ail.optimize.phase2.Phase2Artifact`;
+* :mod:`ail.optimize.fixtures` — the live-fixture loader (``seed/`` + ``verify/``)
+  and per-arm isolated-workspace lifecycle the runner uses to run real,
+  file-mutating tasks honestly (per-arm isolation + tamper-proof verification).
 """
 
 from __future__ import annotations
@@ -28,6 +31,12 @@ from ail.optimize.assets import (
     SkillAsset,
     load_skill_asset,
     skill_asset_path,
+)
+from ail.optimize.fixtures import (
+    TaskFixture,
+    fixture_dir,
+    load_fixture,
+    phase2_fixtures_root,
 )
 from ail.optimize.lever import (
     BASELINE,
@@ -53,6 +62,11 @@ __all__ = [
     "load_skill_asset",
     "skill_asset_path",
     "TOKEN_EFFICIENCY_SKILL",
+    # live fixtures
+    "TaskFixture",
+    "load_fixture",
+    "fixture_dir",
+    "phase2_fixtures_root",
     # lever
     "SkillInjectionIntervention",
     "LeverConfig",

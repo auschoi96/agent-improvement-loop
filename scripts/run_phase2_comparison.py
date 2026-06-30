@@ -24,13 +24,20 @@ Example
         --output artifacts/phase2_token_lever.json
 
 The run plan (JSON or YAML) maps task ids to L1 verification commands; a task with
-no entry has no correctness signal and is blocked (fail-closed). Example::
+no entry has no correctness signal and is blocked (fail-closed). For a
+**fixture-backed** task (one with ``eval/phase2_fixtures/<task_id>/``) the command
+runs in each arm's *isolated* workspace — ``cwd`` is set BY the harness to that
+arm's seeded copy and the pristine ``verify/`` files are restored there first — so
+``cwd`` in the plan is **ignored** for those tasks; only ``command`` / ``name`` /
+``shell`` / ``timeout_seconds`` matter. ``cwd`` is honored only for legacy,
+non-fixture (mock / trace-only) tasks. Example (fixture-backed; no ``cwd``)::
 
     ts-017:
       name: deploy-smoke
-      command: ["uv", "run", "deploy/databricks/deploy.py", "--check"]
-      cwd: /abs/path/to/checkout
+      command: ["python", "-m", "pytest", "verify", "-q"]
       timeout_seconds: 600
+
+See ``docs/PHASE2_LIVE_HARNESS.md`` for the full fixture + run-plan contract.
 """
 
 from __future__ import annotations
@@ -79,6 +86,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="JSON/YAML mapping task_id -> L1 verification command (see module docstring)",
+    )
+    p.add_argument(
+        "--fixtures-root",
+        type=Path,
+        default=None,
+        help=(
+            "root containing eval/phase2_fixtures (per-arm isolation + tamper-proof "
+            "verify for tasks with a fixture); default is repo discovery"
+        ),
     )
     p.add_argument(
         "--task-id",
@@ -160,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         profile=args.profile,
         warehouse_id=args.warehouse,
         task_ids=args.task_ids,
+        fixtures_root=args.fixtures_root,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
