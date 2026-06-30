@@ -13,30 +13,34 @@ Four measurements on one frozen, **stratified** held-out Human Anchor:
 * **BASE** — the unaligned ``{{ trace }}`` token-efficiency judge.
 * **ALIGNED** — BASE after ``align`` on a genuine, human-labeled set.
 * **OVERFIT** — ALIGNED after a *second* ``align`` on a deliberately biased subset
-  (relabeled to a constant **high** score), which teaches the judge to call
-  everything efficient and so drags held-out agreement DOWN.
+  whose real human grades are **inverted** (``g -> 6 - g``: 5<->1, 4<->2, 3->3),
+  which teaches the judge to call efficient runs wasteful and wasteful runs
+  efficient and so drags held-out agreement DOWN.
 * **ROLLED-BACK** — OVERFIT after ``unalign(traces=...)`` retracts exactly the
   biased traces, so agreement RECOVERS to ≈ ALIGNED.
 
 Two design choices make the overfit→rollback dynamic *visible* (earlier it could
 not fire — see ``docs/MEMALIGN_ROLLBACK.md``):
 
-1. **A representative, stratified anchor.** Labels come from real human
-   ``token_efficiency`` assessments on traces tagged ``tags.labeling_set='v1'``;
-   the anchor is selected with :func:`ail.judges.stratified_split_labels` so it
-   spans the human grade range and **includes the discriminating low-efficiency
-   examples** — not only the high ones a uniform random draw would yield on a
-   small-trace corpus that skews efficient. An all-high anchor cannot detect a
-   judge pushed toward high scores; a stratified one can.
-2. **A known-wrong-direction bias.** The bias subset is relabeled to a constant
-   high grade (:data:`BIAS_TARGET_GRADE`), which *disagrees* with the low anchor
-   examples. So OVERFIT measurably disagrees with the held-out humans, and the
-   rollback recovers.
+1. **A maximally-wrong, direction-agnostic bias.** The bias subset's real human
+   grades are **inverted** across the scale midpoint (:func:`invert_grade`,
+   ``g -> 6 - g``). The earlier version relabeled the subset to a constant *high*
+   grade, which only disagrees with an anchor that happens to hold low-efficiency
+   examples — and the small judge-ingestible corpus skews high, so the held-out
+   anchor was high too and a high-biased judge still *agreed* with it (the drop
+   could not fire). Inversion conflicts with the held-out truth **regardless of
+   skew**: a high-skewed anchor's 4s/5s invert to 2s/1s. So OVERFIT measurably
+   disagrees with the held-out humans, and retracting those traces recovers it.
+2. **A stratified anchor.** Labels come from real human ``token_efficiency``
+   assessments on traces tagged ``tags.labeling_set='v1'``; the anchor is selected
+   with :func:`ail.judges.stratified_split_labels` so it spans the human grade
+   range. Inversion no longer *requires* a low example to be detectable, but a
+   spread anchor measures the effect cleanly across grades.
 
-If the available small (judge-ingestible) traces genuinely lack low-grade
-examples, the anchor is **not discriminating** and the demo says so honestly
-rather than faking a drop — that is a label-availability limit, not a MemAlign
-failure.
+Inversion is invisible only on an anchor of all **midpoint** grades (3, the
+inversion fixed point), where ``g -> 6 - g`` changes nothing. If the available
+judge-ingestible labels are all midpoint, the demo says so honestly rather than
+faking a drop — a label-availability limit, not a MemAlign failure.
 
 The unalign API (discovered in ``mlflow.genai.judges.optimizers.memalign``):
 ``judge.align(...)`` returns a ``MemoryAugmentedJudge``; that judge exposes
@@ -106,12 +110,20 @@ DEFAULT_TOKEN_CAP = 50_000
 #: slice. Never fabricated — see ``docs/MEMALIGN_ROLLBACK.md``.
 DEFAULT_LABELING_SET = "v1"
 
-#: The constant high grade the bias subset is relabeled to. Pushing the judge to
-#: call every run maximally efficient (5) is a known-wrong direction relative to
-#: a representative anchor: it *disagrees* with the held-out low-efficiency
-#: examples, which is what drags OVERFIT agreement DOWN. Retracting these traces
-#: (``unalign``) is what recovers it.
-BIAS_TARGET_GRADE = 5.0
+#: The 1-to-5 graded scale the token_efficiency judge uses. The bias step inverts
+#: each biased trace's real human grade across this scale's midpoint
+#: (:func:`invert_grade`, ``g -> (MIN + MAX) - g``): a maximally-wrong signal that
+#: conflicts with the held-out truth regardless of skew. Retracting those traces
+#: (``unalign``) is what recovers held-out agreement.
+GRADE_SCALE_MIN = 1.0
+GRADE_SCALE_MAX = 5.0
+
+#: Agreement tolerance on the 1-5 graded scale: a judge score within this of the
+#: human gold counts as agreement. Shared by the anchor scoring (:func:`_agreement`)
+#: and the check for whether an anchor can reveal an inversion at all
+#: (:func:`_anchor_reveals_inversion`) — an inverted grade only registers as
+#: disagreement when it moves farther than this.
+AGREEMENT_NUMERIC_TOLERANCE = 1.0
 
 #: How close ROLLED-BACK must return to ALIGNED to count as "recovered". Episodic
 #: memory is not guaranteed to reconstruct byte-identically after a retract, so
@@ -260,6 +272,23 @@ def _to_grade(value: Any) -> float | None:
     return None
 
 
+def invert_grade(value: Any) -> float:
+    """Reflect a 1-5 human grade across the scale midpoint: ``g -> (MIN + MAX) - g``.
+
+    The deliberately *wrong* manipulation injected on the biased subset and later
+    retracted via ``unalign``. Inversion (5<->1, 4<->2, 3->3) is "maximally wrong"
+    feedback that conflicts with the held-out human truth regardless of which way
+    the grades skew — unlike a constant-high relabel, which a high-skewed anchor
+    cannot detect. Raises on a non-numeric label: the demo only ever feeds this
+    real numeric human grades, so a non-numeric value means upstream corruption
+    and we fail loudly rather than silently mislabel.
+    """
+    grade = _to_grade(value)
+    if grade is None:
+        raise ValueError(f"cannot invert non-numeric grade {value!r}")
+    return (GRADE_SCALE_MIN + GRADE_SCALE_MAX) - grade
+
+
 # ---------------------------------------------------------------------------
 # Pipeline steps.
 # ---------------------------------------------------------------------------
@@ -311,7 +340,11 @@ def collect_labeled_traces(source: MLflowTraceSource, cfg: DemoConfig) -> list[T
 
 def _agreement(judge: Any, anchor: Any) -> AgreementReport:
     """Score a judge on the held-out anchor (tolerance 1 on the 1-5 graded scale)."""
-    return score_anchor(judge, anchor, config=AgreementConfig(numeric_tolerance=1.0, floor=0.6))
+    return score_anchor(
+        judge,
+        anchor,
+        config=AgreementConfig(numeric_tolerance=AGREEMENT_NUMERIC_TOLERANCE, floor=0.6),
+    )
 
 
 def _print_row(stage: str, report: AgreementReport) -> None:
@@ -322,31 +355,46 @@ def _print_row(stage: str, report: AgreementReport) -> None:
     )
 
 
-def _print_anchor_coverage(split: StratifiedAnchorSplit) -> bool:
-    """Print the anchor's grade coverage; return whether it can detect the bias.
+def _anchor_reveals_inversion(split: StratifiedAnchorSplit) -> bool:
+    """Whether the held-out anchor can reveal a label-inversion bias.
 
-    A discriminating anchor (spans grades AND includes a low-efficiency example)
-    is the precondition for the constant-high bias to register as disagreement.
-    When it is not discriminating, this prints an explicit, honest warning that
-    the dynamic cannot be shown on the available labels.
+    Inversion (``g -> 6 - g``) only registers as *disagreement* on anchor grades
+    that move farther than the agreement tolerance when reflected:
+    ``|g - invert_grade(g)| > AGREEMENT_NUMERIC_TOLERANCE``. On the 1-5 scale that
+    is any grade off the midpoint (3). Unlike the earlier constant-high bias —
+    which needed a *low* anchor example to register — inversion is
+    direction-agnostic: a high-skewed anchor (4s/5s) reveals it just as well. The
+    only blind spot is an anchor whose every grade sits at the midpoint.
+    """
+    return any(
+        abs(g - invert_grade(g)) > AGREEMENT_NUMERIC_TOLERANCE for g in split.distinct_anchor_grades
+    )
+
+
+def _print_anchor_coverage(split: StratifiedAnchorSplit) -> bool:
+    """Print the anchor's grade coverage; return whether it can reveal the inversion.
+
+    A revealing anchor holds at least one off-midpoint grade, so inverting the
+    biased subset's labels disagrees with the held-out gold. When it cannot (every
+    anchor grade sits at the midpoint, where ``g -> 6 - g`` is a no-op), this
+    prints an explicit, honest warning that the dynamic cannot be shown on the
+    available labels.
     """
     grades = ", ".join(f"{g:g}" for g in split.distinct_anchor_grades) or "(none)"
-    print(
-        f"  anchor grade coverage: {{{grades}}}, span={split.grade_span:g}, "
-        f"includes low-efficiency example={split.includes_low}"
-    )
-    if split.is_discriminating:
+    print(f"  anchor grade coverage: {{{grades}}}, span={split.grade_span:g}")
+    if _anchor_reveals_inversion(split):
         print(
-            "  -> representative anchor: a constant-high bias must DISAGREE with the low "
-            "examples, so OVERFIT agreement can drop and the rollback can recover it."
+            "  -> revealing anchor: inverting the biased labels (g -> 6 - g) must DISAGREE "
+            "with these off-midpoint grades, so OVERFIT agreement can drop and the rollback "
+            "can recover it."
         )
         return True
     print(
-        "  -> WARNING: this anchor has no discriminating low-efficiency example, so a "
-        "high-score bias cannot be detected as disagreement. The overfit->rollback "
-        "dynamic CANNOT be shown on these labels. This is a label-availability limit "
-        "(small judge-ingestible traces skew efficient), NOT a MemAlign failure. The "
-        "numbers below are still reported honestly."
+        "  -> WARNING: this anchor has only midpoint grades, where inversion (g -> 6 - g) "
+        "changes nothing, so the manipulation cannot be detected as disagreement. The "
+        "overfit->rollback dynamic CANNOT be shown on these labels. This is a "
+        "label-availability limit (judge-ingestible traces lack off-midpoint grades), NOT "
+        "a MemAlign failure. The numbers below are still reported honestly."
     )
     return False
 
@@ -371,8 +419,8 @@ def run_demo(cfg: DemoConfig) -> int:
     )
     # Sub-split the alignment pool (trace-level, disjoint, also stratified) into the
     # genuine subset and the subset we will deliberately bias and then retract. The
-    # bias subset is stratified too, so it includes low-efficiency traces — making
-    # the constant-high relabel a genuinely wrong signal, not a no-op.
+    # bias subset is stratified too, so its grades span the range — making the
+    # inversion a wrong signal across the whole scale, not just at one end.
     bias_split = stratified_split_labels(
         anchor_split.alignment_labels,
         name="token_efficiency",
@@ -381,7 +429,12 @@ def run_demo(cfg: DemoConfig) -> int:
     )
     good_labels = bias_split.alignment_labels
     bias_src_labels = bias_split.anchor_labels
-    biased_labels = [replace(lab, value=BIAS_TARGET_GRADE) for lab in bias_src_labels]
+    # The manipulation: INVERT each biased trace's real human grade (g -> 6 - g).
+    # This is "maximally wrong" feedback that conflicts with the held-out truth
+    # regardless of skew (5<->1, 4<->2, 3->3), so OVERFIT agreement measurably drops
+    # and unalign recovers it. Only this biased subset's labels are altered; the
+    # genuine alignment set and the held-out anchor keep their real human grades.
+    biased_labels = [replace(lab, value=invert_grade(lab.value)) for lab in bias_src_labels]
     anchor_labels = anchor_split.anchor_labels
     if not good_labels or not biased_labels or not anchor_labels:
         print(
@@ -399,10 +452,11 @@ def run_demo(cfg: DemoConfig) -> int:
         alignment_set=good_set, human_anchor=anchor, task_suite_ids=biased_set.ids
     )
     print(
-        f"  good={len(good_set)} traces, biased={len(biased_set)} traces (relabeled to "
-        f"{BIAS_TARGET_GRADE:g}), anchor={len(anchor)} held-out items (disjoint wall proven)"
+        f"  good={len(good_set)} traces, biased={len(biased_set)} traces "
+        f"(human grades inverted g->6-g), anchor={len(anchor)} held-out items "
+        f"(disjoint wall proven)"
     )
-    discriminating = _print_anchor_coverage(anchor_split)
+    anchor_detectable = _print_anchor_coverage(anchor_split)
 
     print("[3/6] Building the {{ trace }} token-efficiency judge (make_judge)...")
     base_judge = make_scorer(TOKEN_EFFICIENCY_TRACE, model=cfg.judge_model)
@@ -413,7 +467,10 @@ def run_demo(cfg: DemoConfig) -> int:
     aligned = align_judge(base_judge, good_set, optimizer=optimizer).judge
     aligned_report = _agreement(aligned, anchor)
 
-    print("[5/6] OVERFITTING on the biased (constant-high) subset...")
+    print("[5/6] OVERFITTING on the biased (label-inverted) subset...")
+    # NB: MemAlign/dspy emits a benign "Type mismatch for field example_judgements:
+    # expected str" WARNING during align here; alignment still works. It is internal
+    # to MemAlign/dspy, not something this demo can or needs to fix.
     overfit = align_judge(aligned, biased_set, optimizer=optimizer).judge
     overfit_report = _agreement(overfit, anchor)
 
@@ -442,11 +499,11 @@ def run_demo(cfg: DemoConfig) -> int:
         f"rollback RECOVERED to ~= ALIGNED = {dynamics.rollback_recovered}"
     )
     print(f"DYNAMIC FIRED = {dynamics.fired}")
-    if not dynamics.fired and not discriminating:
+    if not dynamics.fired and not anchor_detectable:
         print(
-            "  (Expected: the held-out labels were not discriminating enough to show the "
-            "dynamic. Label low-efficiency, judge-ingestible traces to make it fire — see "
-            "docs/MEMALIGN_ROLLBACK.md.)"
+            "  (Expected: the held-out anchor had only midpoint grades, so inversion could "
+            "not register as disagreement. Label off-midpoint, judge-ingestible traces to "
+            "make it fire — see docs/MEMALIGN_ROLLBACK.md.)"
         )
     return 0
 
