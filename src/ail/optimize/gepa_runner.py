@@ -426,6 +426,19 @@ class FrozenSuiteGepaAdapter:
     wall is self-contained.
     """
 
+    #: Part of the :class:`gepa.core.adapter.GEPAAdapter` contract: gepa's
+    #: ``ReflectiveMutationProposer`` reads ``adapter.propose_new_texts`` to decide
+    #: whether to call a *custom* proposer (a callable) or fall back to its
+    #: **built-in** reflection-LM proposer (when ``None``). We want the built-in path
+    #: — it drives ``InstructionProposalSignature`` with the ``reflection_lm`` we pass
+    #: at the GEPA boundary, reading the L0/L1/decision feedback in
+    #: :meth:`make_reflective_dataset` to mutate the skill body. This attribute MUST
+    #: exist (the proposer evaluates ``adapter.propose_new_texts is not None``
+    #: directly, not via ``getattr``); omitting it makes every reflective-mutation
+    #: iteration raise ``AttributeError`` and the loop evolve nothing. Typed as a
+    #: bare ``Callable | None`` so this module imports no gepa.
+    propose_new_texts: Callable[..., dict[str, str]] | None = None
+
     def __init__(
         self,
         *,
