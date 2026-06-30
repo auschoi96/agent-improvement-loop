@@ -102,6 +102,22 @@ candidate did or did not win — not by a bare number. Reflective mutation uses
 `reflection_lm` (default `databricks:/databricks-claude-sonnet-4-6`, normalized to
 litellm's `databricks/<model>` form at the GEPA boundary).
 
+**Who proposes the new body.** GEPA's `GEPAAdapter` contract requires every adapter to
+*expose* a `propose_new_texts` attribute: a callable overrides proposal, while `None`
+selects GEPA's **built-in** reflection-LM proposer (`InstructionProposalSignature`,
+driven by `reflection_lm` over the reflective dataset above). We want the built-in
+path, so `FrozenSuiteGepaAdapter.propose_new_texts` is set to `None`. The attribute
+must be **present**: GEPA's proposer evaluates `adapter.propose_new_texts is not None`
+directly, so an adapter that merely omits it makes every reflective-mutation iteration
+raise `AttributeError`, fall back to "did not propose a new candidate", and evolve
+nothing — a silent no-op where the loop only ever scores the seed. Equally, the
+reflective dataset must be **non-empty and keyed by the evolved component**
+(`skill_body`): GEPA skips any requested component absent from it ("Component not in
+reflective dataset. Skipping."), which silently suppresses mutation even with the
+attribute exposed. `tests/test_gepa_runner.py` guards both: it drives GEPA's real
+reflective proposer/engine against `FrozenSuiteGepaAdapter` with a fake reflection LM
+and asserts a genuinely *changed* candidate is produced.
+
 ## The anti-overfit wall (load-bearing)
 
 `docs/ARCHITECTURE.md` §2: the Task Suite is *never fed to the optimizer*, because an

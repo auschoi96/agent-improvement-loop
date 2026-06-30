@@ -532,3 +532,141 @@ class TestLeverConfigShape:
         # The GEPA candidate configs reuse the lever's intervention contract.
         assert BASELINE.intervention is None
         assert CANDIDATE.intervention is not None
+
+
+# ---------------------------------------------------------------------------
+# The reflective-mutation contract (regression guard for the no-op bug)
+#
+# These tests exercise GEPA's REAL reflective proposer/engine — the path the
+# scripted ``fake_optimize`` above deliberately does not touch — because the bug
+# (the adapter never exposed ``propose_new_texts``, so gepa's proposer raised
+# ``AttributeError`` on the ``is not None`` check and evolved nothing) only
+# surfaces inside gepa's own machinery. A fake reflection LM keeps them offline.
+# ---------------------------------------------------------------------------
+
+
+def _fake_reflection_lm(evolved_body: str = _EVOLVED_BODY) -> Any:
+    """A stand-in reflection/teacher LM: returns ``evolved_body`` in a ``` block.
+
+    GEPA's built-in proposer (``InstructionProposalSignature``) extracts the new
+    component text from the last fenced block, so wrapping the body in ``` drives the
+    exact built-in reflection path with no network or model call. Records its prompts
+    on ``.calls`` so a test can prove the reflection LM was actually invoked.
+    """
+
+    def lm(prompt: str) -> str:
+        lm.calls.append(prompt)  # type: ignore[attr-defined]
+        return f"Here is a better instruction:\n```\n{evolved_body}\n```"
+
+    lm.calls = []  # type: ignore[attr-defined]
+    return lm
+
+
+def _train_adapter(holdout: list[str]) -> tuple[FrozenSuiteGepaAdapter, TaskSuite]:
+    """A :class:`FrozenSuiteGepaAdapter` over the 5-task suite, all L1 specs passing."""
+    suite = _five_task_suite()
+    split = split_suite(suite, holdout_task_ids=holdout)
+    gepa_adapter = FrozenSuiteGepaAdapter(
+        suite=suite,
+        adapter=_adapter5(baseline=100_000, seed=70_000, evolved=40_000),
+        split=split,
+        verify_specs=_all_pass_specs(*[t.task_id for t in suite.tasks]),
+        generated_at=_STAMP,
+    )
+    return gepa_adapter, suite
+
+
+class TestReflectiveProposerContract:
+    def test_adapter_exposes_propose_new_texts_for_builtin_path(self) -> None:
+        # The class must EXPOSE the attribute (as None) so gepa's proposer takes its
+        # built-in reflection-LM path instead of raising AttributeError on the
+        # `self.adapter.propose_new_texts is not None` check.
+        assert hasattr(FrozenSuiteGepaAdapter, "propose_new_texts")
+        assert FrozenSuiteGepaAdapter.propose_new_texts is None
+
+    def test_gepa_proposer_runs_builtin_path_without_attributeerror(self) -> None:
+        rm = pytest.importorskip("gepa.proposer.reflective_mutation.reflective_mutation")
+        gepa_adapter, suite = _train_adapter(["ts-04", "ts-05"])
+        train = [t for t in suite.tasks if t.task_id in {"ts-01", "ts-02", "ts-03"}]
+        seed = {_COMPONENT: token_efficiency_skill().body}
+        eval_batch = gepa_adapter.evaluate(train, seed, capture_traces=True)
+        reflective = gepa_adapter.make_reflective_dataset(seed, eval_batch, [_COMPONENT])
+
+        # Drive gepa's REAL proposer against our adapter. On the pre-fix code, line
+        # `if self.adapter.propose_new_texts is not None` raised AttributeError here.
+        proposer = rm.ReflectiveMutationProposer.__new__(rm.ReflectiveMutationProposer)
+        proposer.adapter = gepa_adapter
+        proposer.reflection_lm = _fake_reflection_lm()
+        proposer.logger = SimpleNamespace(log=lambda *a, **k: None)
+        proposer.reflection_prompt_template = None
+
+        new_texts = proposer.propose_new_texts(seed, reflective, [_COMPONENT])
+        # The built-in reflection-LM path ran and produced an evolved body.
+        assert _COMPONENT in new_texts
+        assert "EVOLVED" in new_texts[_COMPONENT]
+        assert proposer.reflection_lm.calls  # the reflection LM was actually invoked
+
+
+class TestMakeReflectiveDataset:
+    def test_nonempty_skill_body_entry_with_actionable_feedback(self) -> None:
+        gepa_adapter, suite = _train_adapter(["ts-05"])
+        train = [t for t in suite.tasks if t.task_id != "ts-05"]
+        seed = {_COMPONENT: token_efficiency_skill().body}
+        eval_batch = gepa_adapter.evaluate(train, seed, capture_traces=True)
+
+        reflective = gepa_adapter.make_reflective_dataset(seed, eval_batch, [_COMPONENT])
+        # Keyed by the component GEPA evolves, non-empty, one record per train task —
+        # an empty or mis-keyed dataset makes gepa's proposer skip ('not in reflective
+        # dataset') and silently evolve nothing even once the attribute is exposed.
+        assert set(reflective) == {_COMPONENT}
+        records = reflective[_COMPONENT]
+        assert len(records) == len(train)
+
+        rec = records[0]
+        assert set(rec) >= {"Inputs", "Generated Outputs", "Feedback"}
+        assert rec["Inputs"]["task_prompt"]  # the task is carried for context
+        feedback = rec["Feedback"]
+        # Actionable signal: the PROMOTE/BLOCK decision, the L1 correctness verdict,
+        # the realized L0 token delta, and what to do (cut waste without regressing).
+        assert "PROMOTED" in feedback or "BLOCKED" in feedback
+        assert "L1 correctness outcome" in feedback
+        assert "L0 tokens 100000 -> 70000" in feedback
+        assert "harness decision:" in feedback
+        assert "reduce redundant" in feedback
+
+
+class TestRealGepaEndToEnd:
+    def test_real_gepa_loop_evolves_the_skill_body(self) -> None:
+        # KEY REGRESSION GUARD. Drives the REAL gepa.optimize engine offline (only the
+        # string reflection LM gepa would resolve via litellm is swapped for our fake).
+        # FAILS on the pre-fix code: gepa's proposer AttributeErrors, returns no
+        # candidate every iteration, and the loop reports changed=False (a no-op).
+        gepa = pytest.importorskip("gepa")
+        suite = _five_task_suite()
+        adapter = _adapter5(baseline=100_000, seed=70_000, evolved=40_000)
+        fake_lm = _fake_reflection_lm()
+
+        def driver(*, reflection_lm: str, **kwargs: Any) -> Any:
+            # Everything is the real gepa.optimize; only the (string) reflection LM is
+            # replaced with the offline fake callable.
+            return gepa.optimize(reflection_lm=fake_lm, **kwargs)
+
+        result = run_gepa_optimization(
+            suite=suite,
+            adapter=adapter,
+            verify_specs=_all_pass_specs(*[t.task_id for t in suite.tasks]),
+            config=GepaConfig(max_metric_calls=24, reflection_minibatch_size=2),
+            holdout_task_ids=["ts-03", "ts-04", "ts-05"],
+            gepa_optimize=driver,
+            generated_at=_STAMP,
+        )
+
+        # The reflection LM ran and GEPA produced a genuinely CHANGED candidate.
+        assert fake_lm.calls, "reflection LM was never invoked — the proposer did not run"
+        assert result.changed is True
+        assert result.evolved_skill_body != result.seed_skill_body
+        assert "EVOLVED" in result.evolved_skill_body
+        assert (result.gepa_num_candidates or 0) >= 2  # seed + at least one evolved
+        # The evolved body still beats the seed on the held-out split GEPA never saw.
+        assert result.holdout_evolved is not None
+        assert result.holdout_evolved.realized_token_savings_pct == 60.0
