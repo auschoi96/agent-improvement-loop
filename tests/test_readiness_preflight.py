@@ -21,6 +21,7 @@ import pytest
 from ail.jobs import readiness_preflight as rp
 from ail.jobs.readiness_preflight import (
     PreflightAccessError,
+    PreflightGoal,
     PreflightResult,
     evaluate,
     gather_facts,
@@ -71,6 +72,15 @@ def _healthy_facts(*, trace_count: int) -> ReadinessFacts:
 
 def _gates(result: PreflightResult) -> dict[GateName, bool]:
     return {g.name: g.passed for g in result.gates}
+
+
+def _quality_goal() -> PreflightGoal:
+    """A quality `--goal`: proving it requires labels + a trusted judge + coverage."""
+    return PreflightGoal(
+        objective_metric="token_efficiency",
+        requires_quality=True,
+        guardrail_names=("token_efficiency",),
+    )
 
 
 # -- fakes for the live gather_facts path ----------------------------------
@@ -194,17 +204,71 @@ class TestRender:
         assert "need 10 more trace(s) to baseline" in out
         assert "need 20 more human label(s)" in out
 
-    def test_summary_is_gate_driven(self) -> None:
+    def test_summary_is_status_driven(self) -> None:
+        """Summary verdicts come from the module's tier/can_prove + its gate.reason text."""
         result = evaluate("exp", facts_source=_facts_source(ReadinessFacts(trace_count=20)))
         summary = rp._summary(result)
         assert "RLM+diagnosis: READY" in summary
-        assert "MemAlign judge: need 20 more labels" in summary
-        assert "prove a total_tokens win: need 30 more traces" in summary
+        # Not-ready clauses reuse the readiness module's own shortfall strings.
+        assert "MemAlign judge: need 20 more human label(s)" in summary
+        assert "prove a total_tokens win: need 30 more trace(s)" in summary
 
     def test_healthy_summary_all_ready(self) -> None:
         out = render(evaluate("exp", facts_source=_facts_source(_healthy_facts(trace_count=60))))
         assert "Unlocked now: RLM+diagnosis: READY; MemAlign judge: READY" in out
         assert "prove a total_tokens win: READY" in out
+
+
+# ---------------------------------------------------------------------------
+# Regression: summary verdicts MUST come from the module's status, not a
+# hand-rolled AND of gates (these would falsely read READY before the fix).
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryDelegatesToStatus:
+    def test_quality_goal_prove_not_ready_without_labels(self) -> None:
+        """50 traces + frozen suite but a QUALITY goal with 0 labels: proving needs
+        labels + a trusted judge, so the module says it cannot prove — and the
+        summary must agree, never reading READY off trace-count + frozen alone."""
+        facts = ReadinessFacts(trace_count=50, frozen_suite_present=True, label_count=0)
+        result = evaluate("exp", goal=_quality_goal(), facts_source=_facts_source(facts))
+
+        # The module's own verdict is "cannot prove".
+        assert result.status.can_prove_improvement is False
+        summary = rp._summary(result)
+        # No fabricated ready: the prove clause reflects the module, not prove∧frozen.
+        assert "prove a token_efficiency win: READY" not in summary
+        assert "prove a token_efficiency win: need 20 more human label(s)" in summary
+
+    def test_memalign_not_ready_without_scored_coverage(self) -> None:
+        """20 labels + a trusted judge but 0% scored-coverage: the quality gate set
+        is not cleared, so the MemAlign-judge verdict must be NOT-READY even though
+        labels and judge-trust individually pass."""
+        facts = ReadinessFacts(
+            trace_count=30,
+            label_count=20,
+            frozen_suite_present=True,
+            n_scored_traces=0,  # 0% scored-coverage < 50% floor
+            judges=(_trusted_judge(n_scored=0),),
+        )
+        result = evaluate("exp", facts_source=_facts_source(facts))
+
+        # The module's quality readiness has not reached a quality-ready tier.
+        assert result.quality_status.tier not in rp._QUALITY_READY_TIERS
+        summary = rp._summary(result)
+        # No fabricated ready: coverage gap blocks the MemAlign-judge verdict.
+        assert "MemAlign judge: READY" not in summary
+        assert "MemAlign judge: scored-coverage 0% below floor 50%" in summary
+
+    def test_deterministic_lens_unchanged(self) -> None:
+        """The deterministic token-win lens is intact: 50 traces + frozen suite + a
+        non-quality goal => ready_to_prove and a READY prove verdict (no regression)."""
+        facts = ReadinessFacts(trace_count=50, frozen_suite_present=True)
+        result = evaluate("exp", facts_source=_facts_source(facts))
+
+        assert result.status.tier is ReadinessTier.READY_TO_PROVE
+        assert result.status.can_prove_improvement is True
+        assert "prove a total_tokens win: READY" in rp._summary(result)
 
 
 # ---------------------------------------------------------------------------

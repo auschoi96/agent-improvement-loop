@@ -51,6 +51,7 @@ from ail.readiness import (
     ReadinessFacts,
     ReadinessStatus,
     ReadinessThresholds,
+    ReadinessTier,
     compute_readiness,
 )
 
@@ -132,6 +133,7 @@ class PreflightResult:
     experiment_id: str
     cohort_label: str
     objective_metric: str
+    headline_requires_quality: bool = False
 
     @property
     def gates(self) -> list[Gate]:
@@ -343,6 +345,7 @@ def evaluate(
         experiment_id=experiment_id,
         cohort_label=cohort.name,
         objective_metric=headline_goal.objective_metric,
+        headline_requires_quality=headline_goal.requires_quality,
     )
 
 
@@ -383,8 +386,12 @@ def render(result: PreflightResult) -> str:
         lines.append(f"  {_GATE_LABELS[name]:<28}{have:<12}{need:<12}{gap:<8}{marker}")
     lines.append("")
 
+    # The tier is the readiness module's own verdict. Only call the prove path
+    # "deterministic" when the headline goal does NOT require quality — a quality
+    # --goal makes the tier enforce label/judge gates too, so the label would lie.
+    prove_tag = "" if result.headline_requires_quality else " (deterministic)"
     lines.append(
-        f"  Prove a '{result.objective_metric}' win (deterministic): {result.status.tier.value}"
+        f"  Prove a '{result.objective_metric}' win{prove_tag}: {result.status.tier.value}"
     )
     lines.append(f"  MemAlign judge (trustworthy quality): {result.quality_status.tier.value}")
     lines.append("")
@@ -437,54 +444,79 @@ def _unmet_reasons(gates: Sequence[Gate]) -> list[str]:
     return out
 
 
-def _summary(result: PreflightResult) -> str:
-    """One line of per-capability status, derived from the individual gates.
+#: Tiers at which the MemAlign-judge / quality signal is trustworthy — i.e. the
+#: readiness module has passed every quality gate (labels, a trusted judge, and
+#: scored-coverage). Read from the module's tier, never re-ANDed from gates.
+_QUALITY_READY_TIERS = (ReadinessTier.READY_FOR_QUALITY, ReadinessTier.READY_TO_PROVE)
 
-    e.g. "RLM+diagnosis: READY; MemAlign judge: need 12 more labels; prove a token
-    win: need 35 more traces". Each clause is gate-driven, so it can never report a
-    capability ready that the readiness module did not pass.
+#: Order in which to surface a MemAlign-judge blocker (the conceptual label /
+#: judge / coverage gates first, then the universal frozen-suite gate).
+_MEMALIGN_GATE_ORDER = (
+    GateName.HUMAN_LABELS,
+    GateName.JUDGE_TRUSTED,
+    GateName.SCORED_COVERAGE,
+    GateName.FROZEN_SUITE,
+)
+
+
+def _summary(result: PreflightResult) -> str:
+    """One line of per-capability status, driven by the readiness module's verdicts.
+
+    e.g. "RLM+diagnosis: READY; MemAlign judge: need 12 more labels; prove a
+    total_tokens win: need 35 more traces". Each clause's READY/NOT-READY comes
+    from the module's computed ``tier`` / ``can_prove_improvement`` — never from
+    the CLI re-ANDing individual gates — so it can never report a capability ready
+    that ``compute_readiness`` did not. The not-ready text reuses the module's own
+    ``gate.reason`` shortfall string.
     """
-    by_name = {g.name: g for g in result.gates}
-    facts = result.facts
-    th = result.thresholds
+    status = result.status
+    quality = result.quality_status
+    metric = result.objective_metric
     parts: list[str] = []
 
-    baseline = by_name.get(GateName.TRACE_BASELINE)
-    if baseline is not None:
-        parts.append(
-            "RLM+diagnosis: READY"
-            if baseline.passed
-            else f"RLM+diagnosis: need {max(0, th.baseline_min_traces - facts.trace_count)} "
-            "more traces"
-        )
+    # RLM + diagnosis: unlocked the moment the cohort clears the baseline floor,
+    # i.e. the module leaves the COLLECTING tier.
+    if status.tier is ReadinessTier.COLLECTING:
+        parts.append(f"RLM+diagnosis: {_gate_reason(status, GateName.TRACE_BASELINE)}")
+    else:
+        parts.append("RLM+diagnosis: READY")
 
-    labels = by_name.get(GateName.HUMAN_LABELS)
-    judge = by_name.get(GateName.JUDGE_TRUSTED)
-    if labels is not None:
-        if not labels.passed:
-            parts.append(
-                f"MemAlign judge: need {max(0, th.quality_min_labels - facts.label_count)} "
-                "more labels"
-            )
-        elif judge is not None and not judge.passed:
-            parts.append("MemAlign judge: labels in — align + measure the judge (Stage 3)")
-        else:
-            parts.append("MemAlign judge: READY")
+    # MemAlign judge: the module's QUALITY readiness — passing the quality tier
+    # means labels + a trusted judge + scored-coverage all cleared, not just two.
+    if quality.tier in _QUALITY_READY_TIERS:
+        parts.append("MemAlign judge: READY")
+    else:
+        parts.append(f"MemAlign judge: {_first_quality_blocker(quality)}")
 
-    prove = by_name.get(GateName.TRACE_PROVE)
-    frozen = by_name.get(GateName.FROZEN_SUITE)
-    if prove is not None and frozen is not None:
-        if prove.passed and frozen.passed:
-            parts.append(f"prove a {result.objective_metric} win: READY")
-        elif not prove.passed:
-            parts.append(
-                f"prove a {result.objective_metric} win: need "
-                f"{max(0, th.prove_min_traces - facts.trace_count)} more traces"
-            )
-        else:
-            parts.append(f"prove a {result.objective_metric} win: need a frozen Task Suite")
+    # Prove an improvement: the module's own can_prove_improvement flag for the
+    # user's goal. For a quality --goal that flag already requires labels + a
+    # trusted judge, so this never reads green on a token-count-only basis.
+    if status.can_prove_improvement:
+        parts.append(f"prove a {metric} win: READY")
+    else:
+        parts.append(f"prove a {metric} win: {_first_blocker(status)}")
 
     return "; ".join(parts)
+
+
+def _gate_reason(status: ReadinessStatus, name: GateName) -> str:
+    """The module's reason string for ``name`` (assumed unmet here)."""
+    gate = status.gate_for(name)
+    return gate.reason if gate is not None else "not ready"
+
+
+def _first_blocker(status: ReadinessStatus) -> str:
+    """The module's first unmet-gate reason (``reasons`` is in gate order)."""
+    return status.reasons[0] if status.reasons else "not ready"
+
+
+def _first_quality_blocker(status: ReadinessStatus) -> str:
+    """The first unmet quality gate's reason, in :data:`_MEMALIGN_GATE_ORDER`."""
+    for name in _MEMALIGN_GATE_ORDER:
+        gate = status.gate_for(name)
+        if gate is not None and not gate.passed:
+            return gate.reason
+    return "not ready"
 
 
 # ---------------------------------------------------------------------------
