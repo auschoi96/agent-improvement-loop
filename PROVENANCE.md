@@ -222,6 +222,7 @@ These are used through their published package and public API; their source is
 | Dependency | License | Used by | How |
 |---|---|---|---|
 | **HALO** (`halo-engine`, [context-labs/halo](https://github.com/context-labs/halo)) | **MIT** | `src/ail/l3/` | The L3 recursive trace reviewer **adopts** HALO as the trace-specialized Recursive LM engine (byte-offset index + bounded navigation tools + recursive subagents + compaction) so arbitrarily large traces (this corpus reaches 943K tokens) can be reviewed without exceeding a single judge call's context. We **do not reimplement or vendor the engine**: it is the optional `l3` extra (`pip install 'ail[l3]'`), lazy-imported. AIL contributes only original glue around it — see the L3 row below. |
+| **DSPy** (`dspy`, [stanfordnlp/dspy](https://github.com/stanfordnlp/dspy)) | **MIT** | `src/ail/judges/alignment.py` | The optimizer backend that MLflow's `MemAlignOptimizer` requires for judge alignment. AIL does **not** call dspy directly — it reaches it only through MLflow's public `mlflow.genai.judges.optimizers` API. dspy is **not vendored**: it is the optional `align` extra (`pip install 'ail[align]'`), lazy-imported inside `build_memalign_optimizer`, so the base (unaligned) judges and CI never require it. (Distinct from the DSPy `RLM` *design-inspiration* reference noted above — this is the actual library dependency.) |
 
 ### L3 recursive trace reviewer (`src/ail/l3/`) — clean-room note
 

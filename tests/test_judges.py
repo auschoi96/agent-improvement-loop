@@ -14,6 +14,7 @@ The one genuinely-live path (a real MemAlign alignment) is gated behind
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from typing import Any, Literal
 
@@ -622,10 +623,25 @@ class TestAlignJudge:
             align_judge(FakeJudge(), AlignmentSet.of([]))
 
     def test_build_memalign_optimizer_requires_dspy(self) -> None:
-        # dspy is not a CI dependency, so constructing a real MemAlign optimizer
-        # raises a clear ImportError rather than succeeding.
+        # The align path must fail with a clear, actionable ImportError when the
+        # optional dspy backend is absent (the default ``.[dev]`` / CI install).
+        # Skipped when dspy IS present (the ``align`` extra) — that case is
+        # covered by test_build_memalign_optimizer_with_dspy below.
+        if importlib.util.find_spec("dspy") is not None:
+            pytest.skip("dspy installed (the 'align' extra); the absence path is not exercisable")
         with pytest.raises(ImportError, match="dspy"):
             build_memalign_optimizer()
+
+    def test_build_memalign_optimizer_with_dspy(self) -> None:
+        # With the optional ``align`` extra (dspy) installed, the lazy import
+        # resolves and build_memalign_optimizer returns a real MemAlign optimizer
+        # without raising. Skipped in the default (dspy-absent) install, so this
+        # asserts the dependency is correctly declared and importable end-to-end.
+        pytest.importorskip("dspy", reason="requires the optional 'align' extra (dspy)")
+        from mlflow.genai.judges.base import AlignmentOptimizer
+
+        optimizer = build_memalign_optimizer()
+        assert isinstance(optimizer, AlignmentOptimizer)
 
 
 # ---------------------------------------------------------------------------

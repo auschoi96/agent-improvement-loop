@@ -56,6 +56,14 @@ agents = ["databricks-agents>=1.11,<2"]
 # pandas/numpy); only L3 review needs it. HALO is a DEPENDENCY, never vendored —
 # see PROVENANCE.md / NOTICE.
 l3 = ["halo-engine>=0.1.26,<0.2"]
+# MemAlign judge alignment (src/ail/judges/alignment.py) drives MLflow's
+# MemAlignOptimizer, which requires the dspy optimizer backend ("DSPy library is
+# required but not installed" without it). Optional + lazy-imported (inside
+# build_memalign_optimizer) so the core library + base (unaligned) judges install
+# and CI run without dspy; only the judge-alignment cadence needs it. Lower bound
+# is the version verified end-to-end (import + build_memalign_optimizer); <4 caps
+# the major to guard against a future dspy API break under MLflow's MemAlign.
+align = ["dspy>=3.2.1,<4"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

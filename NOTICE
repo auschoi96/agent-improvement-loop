@@ -21,3 +21,14 @@ HALO (halo-engine)
               structured-verdict parser, and the reviewer/attachment glue. The
               HALO engine itself is an optional dependency (the `l3` extra),
               lazy-imported, and is neither vendored nor reimplemented here.
+
+DSPy (dspy)
+  - Project:  stanfordnlp/dspy  (https://github.com/stanfordnlp/dspy)
+  - Package:  dspy on PyPI
+  - License:  MIT
+  - Used by:  src/ail/judges/alignment.py — the optimizer backend that MLflow's
+              MemAlignOptimizer requires for judge alignment. AIL does not call
+              dspy directly; it reaches it through MLflow's public
+              mlflow.genai.judges.optimizers API. dspy is an optional dependency
+              (the `align` extra), lazy-imported inside build_memalign_optimizer,
+              and is neither vendored nor reimplemented here.
