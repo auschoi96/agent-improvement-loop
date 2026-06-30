@@ -28,6 +28,7 @@ from ail.compare import (
     CORRECTNESS_GUARDRAIL,
     EXECUTION_GUARDRAIL,
     INTERIM_JUDGE_NOTE,
+    NO_LLM_JUDGE,
     PROGRAMMATIC_GUARDRAIL,
     CallableIntervention,
     ComparisonConfig,
@@ -415,6 +416,148 @@ class TestGuardrails:
         assert result.recommendation is Recommendation.BLOCK
         execution = result.guardrail_for(EXECUTION_GUARDRAIL)
         assert execution is not None and execution.passed is False
+
+
+# ---------------------------------------------------------------------------
+# L1-only correctness (NO_LLM_JUDGE): the frozen-suite mode
+# ---------------------------------------------------------------------------
+
+
+class TestNoLLMJudge:
+    """With NO_LLM_JUDGE the L1 programmatic check IS the correctness guardrail.
+
+    The frozen Task Suite carries no human-authored expectations, so an LLM judge
+    cannot score it; these tests pin the judge-free decision path and prove it
+    stays fail-closed.
+    """
+
+    @staticmethod
+    def _adapter(candidate_tokens: int = 50_000, candidate_success: bool = True) -> ScriptedAdapter:
+        baseline = _run(trace_id="base", output="baseline: 42", input_tokens=100_000)
+        candidate = _run(
+            trace_id="cand",
+            output="candidate: 42",
+            input_tokens=candidate_tokens,
+            success=candidate_success,
+        )
+        return ScriptedAdapter(baseline, candidate)
+
+    def test_l1_pass_promotes_with_no_judge_in_path(self) -> None:
+        result = compare_candidate(
+            _case(),
+            self._adapter(),
+            intervention=use_tool_intervention(),
+            correctness_judge=NO_LLM_JUDGE,
+            programmatic_check=lambda r: ProgrammaticSignal(name="pytest", passed=True),
+        )
+        assert result.recommendation is Recommendation.PROMOTE
+        # No LLM judge ran: there is no 'correctness' guardrail, only execution + L1.
+        assert result.guardrail_for(CORRECTNESS_GUARDRAIL) is None
+        l1 = result.guardrail_for(PROGRAMMATIC_GUARDRAIL)
+        assert l1 is not None and l1.passed is True and l1.interim is False
+        assert {g.name for g in result.guardrails} == {EXECUTION_GUARDRAIL, PROGRAMMATIC_GUARDRAIL}
+
+    def test_no_check_supplied_fails_closed(self) -> None:
+        # NO_LLM_JUDGE and no L1 check => no correctness signal at all => BLOCK.
+        result = compare_candidate(
+            _case(),
+            self._adapter(),
+            intervention=use_tool_intervention(),
+            correctness_judge=NO_LLM_JUDGE,
+        )
+        assert result.objective_met is True  # tokens dropped...
+        assert result.recommendation is Recommendation.BLOCK  # ...but no correctness signal
+        correctness = result.guardrail_for(CORRECTNESS_GUARDRAIL)
+        assert correctness is not None and correctness.passed is False
+        assert "no correctness signal" in correctness.reason
+
+    def test_l1_regression_blocks_with_no_judge(self) -> None:
+        def check(r: AgentRunResult) -> ProgrammaticSignal:
+            return ProgrammaticSignal(name="pytest", passed=r.trace.trace_id != "cand")
+
+        result = compare_candidate(
+            _case(),
+            self._adapter(),
+            intervention=use_tool_intervention(),
+            correctness_judge=NO_LLM_JUDGE,
+            programmatic_check=check,
+        )
+        assert result.objective_met is True
+        assert result.recommendation is Recommendation.BLOCK
+        l1 = result.guardrail_for(PROGRAMMATIC_GUARDRAIL)
+        assert l1 is not None and l1.regressed is True
+
+    def test_errored_candidate_check_fails_closed(self) -> None:
+        # A verification that could not run (errored) must NOT read as "no regression".
+        def check(r: AgentRunResult) -> ProgrammaticSignal:
+            if r.trace.trace_id == "cand":
+                return ProgrammaticSignal(name="pytest", passed=False, errored=True, details="boom")
+            return ProgrammaticSignal(name="pytest", passed=True)
+
+        result = compare_candidate(
+            _case(),
+            self._adapter(),
+            intervention=use_tool_intervention(),
+            correctness_judge=NO_LLM_JUDGE,
+            programmatic_check=check,
+        )
+        assert result.objective_met is True
+        assert result.recommendation is Recommendation.BLOCK
+        l1 = result.guardrail_for(PROGRAMMATIC_GUARDRAIL)
+        assert l1 is not None and l1.passed is False and l1.regressed is False
+        assert "no verdict" in l1.reason
+
+    def test_errored_baseline_check_fails_closed(self) -> None:
+        def check(r: AgentRunResult) -> ProgrammaticSignal:
+            if r.trace.trace_id == "base":
+                return ProgrammaticSignal(name="pytest", passed=False, errored=True, details="boom")
+            return ProgrammaticSignal(name="pytest", passed=True)
+
+        result = compare_candidate(
+            _case(),
+            self._adapter(),
+            intervention=use_tool_intervention(),
+            correctness_judge=NO_LLM_JUDGE,
+            programmatic_check=check,
+        )
+        assert result.recommendation is Recommendation.BLOCK
+        l1 = result.guardrail_for(PROGRAMMATIC_GUARDRAIL)
+        assert l1 is not None and l1.passed is False
+
+    def test_crashed_candidate_blocks_under_no_llm_judge(self) -> None:
+        # The mandated fail-closed case in the judge-free path: a ~0-token crash with
+        # an L1 check that "passes" must still BLOCK on the execution guardrail.
+        result = compare_candidate(
+            _case(),
+            self._adapter(candidate_tokens=500, candidate_success=False),
+            intervention=use_tool_intervention(),
+            correctness_judge=NO_LLM_JUDGE,
+            programmatic_check=lambda r: ProgrammaticSignal(name="pytest", passed=True),
+        )
+        assert result.objective_met is True  # tokens "fell" because it did nothing
+        assert result.recommendation is Recommendation.BLOCK
+        execution = result.guardrail_for(EXECUTION_GUARDRAIL)
+        assert execution is not None and execution.passed is False
+
+    def test_l1_failed_baseline_blocks(self) -> None:
+        # A failed baseline is not a valid anchor, so promotion fails closed: the
+        # objective is "same quality for fewer tokens", and if the no-skill baseline
+        # never passed the L1 check, its token count cannot anchor the comparison and
+        # a token reduction proves nothing. Both arms failing here must BLOCK, not
+        # promote on a spurious "fails for both, no regression".
+        result = compare_candidate(
+            _case(),
+            self._adapter(),
+            intervention=use_tool_intervention(),
+            correctness_judge=NO_LLM_JUDGE,
+            programmatic_check=lambda r: ProgrammaticSignal(name="pytest", passed=False),
+        )
+        l1 = result.guardrail_for(PROGRAMMATIC_GUARDRAIL)
+        assert l1 is not None and l1.passed is False and l1.regressed is False
+        assert l1.baseline_value is False
+        assert "not a valid anchor" in l1.reason
+        assert result.objective_met is True  # tokens dropped...
+        assert result.recommendation is Recommendation.BLOCK  # ...but baseline never passed
 
 
 # ---------------------------------------------------------------------------

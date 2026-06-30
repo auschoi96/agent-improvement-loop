@@ -31,6 +31,7 @@ from ail.compare.contract import (
 from ail.compare.harness import (
     CORRECTNESS_GUARDRAIL,
     EXECUTION_GUARDRAIL,
+    NO_LLM_JUDGE,
     PROGRAMMATIC_GUARDRAIL,
     CallableIntervention,
     ComparisonConfig,
@@ -57,6 +58,7 @@ __all__ = [
     # harness
     "compare_candidate",
     "ComparisonConfig",
+    "NO_LLM_JUDGE",
     "Intervention",
     "CallableIntervention",
     "ProgrammaticSignal",

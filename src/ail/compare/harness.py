@@ -43,6 +43,18 @@ it is recorded as ``interim`` on every :class:`~ail.compare.contract.GuardrailCh
 MemAlign-aligned, Human-Anchor-audited judge once labels exist — we do not fake
 alignment by pretending an unaligned judge is calibrated.
 
+**L1-only correctness (:data:`NO_LLM_JUDGE`).** Pass :data:`NO_LLM_JUDGE` as the
+``correctness_judge`` to take the LLM judge out of the decision path entirely and
+let the deterministic **L1 programmatic** check (tests/build pass) *be* the
+correctness guardrail. This is the honest mode for the frozen Task Suite: its
+tasks are :class:`~ail.task_suite.schema.Task` reconstructions with **no
+human-authored expectations** (a TASK_SUITE ground-truth set must be empty), so a
+judge would have nothing to score against and an uncalibrated judge would be
+distrusted by the readiness wall anyway. Fail-closed is preserved: with
+:data:`NO_LLM_JUDGE` and no ``programmatic_check`` there is no correctness signal
+at all, so a **failed** correctness guardrail is emitted and the recommendation is
+``BLOCK``.
+
 **Frozen-suite contract.** The harness only ever *reads* the task case — it never
 writes to, mutates, re-pools, or trains against the Task Suite. The case is a
 frozen pydantic model and the harness derives fresh
@@ -83,6 +95,7 @@ __all__ = [
     "ProgrammaticSignal",
     "ProgrammaticCheck",
     "ComparisonConfig",
+    "NO_LLM_JUDGE",
     "compare_candidate",
 ]
 
@@ -93,6 +106,37 @@ EXECUTION_GUARDRAIL = "execution"
 CORRECTNESS_GUARDRAIL = "correctness"
 #: Name of the (optional) L1 programmatic guardrail check on the result.
 PROGRAMMATIC_GUARDRAIL = "programmatic"
+
+
+class _NoLLMJudge:
+    """The type of the :data:`NO_LLM_JUDGE` sentinel (one instance, opaque)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "NO_LLM_JUDGE"
+
+
+#: Pass as ``correctness_judge`` to run the correctness guardrail on the **L1
+#: programmatic signal alone**, with **no LLM judge in the decision path**.
+#:
+#: This is the honest mode for the frozen Task Suite, whose tasks carry **no
+#: human-authored expectations** (a :class:`~ail.task_suite.schema.TaskSuite`
+#: holds :class:`~ail.task_suite.schema.Task` reconstructions, and a TASK_SUITE
+#: ground-truth set must be empty — see
+#: :func:`ail.groundtruth.schema.validate_pool_membership`). With nothing to score
+#: against, an LLM judge would be un-scorable on every task and fail closed
+#: everywhere; and a judge built on zero human labels is uncalibrated and would be
+#: distrusted by the readiness wall (``docs/ARCHITECTURE.md`` §8). So the
+#: deterministic, externally-verifiable L1 check (tests/build pass) **is** the
+#: correctness guardrail.
+#:
+#: Fail-closed contract: ``NO_LLM_JUDGE`` does **not** weaken the gate. When it is
+#: set and no ``programmatic_check`` is supplied, there is no correctness signal
+#: at all, so :func:`compare_candidate` emits a **failed** correctness guardrail
+#: (``passed=False``) and the recommendation is ``BLOCK`` — a promotion is never
+#: certified without a correctness guardrail.
+NO_LLM_JUDGE: _NoLLMJudge = _NoLLMJudge()
 
 
 class Intervention(ABC):
@@ -147,11 +191,24 @@ class ProgrammaticSignal:
     itself (there is no L1 runner in scope here); a caller supplies a
     :data:`ProgrammaticCheck` that derives one of these from an
     :class:`~ail.ingest.base.AgentRunResult`.
+
+    ``errored`` distinguishes "the check **ran** and reported a fail"
+    (``passed=False, errored=False``) from "the check could **not** produce a
+    verdict" (``errored=True`` — the verification command could not be launched,
+    timed out, or crashed). The two must not be conflated: a check that *ran* and
+    failed is real data the guardrail acts on — a **failed baseline** is not a valid
+    anchor (the objective is "same quality for fewer tokens", and a token reduction
+    against a baseline that never passed proves nothing), so it fails closed, while
+    a failed candidate against a passing baseline is a regression. A check that
+    produced **no verdict** is missing data and likewise fails the guardrail closed
+    — an unmeasured guardrail never certifies a promotion (see
+    :func:`_programmatic_guardrail`).
     """
 
     name: str
     passed: bool
     details: str = ""
+    errored: bool = False
 
 
 #: A caller-supplied L1 check: derive a :class:`ProgrammaticSignal` from a run's
@@ -449,23 +506,104 @@ def _correctness_guardrail(
     )
 
 
+def _no_correctness_signal_guardrail() -> GuardrailCheck:
+    """A failed correctness guardrail standing in for *no correctness signal at all*.
+
+    Emitted when the LLM judge is disabled (:data:`NO_LLM_JUDGE`) **and** no L1
+    ``programmatic_check`` was supplied: there is then nothing measuring
+    correctness, so the gate fails closed rather than letting a token reduction
+    promote unguarded. An unmeasured guardrail never certifies a promotion.
+    """
+    return GuardrailCheck(
+        name=CORRECTNESS_GUARDRAIL,
+        passed=False,
+        reason=(
+            "no correctness signal: the LLM judge is disabled (NO_LLM_JUDGE) and no L1 "
+            "programmatic check was supplied; failing closed — a promotion is never certified "
+            "without a correctness guardrail"
+        ),
+        baseline_value=None,
+        candidate_value=None,
+        regressed=False,
+        judge_name=None,
+        interim=False,
+        interim_note=None,
+    )
+
+
 def _programmatic_guardrail(
     baseline: ProgrammaticSignal, candidate: ProgrammaticSignal
 ) -> GuardrailCheck:
-    """Optional L1 non-regression guardrail: candidate must not break what passed.
+    """Optional L1 guardrail anchored on a PASSING baseline: fail closed otherwise.
 
-    Same non-regression semantics as correctness: a programmatic check that the
-    baseline already failed does not block (the gate guards against the
-    intervention *causing* a failure), but a check that passed at baseline and
-    fails for the candidate is a regression.
+    The objective is "same quality for fewer tokens", so the baseline's token count
+    only anchors a reduction if the baseline actually **passed** its L1 check. A
+    baseline that did not pass is not a valid anchor: a token drop measured against
+    a failed baseline proves nothing, so it fails closed (``BLOCK``) regardless of
+    the candidate — independently of whether the candidate also failed. This is the
+    same fail-closed treatment the execution guardrail applies to a failed baseline;
+    a failed baseline that *also* fails for the candidate must never read as "fails
+    for both, no regression" and certify a promotion.
+
+    Fails closed first on a **no-verdict** signal: if either side's check could
+    not run (:attr:`ProgrammaticSignal.errored`), there is no measurement to
+    compare, so the guardrail fails regardless of the ``passed`` flags — a broken
+    or un-runnable verification is missing data, not a verdict.
+
+    With a passing baseline as the anchor, the candidate must not break what passed:
+    a check that passed at baseline and fails for the candidate is a regression and
+    ``BLOCK``s.
     """
+    if baseline.errored or candidate.errored:
+        problems = []
+        if baseline.errored:
+            problems.append(
+                f"baseline check '{baseline.name}' produced no verdict ({baseline.details})"
+            )
+        if candidate.errored:
+            problems.append(
+                f"candidate check '{candidate.name}' produced no verdict ({candidate.details})"
+            )
+        reason = (
+            "L1 check produced no verdict ("
+            + "; ".join(problems)
+            + "); failing closed — an unmeasured guardrail never certifies a promotion"
+        )
+        return GuardrailCheck(
+            name=PROGRAMMATIC_GUARDRAIL,
+            passed=False,
+            reason=reason,
+            baseline_value=baseline.passed,
+            candidate_value=candidate.passed,
+            regressed=False,
+            judge_name=None,
+            interim=False,
+            interim_note=None,
+        )
+    if not baseline.passed:
+        reason = (
+            f"L1 '{baseline.name}' did not pass at baseline; failing closed — a failed baseline "
+            "is not a valid anchor, so a token reduction against it proves nothing"
+            + (f" ({baseline.details})" if baseline.details else "")
+        )
+        return GuardrailCheck(
+            name=PROGRAMMATIC_GUARDRAIL,
+            passed=False,
+            reason=reason,
+            baseline_value=baseline.passed,
+            candidate_value=candidate.passed,
+            regressed=False,
+            judge_name=None,
+            interim=False,
+            interim_note=None,
+        )
+    # Baseline passed: it is a valid anchor. Only a candidate that breaks what
+    # passed is a regression.
     regressed = baseline.passed and not candidate.passed
     if regressed:
         reason = f"L1 '{candidate.name}' REGRESSED: passed at baseline, fails for candidate" + (
             f" ({candidate.details})" if candidate.details else ""
         )
-    elif not candidate.passed:
-        reason = f"L1 '{candidate.name}' fails for both baseline and candidate (no regression)"
     else:
         reason = f"L1 '{candidate.name}' passes for the candidate"
     return GuardrailCheck(
@@ -491,7 +629,7 @@ def compare_candidate(
     adapter: AgentAdapter,
     *,
     intervention: Intervention | None = None,
-    correctness_judge: Judge | None = None,
+    correctness_judge: Judge | _NoLLMJudge | None = None,
     programmatic_check: ProgrammaticCheck | None = None,
     config: ComparisonConfig | None = None,
     pricebook: dict[str, PriceBookEntry] | None = None,
@@ -513,9 +651,15 @@ def compare_candidate(
             correctness judge (:func:`ail.judges.scorers.make_correctness_judge`)
             built with ``temperature=0`` for reproducible scoring. INTERIM and not
             MemAlign-aligned — see the module docstring. Injectable so tests pass a
-            scripted judge with no model call.
+            scripted judge with no model call. Pass :data:`NO_LLM_JUDGE` to run
+            **no** LLM judge and let the L1 ``programmatic_check`` be the
+            correctness guardrail — the honest mode for the frozen Task Suite,
+            whose tasks carry no human-authored expectations to score against. With
+            ``NO_LLM_JUDGE`` and no ``programmatic_check`` the gate fails closed
+            (a failed correctness guardrail, ``BLOCK``).
         programmatic_check: Optional L1 check applied to **both** runs to add a
-            programmatic non-regression guardrail. ``None`` omits it.
+            programmatic non-regression guardrail. ``None`` omits it (unless
+            ``NO_LLM_JUDGE`` is set, in which case its absence fails closed).
         config: Objective metric + reduction threshold knobs.
         pricebook: Optional L0 price-book override (passed to
             :func:`ail.metrics.l0_deterministic.compute_trace_metrics`).
@@ -554,18 +698,25 @@ def compare_candidate(
         )
     objective_met = _objective_met(objective_delta, cfg.min_token_reduction_pct)
 
-    judge = correctness_judge if correctness_judge is not None else _default_correctness_judge()
     # Execution success is the most fundamental gate (a failed run is untrustworthy
     # and its token "savings" are not real), so it leads the guardrail list.
-    guardrails = [
-        _execution_guardrail(baseline_result, candidate_result),
-        _correctness_guardrail(
-            judge,
-            case=case,
-            baseline_result=baseline_result,
-            candidate_result=candidate_result,
-        ),
-    ]
+    guardrails = [_execution_guardrail(baseline_result, candidate_result)]
+    if isinstance(correctness_judge, _NoLLMJudge):
+        # No LLM judge in the decision path: the L1 programmatic check is the
+        # correctness guardrail. With no check supplied there is no correctness
+        # signal at all, so fail closed with an explicit failed guardrail.
+        if programmatic_check is None:
+            guardrails.append(_no_correctness_signal_guardrail())
+    else:
+        judge = correctness_judge if correctness_judge is not None else _default_correctness_judge()
+        guardrails.append(
+            _correctness_guardrail(
+                judge,
+                case=case,
+                baseline_result=baseline_result,
+                candidate_result=candidate_result,
+            )
+        )
     if programmatic_check is not None:
         guardrails.append(
             _programmatic_guardrail(
