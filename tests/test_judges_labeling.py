@@ -15,11 +15,14 @@ import pytest
 
 from ail.ingest.base import NormalizedTrace, TraceSource
 from ail.judges.labeling import (
+    DEFAULT_LOW_GRADE_THRESHOLD,
+    StratifiedAnchorSplit,
     TraceLabel,
     assemble_pools,
     record_label,
     record_labels,
     split_labels,
+    stratified_split_labels,
     to_alignment_set,
     to_human_anchor,
 )
@@ -350,3 +353,150 @@ class TestPoolAssembly:
         labels = [TraceLabel(trace_id="t1", name="x", value=1)]
         with pytest.raises(PoolOverlapError):
             assemble_pools(source, labels)
+
+
+# ---------------------------------------------------------------------------
+# stratified_split_labels — a representative, grade-spread held-out anchor
+# ---------------------------------------------------------------------------
+
+
+def _graded(trace_id: str, grade: float) -> TraceLabel:
+    """A token_efficiency label of a given numeric grade."""
+    return TraceLabel(trace_id=trace_id, name="token_efficiency", value=grade)
+
+
+def _anchor_trace_ids(split: StratifiedAnchorSplit) -> set[str]:
+    return {label.trace_id for label in split.anchor_labels}
+
+
+def _alignment_trace_ids(split: StratifiedAnchorSplit) -> set[str]:
+    return {label.trace_id for label in split.alignment_labels}
+
+
+class TestStratifiedSplitLabels:
+    def test_skewed_corpus_anchor_spans_grades_including_low(self) -> None:
+        # The root cause: small judge-ingestible traces skew "efficient" (grade 5),
+        # so a uniform draw yields an all-high anchor that cannot detect a judge
+        # pushed toward high scores. The stratified anchor must include the rare
+        # low-efficiency examples AND span the range.
+        grades = [5, 5, 5, 5, 1, 5, 5, 2, 5, 5]
+        labels = [_graded(f"t{i}", g) for i, g in enumerate(grades)]
+        split = stratified_split_labels(
+            labels, name="token_efficiency", anchor_fraction=0.3, seed=0
+        )
+        assert split.includes_low
+        assert split.grade_span > 0.0
+        assert split.is_discriminating
+        # Disjoint, total coverage, anchor size by the same rule as split_labels.
+        anchor_ids, align_ids = _anchor_trace_ids(split), _alignment_trace_ids(split)
+        assert anchor_ids.isdisjoint(align_ids)
+        assert anchor_ids | align_ids == {f"t{i}" for i in range(10)}
+        assert len(anchor_ids) == 3  # round(10 * 0.3)
+        # The lowest grade present (1) is held out — the discriminating example.
+        assert min(split.anchor_grades) == 1.0
+
+    def test_single_low_example_is_always_held_out(self) -> None:
+        # One grade-1 trace among many 5s: the stratified draw must still surface
+        # it (a uniform draw would usually miss it). This is the fix in one assert.
+        labels = [_graded(f"hi{i}", 5) for i in range(19)] + [_graded("low", 1)]
+        split = stratified_split_labels(
+            labels, name="token_efficiency", anchor_fraction=0.3, seed=3
+        )
+        assert "low" in _anchor_trace_ids(split)
+        assert split.includes_low
+
+    def test_all_high_corpus_is_not_discriminating(self) -> None:
+        # Honest signal: with no low-efficiency labels available, the anchor cannot
+        # detect a high-score bias, and the split says so rather than pretending.
+        labels = [_graded(f"t{i}", g) for i, g in enumerate([5, 5, 4, 5, 5, 5])]
+        split = stratified_split_labels(labels, name="token_efficiency", anchor_fraction=0.3)
+        assert not split.includes_low
+        assert not split.is_discriminating
+        assert split.low_grade_threshold == DEFAULT_LOW_GRADE_THRESHOLD
+
+    def test_ungraded_traces_kept_in_alignment_not_dropped(self) -> None:
+        # A trace with no numeric grade for the judge cannot be stratified; it must
+        # stay in the alignment pool (never silently dropped) and not skew the
+        # anchor's grade coverage.
+        labels = [
+            _graded("g1", 1),
+            _graded("g2", 5),
+            TraceLabel(trace_id="ungraded", name="token_efficiency", value="n/a"),
+        ]
+        split = stratified_split_labels(labels, name="token_efficiency", anchor_fraction=0.5)
+        assert "ungraded" in _alignment_trace_ids(split)
+        assert "ungraded" not in _anchor_trace_ids(split)
+        assert all(isinstance(g, float) for g in split.anchor_grades)
+
+    def test_stratifies_on_named_judge_when_multiple_labels_per_trace(self) -> None:
+        # A trace labeled for two judges grades on the requested judge's value.
+        labels = [
+            _graded("t1", 1),
+            TraceLabel(trace_id="t1", name="correctness", value="yes"),
+            _graded("t2", 5),
+            TraceLabel(trace_id="t2", name="correctness", value="no"),
+            _graded("t3", 3),
+        ]
+        split = stratified_split_labels(labels, name="token_efficiency", anchor_fraction=0.4)
+        # Both labels of an anchored trace travel together (trace-level partition).
+        for tid in _anchor_trace_ids(split):
+            assert sum(1 for label in split.anchor_labels if label.trace_id == tid) == (
+                2 if tid in {"t1", "t2"} else 1
+            )
+
+    def test_deterministic_for_a_seed(self) -> None:
+        labels = [_graded(f"t{i}", (i % 5) + 1) for i in range(12)]
+        a = stratified_split_labels(labels, name="token_efficiency", seed=7)
+        b = stratified_split_labels(labels, name="token_efficiency", seed=7)
+        assert a.anchor_grades == b.anchor_grades
+        assert [label.trace_id for label in a.anchor_labels] == [
+            label.trace_id for label in b.anchor_labels
+        ]
+
+    def test_single_trace_goes_to_alignment(self) -> None:
+        split = stratified_split_labels([_graded("solo", 3)], name="token_efficiency")
+        assert _alignment_trace_ids(split) == {"solo"}
+        assert split.anchor_labels == []
+        assert split.anchor_grades == ()
+
+    def test_empty_is_empty(self) -> None:
+        split = stratified_split_labels([], name="token_efficiency")
+        assert split.alignment_labels == []
+        assert split.anchor_labels == []
+        assert split.grade_span == 0.0
+        assert not split.is_discriminating
+
+    def test_rejects_bad_fraction(self) -> None:
+        with pytest.raises(ValueError, match="anchor_fraction"):
+            stratified_split_labels([], anchor_fraction=1.5)
+
+    def test_stratified_anchor_trace_stays_blinded_of_human_gold(self) -> None:
+        # End-to-end with the blinding guarantee: the stratified anchor's held-out
+        # traces, when handed to a {{ trace }} judge via to_human_anchor(source=...),
+        # must carry NO human assessment — the judge can never read its own gold.
+        from mlflow.entities import AssessmentSource, Feedback
+        from mlflow.entities.assessment_source import AssessmentSourceType
+
+        class _Src(_FakeSource):
+            def get_trace(self, trace_id: str) -> NormalizedTrace | None:
+                raw = _RawTrace(trace_id)
+                raw.info.assessments = [
+                    Feedback(
+                        name="token_efficiency",
+                        value=1,  # the HUMAN gold the judge must NOT see
+                        source=AssessmentSource(
+                            source_type=AssessmentSourceType.HUMAN, source_id="austin"
+                        ),
+                    )
+                ]
+                return NormalizedTrace(trace_id=trace_id, raw=raw)
+
+        labels = [_graded(f"t{i}", g) for i, g in enumerate([1, 5, 5, 5, 2, 5])]
+        split = stratified_split_labels(labels, name="token_efficiency", anchor_fraction=0.5)
+        assert split.is_discriminating  # the path under test is the meaningful one
+        anchor = to_human_anchor(split.anchor_labels, name="token_efficiency", source=_Src())
+        for item in anchor.items:
+            seen = item.trace.info.assessments
+            assert [a for a in seen if str(a.source.source_type) == "HUMAN"] == []
+        # The gold still lives on the item, off the trace (what agreement compares).
+        assert all(item.human_label is not None for item in anchor.items)
