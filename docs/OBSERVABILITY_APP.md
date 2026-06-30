@@ -5,6 +5,12 @@ self-optimization workflow: a single place to review every agent, see what is
 being optimized, inspect feedback and evals, and *confirm the agents are
 actually self-improving* — with a fully auditable, revertable trail.
 
+> The app is also the **human-in-the-loop approval control plane** for the
+> autonomous loop controller: the framework detects→decides→proves→proposes a
+> change on its own, and a human **approves the live apply in the app** after
+> reviewing *why* it's necessary and the proof it works (Option A). See
+> [`LOOP_CONTROLLER.md`](LOOP_CONTROLLER.md) for that design of record.
+
 ## Decision: one MLflow experiment per agent
 
 Each agent (including a supervisor / multi-agent system, which is itself "an
