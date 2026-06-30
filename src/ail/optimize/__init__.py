@@ -38,6 +38,21 @@ from ail.optimize.fixtures import (
     load_fixture,
     phase2_fixtures_root,
 )
+from ail.optimize.gepa_runner import (
+    DEFAULT_COMPONENT,
+    DEFAULT_REFLECTION_LM,
+    GEPA_SCHEMA_VERSION,
+    FrozenSuiteGepaAdapter,
+    GepaConfig,
+    GepaEvalBatch,
+    GepaOptimizationResult,
+    HeldOutLeakError,
+    SuiteSplit,
+    candidate_lever_config,
+    fitness_from_outcome,
+    run_gepa_optimization,
+    split_suite,
+)
 from ail.optimize.lever import (
     BASELINE,
     CANDIDATE,
@@ -82,4 +97,18 @@ __all__ = [
     "L1Outcome",
     "case_from_task",
     "make_command_check",
+    # GEPA optimization loop (stage 5)
+    "run_gepa_optimization",
+    "GepaConfig",
+    "GepaOptimizationResult",
+    "FrozenSuiteGepaAdapter",
+    "GepaEvalBatch",
+    "SuiteSplit",
+    "split_suite",
+    "candidate_lever_config",
+    "fitness_from_outcome",
+    "HeldOutLeakError",
+    "GEPA_SCHEMA_VERSION",
+    "DEFAULT_REFLECTION_LM",
+    "DEFAULT_COMPONENT",
 ]
