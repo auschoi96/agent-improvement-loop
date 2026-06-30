@@ -152,6 +152,45 @@ declare module "@databricks/appkit-ui/react" {
           redundancy_rate: number;
         }>;
       };
+    prompt_lineage: {
+        name: "prompt_lineage";
+        parameters: {
+          /** STRING - use sql.string() */
+          agent_name: SQLStringMarker;
+        };
+        result: Array<{
+          /** @sqlType INT */
+          version: number;
+          /** @sqlType STRING */
+          source: string;
+          /** @sqlType BOOLEAN */
+          changed: boolean;
+          /** @sqlType DOUBLE */
+          gepa_best_val_score: number;
+          /** @sqlType INT */
+          gepa_num_candidates: number;
+          /** @sqlType DOUBLE */
+          holdout_evolved_savings_pct: number;
+          /** @sqlType DOUBLE */
+          holdout_seed_savings_pct: number;
+          /** @sqlType DOUBLE */
+          holdout_savings_delta_pct: number;
+          /** @sqlType STRING */
+          candidate_artifact: string;
+          /** @sqlType STRING */
+          suite_version: string;
+          /** @sqlType BOOLEAN */
+          is_champion: boolean;
+          /** @sqlType BOOLEAN */
+          is_forced_non_improving: boolean;
+          /** @sqlType STRING */
+          registration_reason: string;
+          /** @sqlType STRING */
+          uri: string;
+          /** @sqlType STRING */
+          registered_at: string;
+        }>;
+      };
     session_token_bars: {
         name: "session_token_bars";
         parameters: {

@@ -41,6 +41,10 @@ ail-bootstrap-grants = "ail.jobs.bootstrap_grants:main"
 # far the experiment is from each readiness unlock. Reuses ail.readiness; prints no
 # fabricated "ready" and exits non-zero only on trace-store access failure.
 ail-readiness = "ail.jobs.readiness_preflight:main"
+# Guarded champion revert: `ail-revert <agent> --to-version <n>` re-points a prompt's
+# champion alias to a prior version. Fail-closed, dry-run by default (--yes to write);
+# prints the WAS->BECOMES audit. Re-run the lineage publish after (see docs).
+ail-revert = "ail.jobs.revert_champion:main"
 
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest

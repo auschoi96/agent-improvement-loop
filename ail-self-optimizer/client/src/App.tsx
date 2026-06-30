@@ -13,6 +13,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { CorpusKpis } from './components/CorpusKpis';
 import { AgentSwitcher, type AgentRow } from './components/AgentSwitcher';
 import { VersionComparison } from './components/VersionComparison';
+import { LineageTimeline } from './components/LineageTimeline';
 
 const BRAND_BLUE = '#40d1f5';
 
@@ -65,6 +66,13 @@ export default function App() {
             description="Within this agent's experiment, a baseline agent_version vs a newer one — L0 deltas, with readiness honestly gating the trust verdict (never a green improvement the readiness wall has not cleared)."
           >
             <VersionComparison agentName={agent.agent_name} />
+          </Section>
+
+          <Section
+            title="Lineage & audit timeline"
+            description="Every registered prompt version newest-first, sourced from the prompt registry: what changed → with what proven held-out delta → which version is the CHAMPION. A forced / non-improving version is flagged and never styled as a win — the audit trail that lets a change be reverted (ail-revert)."
+          >
+            <LineageTimeline agentName={agent.agent_name} />
           </Section>
 
           <Section title="Corpus summary" description="Headline L0 metrics across every session in the experiment.">

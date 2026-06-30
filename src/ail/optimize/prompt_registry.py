@@ -57,6 +57,8 @@ __all__ = [
     "DEFAULT_PROMPT_NAME",
     "TRACKING_URI",
     "REGISTRY_URI",
+    "PROMPT_TAG_PREFIX",
+    "CHAMPION_ALIASES",
     "PromptSource",
     "PromptProvenance",
     "RegisteredPrompt",
@@ -85,8 +87,17 @@ DEFAULT_PROMPT_NAME = "token_efficient_execution"
 TRACKING_URI = "databricks"
 REGISTRY_URI = "databricks-uc"
 
-#: Namespace for the provenance tags this module stamps on a registered version.
-_TAG_PREFIX = "ail.prompt"
+#: Namespace prefix for the provenance tags this module stamps on a registered
+#: version (``ail.prompt.<field>``). The single source of truth for the tag schema:
+#: :meth:`PromptProvenance.as_tags` writes keys under it and the lineage publish
+#: (:mod:`ail.publish_lineage`) reads them back under the same prefix.
+PROMPT_TAG_PREFIX = "ail.prompt"
+
+#: Aliases that designate the production champion of a registered prompt. ``champion``
+#: is canonical (see ``docs/PROMPT_REGISTRY.md``); ``production`` is accepted as a
+#: synonym. The single source of truth for the champion-alias names — the lineage
+#: publish and the ``ail-revert`` CLI both import this so the definition cannot drift.
+CHAMPION_ALIASES: tuple[str, ...] = ("champion", "production")
 
 
 class PromptSource(StrEnum):
@@ -162,7 +173,7 @@ class PromptProvenance:
         for key, value in raw.items():
             rendered = _render_tag(value)
             if rendered is not None:
-                tags[f"{_TAG_PREFIX}.{key}"] = rendered
+                tags[f"{PROMPT_TAG_PREFIX}.{key}"] = rendered
         return tags
 
 
