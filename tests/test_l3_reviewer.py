@@ -11,6 +11,7 @@ are ``importorskip``-guarded, and the end-to-end live review is
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -21,11 +22,12 @@ import pytest
 from ail.ingest.base import NormalizedTrace, TraceSource
 from ail.ingest.mlflow_source import normalize_trace
 from ail.l3 import reviewer as rv
-from ail.l3.contract import HaloReviewVerdict
+from ail.l3.contract import AssetRecommendation, GuidelineAssessment, HaloReviewVerdict
+from ail.l3.rubric import DEFAULT_RUBRIC
 from ail.l3.selection import select_traces_to_review
 
 _REPORT = """\
-The agent re-read the same file many times.
+The agent re-read the same file many times and worked from a vague task prompt.
 
 ```json
 {
@@ -33,6 +35,19 @@ The agent re-read the same file many times.
   "token_waste_score": 60,
   "estimated_wasted_tokens": 90000,
   "summary": "Repeated reads dominate the spend.",
+  "guideline_assessments": [
+    {"guideline_id": "tool_calling_efficiency", "score": 2,
+     "rationale": "same file read 34x", "evidence_span_ids": ["s1", "s2"]},
+    {"guideline_id": "token_efficiency", "score": 2, "rationale": "re-loaded context"},
+    {"guideline_id": "tooling_purpose", "score": 4, "rationale": "mostly purposeful"},
+    {"guideline_id": "instruction_clarity", "score": 3, "rationale": "ambiguous scope"}
+  ],
+  "recommended_assets": [
+    {"asset_type": "skill", "title": "Cache file reads", "rationale": "repeated reads",
+     "expected_benefit": "~90k tokens", "evidence_span_ids": ["s1"]},
+    {"asset_type": "prompt_change", "title": "Clarify task scope",
+     "rationale": "ambiguous prompt", "expected_benefit": "less rework"}
+  ],
   "redundancy_findings": [
     {"description": "same file read 34x", "tool": "Read", "repeated_target": "/a",
      "occurrences": 34, "evidence_span_ids": ["s1"]}
@@ -99,8 +114,15 @@ class TestReviewTrace:
         assert verdict.token_efficiency == "poor"
         assert verdict.token_waste_score == 60
         assert verdict.model == "databricks-claude-sonnet-4-6"
+        assert verdict.rubric_id == DEFAULT_RUBRIC.rubric_id
+        # All four scored guidelines + the recommended assets parsed.
+        assert {g.guideline_id for g in verdict.guideline_assessments} == set(
+            DEFAULT_RUBRIC.guideline_ids()
+        )
+        assert verdict.score_for("tool_calling_efficiency") == 2
+        assert [a.asset_type for a in verdict.recommended_assets] == ["skill", "prompt_change"]
 
-    def test_attaches_ai_judge_feedback_to_subject(
+    def test_attaches_per_guideline_assets_and_overall_feedback(
         self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
     ) -> None:
         trace = normalize_trace(synthetic_trace)
@@ -110,21 +132,45 @@ class TestReviewTrace:
             model="m",
             source=_FakeSource(trace),
         )
-        assert len(captured_feedback) == 1
-        call = captured_feedback[0]
-        assert call["trace_id"] == trace.trace_id
-        assert call["name"] == rv.FEEDBACK_NAME == "l3_halo_review"
-        # AI_JUDGE is a deprecated alias of LLM_JUDGE in mlflow>=3; we use the
-        # canonical name so no FutureWarning fires and the stored value is exact.
-        assert call["source"].source_type == "LLM_JUDGE"
-        # The headline value is the scalar waste score (the v4 store rejects structs)...
-        assert call["value"] == 60
-        # ...the grade, back-link, and full verdict live in metadata...
-        assert call["metadata"]["token_efficiency"] == "poor"
-        assert call["metadata"]["reviewer_trace_id"] == "rev-trace-xyz"
-        assert "verdict_json" in call["metadata"]
-        # ...and the rationale carries the summary.
-        assert call["rationale"] == "Repeated reads dominate the spend."
+        by_name = {c["name"]: c for c in captured_feedback}
+        # One assessment per scored guideline, plus assets, plus the overall.
+        assert set(by_name) == {
+            "rlm_tool_calling_efficiency",
+            "rlm_token_efficiency",
+            "rlm_tooling_purpose",
+            "rlm_instruction_clarity",
+            "rlm_recommended_assets",
+            "rlm_review",
+        }
+        # Every assessment is an LLM_JUDGE on the subject trace, back-linked to the
+        # reviewer's own trace (token isolation) — none nested in the subject.
+        for call in captured_feedback:
+            assert call["trace_id"] == trace.trace_id
+            assert call["source"].source_type == "LLM_JUDGE"
+            assert call["metadata"]["reviewer_trace_id"] == "rev-trace-xyz"
+            assert call["metadata"]["rubric_id"] == DEFAULT_RUBRIC.rubric_id
+
+        # Per-guideline value is the bounded score; evidence rides in metadata.
+        tool_eff = by_name["rlm_tool_calling_efficiency"]
+        assert tool_eff["value"] == 2
+        assert tool_eff["metadata"]["guideline_id"] == "tool_calling_efficiency"
+        assert tool_eff["metadata"]["evidence_span_ids"] == "s1, s2"
+
+        # Assets: scalar count headline, assets JSON in metadata (v4 store needs scalars).
+        assets = by_name["rlm_recommended_assets"]
+        assert assets["value"] == 2
+        parsed = json.loads(assets["metadata"]["recommended_assets_json"])
+        assert [a["asset_type"] for a in parsed] == ["skill", "prompt_change"]
+        assert assets["metadata"]["asset_types"] == "skill, prompt_change"
+
+        # Overall: token-waste headline, full verdict + grade in metadata, summary rationale.
+        overall = by_name["rlm_review"]
+        assert overall["value"] == 60
+        assert overall["rationale"] == "Repeated reads dominate the spend."
+        assert overall["metadata"]["token_efficiency"] == "poor"
+        assert overall["metadata"]["n_recommended_assets"] == "2"
+        assert overall["metadata"]["n_guideline_assessments"] == "4"
+        assert "verdict_json" in overall["metadata"]
 
     def test_attach_false_skips_feedback(
         self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
@@ -183,7 +229,7 @@ class TestReviewTrace:
         )
         assert verdict.subject_trace_id == trace.trace_id
 
-    def test_halo_seam_receives_endpoint_and_path(
+    def test_halo_seam_receives_prompt_and_path(
         self, synthetic_trace: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import mlflow
@@ -210,7 +256,9 @@ class TestReviewTrace:
         monkeypatch.setattr(mlflow, "log_feedback", lambda **kw: None)
 
         rv.review_trace(trace.trace_id, model="m", source=_FakeSource(trace), attach=False)
+        # The rubric-driven prompt carries the trace id and the guideline ids.
         assert trace.trace_id in seen["prompt"]
+        assert "tool_calling_efficiency" in seen["prompt"]
         assert str(seen["trace_path"]).endswith(".jsonl")
         assert seen["model"] == "m"
         assert seen["base_url"] == "http://fmapi"
@@ -219,6 +267,7 @@ class TestReviewTrace:
 class TestFeedbackProjection:
     def _verdict(self, **kw: Any) -> HaloReviewVerdict:
         base: dict[str, Any] = {
+            "rubric_id": DEFAULT_RUBRIC.rubric_id,
             "subject_trace_id": "t1",
             "reviewer_trace_id": "rev-1",
             "model": "m",
@@ -226,6 +275,15 @@ class TestFeedbackProjection:
             "token_waste_score": 60,
             "estimated_wasted_tokens": 90000,
             "summary": "s",
+            "guideline_assessments": [
+                GuidelineAssessment(
+                    guideline_id="tool_calling_efficiency", score=2, evidence_span_ids=["s1", "s2"]
+                )
+            ],
+            "recommended_assets": [
+                AssetRecommendation(asset_type="skill", title="Cache reads"),
+                AssetRecommendation(asset_type="metric_view", title="Dedup metric"),
+            ],
         }
         base.update(kw)
         return HaloReviewVerdict(**base)
@@ -236,27 +294,44 @@ class TestFeedbackProjection:
         assert rv._feedback_value(self._verdict()) == 60
         assert isinstance(rv._feedback_value(self._verdict()), int)
 
-    def test_metadata_carries_grade_counts_and_estimate(self) -> None:
-        md = rv._feedback_metadata(self._verdict())
+    def test_overall_metadata_carries_grade_counts_and_full_verdict(self) -> None:
+        md = rv._overall_metadata(self._verdict())
         assert md["token_efficiency"] == "poor"
         assert md["token_waste_score"] == "60"
         assert md["estimated_wasted_tokens"] == "90000"
-        assert md["n_redundancy_findings"] == "0"
-
-    def test_metadata_omits_none_estimate(self) -> None:
-        md = rv._feedback_metadata(self._verdict(estimated_wasted_tokens=None))
-        assert "estimated_wasted_tokens" not in md
-
-    def test_metadata_has_backlink_and_full_verdict(self) -> None:
-        md = rv._feedback_metadata(self._verdict())
+        assert md["n_guideline_assessments"] == "1"
+        assert md["n_recommended_assets"] == "2"
+        assert md["rubric_id"] == DEFAULT_RUBRIC.rubric_id
         assert md["reviewer_trace_id"] == "rev-1"
         assert md["judge_model"] == "m"
         assert '"subject_trace_id":"t1"' in md["verdict_json"].replace(" ", "")
         assert all(isinstance(v, str) for v in md.values())
 
-    def test_metadata_records_parse_warnings(self) -> None:
-        md = rv._feedback_metadata(self._verdict(parse_warnings=["w1", "w2"]))
+    def test_overall_metadata_omits_none_estimate(self) -> None:
+        md = rv._overall_metadata(self._verdict(estimated_wasted_tokens=None))
+        assert "estimated_wasted_tokens" not in md
+
+    def test_overall_metadata_records_parse_warnings(self) -> None:
+        md = rv._overall_metadata(self._verdict(parse_warnings=["w1", "w2"]))
         assert md["parse_warnings"] == "w1; w2"
+
+    def test_guideline_metadata(self) -> None:
+        verdict = self._verdict()
+        md = rv._guideline_metadata(verdict, verdict.guideline_assessments[0])
+        assert md["guideline_id"] == "tool_calling_efficiency"
+        assert md["score"] == "2"
+        assert md["evidence_span_ids"] == "s1, s2"
+        assert md["n_evidence_spans"] == "2"
+        assert md["reviewer_trace_id"] == "rev-1"
+        assert all(isinstance(v, str) for v in md.values())
+
+    def test_assets_metadata(self) -> None:
+        md = rv._assets_metadata(self._verdict())
+        assert md["n_recommended_assets"] == "2"
+        assert md["asset_types"] == "skill, metric_view"
+        parsed = json.loads(md["recommended_assets_json"])
+        assert [a["title"] for a in parsed] == ["Cache reads", "Dedup metric"]
+        assert all(isinstance(v, str) for v in md.values())
 
 
 class TestExtractReportText:

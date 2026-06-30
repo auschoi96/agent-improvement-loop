@@ -3,28 +3,37 @@
 HALO has no structured output schema: it returns a free-text report terminated
 by a ``<final/>`` marker. The reviewer prompt (:mod:`ail.l3.reviewer`) asks HALO
 to end that report with a single JSON object carrying the verdict's *content*
-fields. This module extracts that object and validates it, filling the
-parser-owned fields (subject/reviewer trace ids, model, timestamp, the full raw
-report) itself.
+fields — the headline token-waste figures, the per-guideline scores, and the
+recommended assets. This module extracts that object and validates it against the
+rubric (:mod:`ail.l3.rubric`), filling the parser-owned fields (subject/reviewer
+trace ids, model, timestamp, the full raw report) itself.
 
-Parsing is **defensive and loud**: a missing or malformed JSON block degrades to
-a verdict that keeps the full ``raw_report`` and records the problem in
-``parse_warnings`` — it never raises on a model that wrote prose instead of
-JSON, and it never silently passes a partial parse off as a clean one.
+Parsing is **defensive and loud**: the optional content (guideline assessments,
+recommended assets, redundancy findings, failure modes) degrades — warn + clamp
+an out-of-range guideline score, drop an unscorable one, label an unknown asset
+type ``other`` — while keeping the full ``raw_report`` and recording every
+degradation in ``parse_warnings``, so a partial parse is never mistaken for a
+clean one. Only the **required headline** is fail-closed: a report with no
+parseable JSON block, or a missing / out-of-range ``token_waste_score``, raises
+:class:`HaloReportParseError` rather than returning a fabricated default.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 from ail.l3.contract import (
+    AssetRecommendation,
+    AssetType,
     FailureMode,
+    GuidelineAssessment,
     HaloReviewVerdict,
     RedundancyFinding,
     Severity,
 )
+from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
 
 __all__ = ["HaloReportParseError", "parse_halo_report", "strip_final_marker"]
 
@@ -64,6 +73,27 @@ _EFFICIENCY_SYNONYMS: dict[str, str] = {
     "great": "excellent",
 }
 _ALLOWED_SEVERITY: set[str] = {"low", "medium", "high"}
+
+# The contract's asset vocabulary, plus synonyms a model tends to emit for it.
+# An unrecognized type is coerced to ``"other"`` (with a warning) so a novel
+# suggestion is labelled, never dropped.
+_ALLOWED_ASSET_TYPES: set[str] = set(get_args(AssetType))
+_ASSET_TYPE_SYNONYMS: dict[str, str] = {
+    "metric": "metric_view",
+    "metricview": "metric_view",
+    "view": "metric_view",
+    "semanticlayer": "semantic_layer",
+    "semantic": "semantic_layer",
+    "pipeline": "data_pipeline",
+    "datapipeline": "data_pipeline",
+    "etl": "data_pipeline",
+    "prompt": "prompt_change",
+    "promptchange": "prompt_change",
+    "instruction": "prompt_change",
+    "instructions": "prompt_change",
+    "instructionchange": "prompt_change",
+    "systemprompt": "prompt_change",
+}
 
 
 def strip_final_marker(report: str) -> str:
@@ -172,6 +202,118 @@ def _opt_str(value: Any) -> str | None:
     return str(value)
 
 
+def _coerce_guideline_score(
+    value: Any, rubric: ReviewRubric, guideline_id: str, warnings: list[str]
+) -> int | None:
+    """Coerce one guideline score to an int in the rubric range, or ``None`` if unparseable.
+
+    Unlike the headline ``token_waste_score`` (the un-gameable signal the loop
+    keys off, which fails loud), a per-guideline score is diagnostic detail: an
+    out-of-range value is **clamped** into the rubric's scale with a warning, and
+    only a non-numeric value degrades to ``None`` (the caller then drops that one
+    assessment with a warning, rather than failing the whole verdict).
+    """
+    try:
+        score = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    clamped = rubric.clamp_score(score)
+    if clamped != score:
+        warnings.append(
+            f"guideline {guideline_id!r} score {score} out of range "
+            f"[{rubric.score_min}, {rubric.score_max}]; clamped to {clamped}"
+        )
+    return clamped
+
+
+def _coerce_guideline_assessments(
+    items: Any, rubric: ReviewRubric, warnings: list[str]
+) -> list[GuidelineAssessment]:
+    """Parse ``guideline_assessments`` against ``rubric``, warning on every gap.
+
+    Keeps only assessments whose ``guideline_id`` is one the rubric asked for
+    (unknown ids are dropped with a warning), de-duplicates repeats, and records a
+    warning for any rubric guideline the report left unscored — so a partial set
+    is never mistaken for a complete one.
+    """
+    out: list[GuidelineAssessment] = []
+    valid_ids = set(rubric.guideline_ids())
+    seen: set[str] = set()
+    if not isinstance(items, list):
+        if items not in (None, ""):
+            warnings.append("guideline_assessments was not a list; ignored")
+    else:
+        for raw in items:
+            if not isinstance(raw, dict):
+                warnings.append("dropped a non-object guideline assessment")
+                continue
+            gid = str(raw.get("guideline_id", "")).strip()
+            if gid not in valid_ids:
+                warnings.append(f"dropped guideline assessment for unknown id {gid!r}")
+                continue
+            if gid in seen:
+                warnings.append(f"dropped duplicate guideline assessment for {gid!r}")
+                continue
+            score = _coerce_guideline_score(raw.get("score"), rubric, gid, warnings)
+            if score is None:
+                warnings.append(
+                    f"dropped guideline {gid!r}: missing or unparseable score {raw.get('score')!r}"
+                )
+                continue
+            seen.add(gid)
+            out.append(
+                GuidelineAssessment(
+                    guideline_id=gid,
+                    score=score,
+                    rationale=str(raw.get("rationale", "")).strip(),
+                    evidence_span_ids=_str_list(raw.get("evidence_span_ids")),
+                )
+            )
+    missing = [gid for gid in rubric.guideline_ids() if gid not in seen]
+    if missing:
+        warnings.append("no score for guideline(s): " + ", ".join(missing))
+    return out
+
+
+def _coerce_asset_type(value: Any, warnings: list[str]) -> AssetType:
+    """Map a model's asset-type string onto the contract vocabulary (``other`` fallback)."""
+    text = str(value).strip().lower()
+    norm = text.replace("-", "_").replace(" ", "_")
+    if norm in _ALLOWED_ASSET_TYPES:
+        return cast(AssetType, norm)
+    collapsed = norm.replace("_", "")
+    if collapsed in _ASSET_TYPE_SYNONYMS:
+        mapped = _ASSET_TYPE_SYNONYMS[collapsed]
+        warnings.append(f"mapped asset_type {value!r} -> {mapped!r}")
+        return cast(AssetType, mapped)
+    warnings.append(f"unrecognized asset_type {value!r}; recorded as 'other'")
+    return "other"
+
+
+def _coerce_assets(items: Any, warnings: list[str]) -> list[AssetRecommendation]:
+    """Parse ``recommended_assets`` defensively (drop non-objects, label unknown types)."""
+    out: list[AssetRecommendation] = []
+    if not isinstance(items, list):
+        if items not in (None, ""):
+            warnings.append("recommended_assets was not a list; ignored")
+        return out
+    for raw in items:
+        if not isinstance(raw, dict):
+            warnings.append("dropped a non-object recommended asset")
+            continue
+        out.append(
+            AssetRecommendation(
+                asset_type=_coerce_asset_type(raw.get("asset_type"), warnings),
+                title=str(raw.get("title", "")).strip(),
+                rationale=str(raw.get("rationale", "")).strip(),
+                expected_benefit=str(raw.get("expected_benefit", "")).strip(),
+                evidence_span_ids=_str_list(raw.get("evidence_span_ids")),
+                trace_pattern=_opt_str(raw.get("trace_pattern")),
+            )
+        )
+    return out
+
+
 def _coerce_redundancy(items: Any, warnings: list[str]) -> list[RedundancyFinding]:
     out: list[RedundancyFinding] = []
     if not isinstance(items, list):
@@ -224,6 +366,7 @@ def parse_halo_report(
     report: str,
     *,
     subject_trace_id: str,
+    rubric: ReviewRubric = DEFAULT_RUBRIC,
     reviewer_trace_id: str | None = None,
     model: str | None = None,
     generated_at: str | None = None,
@@ -234,6 +377,9 @@ def parse_halo_report(
         report: HALO's full report text (with or without the ``<final/>`` marker).
         subject_trace_id: The trace HALO reviewed (parser-owned, never trusted to
             the model's JSON).
+        rubric: The rubric the review was run against — sets which guideline ids
+            to expect and the valid score range. Defaults to
+            :data:`ail.l3.rubric.DEFAULT_RUBRIC`.
         reviewer_trace_id: HALO's own review trace id, for back-linking.
         model: The judge model HALO ran on.
         generated_at: ISO-8601 timestamp to stamp on the verdict.
@@ -245,7 +391,10 @@ def parse_halo_report(
         HaloReportParseError: If the report has no parseable JSON verdict block,
             or its required ``token_waste_score`` is missing, unparseable, or
             outside ``0..100``. A degenerate review must fail loudly, never
-            return a fabricated default (see :class:`HaloReportParseError`).
+            return a fabricated default (see :class:`HaloReportParseError`). The
+            per-guideline scores and recommended assets are diagnostic detail and
+            degrade defensively (warn + clamp/drop) rather than raising — only the
+            un-gameable headline fails the whole parse.
     """
     warnings: list[str] = []
     body = strip_final_marker(report)
@@ -262,6 +411,7 @@ def parse_halo_report(
     token_waste_score = _coerce_score(payload.get("token_waste_score"))
 
     return HaloReviewVerdict(
+        rubric_id=rubric.rubric_id,
         subject_trace_id=subject_trace_id,
         reviewer_trace_id=reviewer_trace_id,
         model=model,
@@ -271,6 +421,10 @@ def parse_halo_report(
         token_waste_score=token_waste_score,
         estimated_wasted_tokens=_opt_int(payload.get("estimated_wasted_tokens")),
         summary=str(payload.get("summary", "")).strip(),
+        guideline_assessments=_coerce_guideline_assessments(
+            payload.get("guideline_assessments"), rubric, warnings
+        ),
+        recommended_assets=_coerce_assets(payload.get("recommended_assets"), warnings),
         redundancy_findings=_coerce_redundancy(payload.get("redundancy_findings"), warnings),
         failure_modes=_coerce_failures(payload.get("failure_modes"), warnings),
         recommendations=_str_list(payload.get("recommendations")),

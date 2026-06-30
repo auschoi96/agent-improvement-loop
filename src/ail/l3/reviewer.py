@@ -12,11 +12,14 @@ order:
    with its own bounded tools, so a 943K-token trace never lands in a single
    model call.
 3. **Isolate** that review as HALO's *own* MLflow trace and parse HALO's
-   free-text ``<final/>`` report into a :class:`~ail.l3.contract.HaloReviewVerdict`.
-4. **Attach** the verdict to the *subject* trace as an ``LLM_JUDGE`` feedback
-   assessment (``mlflow.log_feedback``, name ``l3_halo_review``) linked back to
-   the reviewer's trace via ``metadata.reviewer_trace_id``. (``AI_JUDGE`` is a
-   deprecated alias of ``LLM_JUDGE`` in ``mlflow>=3``.)
+   free-text ``<final/>`` report into a :class:`~ail.l3.contract.HaloReviewVerdict`
+   against a configurable rubric (:mod:`ail.l3.rubric`).
+4. **Attach** the verdict to the *subject* trace as a set of ``LLM_JUDGE`` feedback
+   assessments (``mlflow.log_feedback``): one ``rlm_<guideline_id>`` per scored
+   guideline, ``rlm_recommended_assets`` (assets JSON in metadata), and an overall
+   ``rlm_review`` — each linked back to the reviewer's trace via
+   ``metadata.reviewer_trace_id``. (``AI_JUDGE`` is a deprecated alias of
+   ``LLM_JUDGE`` in ``mlflow>=3``.)
 
 **Why the own-trace isolation matters (``docs/ARCHITECTURE.md`` §11).** The L0
 cost metric reads ``mlflow.trace.tokenUsage``, which sums a trace's child LLM
@@ -32,37 +35,56 @@ HALO is imported lazily inside :func:`run_halo_review` so the rest of the module
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
+from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
 from ail.ingest.base import TraceSource
 from ail.l3.adapter import OtlpExport, mlflow_trace_to_otlp_jsonl
-from ail.l3.contract import HaloReviewVerdict
+from ail.l3.contract import AssetType, GuidelineAssessment, HaloReviewVerdict
 from ail.l3.parser import parse_halo_report
+from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
 
 if TYPE_CHECKING:
     from engine.engine_config import EngineConfig
 
 __all__ = [
-    "FEEDBACK_NAME",
-    "REVIEW_PROMPT_TEMPLATE",
+    "OVERALL_FEEDBACK_NAME",
+    "ASSETS_FEEDBACK_NAME",
+    "GUIDELINE_FEEDBACK_PREFIX",
+    "guideline_feedback_name",
     "build_engine_config",
+    "build_review_prompt",
     "run_halo_review",
     "review_trace",
 ]
 
-#: Assessment name the verdict is attached under. Together with the
-#: ``LLM_JUDGE`` source type this keys the assessment on the subject trace,
-#: alongside (not colliding with) the L2 judge and ``HUMAN`` assessments, which
-#: carry different names.
-FEEDBACK_NAME = "l3_halo_review"
+#: Assessment name the **overall** verdict is attached under. Together with the
+#: per-guideline ``rlm_<id>`` and the ``rlm_recommended_assets`` names — and the
+#: ``LLM_JUDGE`` source type — this keys the L3 assessments on the subject trace
+#: alongside (not colliding with) the L2 judge and ``HUMAN`` assessments.
+OVERALL_FEEDBACK_NAME = "rlm_review"
+
+#: Assessment name the recommended-assets list is attached under (assets JSON in
+#: metadata; the headline value is the asset count).
+ASSETS_FEEDBACK_NAME = "rlm_recommended_assets"
+
+#: Prefix for the per-guideline assessment names, e.g. ``rlm_token_efficiency``.
+GUIDELINE_FEEDBACK_PREFIX = "rlm_"
+
+
+def guideline_feedback_name(guideline_id: str) -> str:
+    """The assessment name a guideline's score is attached under (``rlm_<id>``)."""
+    return f"{GUIDELINE_FEEDBACK_PREFIX}{guideline_id}"
+
 
 #: Name of the reviewer's own MLflow trace/span.
-REVIEW_SPAN_NAME = "l3_halo_review"
+REVIEW_SPAN_NAME = "rlm_review"
 
 # Conservative HALO bounds. Depth 2 (root + one subagent layer) and a modest
 # turn budget keep an L3 review from running away on a huge trace; raise them
@@ -71,67 +93,140 @@ _DEFAULT_MAX_TURNS = 40
 _DEFAULT_MAX_DEPTH = 2
 _DEFAULT_MAX_PARALLEL = 4
 
-#: The review prompt. HALO returns free text, so the structure is imposed here:
-#: the prompt fixes exactly what to look for and demands a single JSON object
-#: (matching :class:`~ail.l3.contract.HaloReviewVerdict`) before the ``<final/>``
-#: marker. :mod:`ail.l3.parser` extracts and validates that object.
-REVIEW_PROMPT_TEMPLATE = """\
-You are an expert reviewer auditing a single coding-agent execution trace for \
-TOKEN EFFICIENCY and QUALITY. The trace id is `{trace_id}`. It may be very large \
-(hundreds of thousands of tokens) — use your trace navigation tools to inspect \
-it incrementally; never assume you must read it all at once.
 
-Work AUTONOMOUSLY. Begin immediately and call your trace-navigation tools \
-yourself. Do NOT ask for confirmation, permission, or clarification, and do NOT \
-stop to check in — there is no human available to answer, and any turn that ends \
-without a tool call or the final verdict ends the whole review. Keep \
-investigating across as many turns as you need to gather evidence, then write \
-the final verdict.
+# The review prompt is built from the rubric (HALO returns free text, so the
+# structure is imposed here). Sentinel tokens — never f-string / ``.format`` —
+# are substituted so the literal JSON braces below need no escaping.
+_PROMPT_TEMPLATE = """\
+You are an expert reviewer auditing a single long coding-agent execution trace. \
+The subject trace id is `<<TRACE_ID>>`. It may be very large (hundreds of \
+thousands of tokens) — use your trace-navigation tools to inspect it \
+incrementally; never assume you must read it all at once.
 
-Focus your review on:
-1. TOKEN WASTE / AVOIDABLE REDUNDANCY — repeated tool calls against the same \
-target (e.g. the same file read many times, the same shell setup re-run), \
-re-fetching context the agent already had, and other spend that produced no new \
-information. Quantify it where you can (which tool, which target, how many times, \
-roughly how many tokens wasted).
-2. QUALITY-PER-TOKEN — did the spend buy progress? Grade how efficiently the \
-trace converted tokens into useful work.
-3. NOTABLE FAILURE MODES — looping, abandoned plans, ignored errors, \
-hallucinated paths/APIs, or other quality problems a fixed scorer would miss. \
-Cite span ids as evidence.
+OPERATING RULES — follow them exactly:
+- Work AUTONOMOUSLY from your very first turn: call your trace-navigation tools \
+yourself and keep going across as many turns as the evidence needs.
+- NEVER ask for confirmation, permission, or clarification, and NEVER stop to \
+check in. There is no human available to answer. A turn that ends WITHOUT a tool \
+call and WITHOUT the final verdict ENDS the entire review and produces an \
+unparseable report — so never end a turn idle.
+- Ground EVERY score and EVERY recommendation in concrete evidence you actually \
+observed in the trace, citing span ids. Give no generic advice: if the trace \
+does not show it, do not claim it.
+- The objective of this review is to <<OBJECTIVE>>. Judge each guideline, and \
+make every recommendation, in service of that objective.
+
+Evaluate the trace against the following guidelines. For each SCORED guideline, \
+give an integer score from <<LO>> (worst) to <<HI>> (best) and a rationale that \
+cites span-id evidence:
+
+<<GUIDELINES_BLOCK>>
 
 Only after you have actually inspected the trace with your tools, end your \
-report with a SINGLE JSON object on its own, inside a ```json fenced block, with \
-exactly these fields, then the marker <final/>:
+report with a SINGLE JSON object, on its own inside a ```json fenced block, with \
+exactly these fields, followed by the marker <final/>:
 
 ```json
-{{
+{
   "token_efficiency": "poor | fair | good | excellent",
-  "token_waste_score": <integer 0-100, share of spend that was avoidable>,
+  "token_waste_score": <integer 0-100, share of total spend that was avoidable>,
   "estimated_wasted_tokens": <integer or null>,
   "summary": "<2-4 sentence overall assessment>",
-  "redundancy_findings": [
-    {{
+  "guideline_assessments": [
+    {
+      "guideline_id": "<one of: <<IDS>>>",
+      "score": <integer <<LO>>-<<HI>>>,
+      "rationale": "<why this score, citing span ids>",
+      "evidence_span_ids": ["<span id>", "..."]
+    }
+  ],
+<<ASSETS_SCHEMA>>  "redundancy_findings": [
+    {
       "description": "<what was repeated>",
       "tool": "<tool name or null>",
       "repeated_target": "<file path / command / target or null>",
       "occurrences": <integer or null>,
       "estimated_wasted_tokens": <integer or null>,
       "evidence_span_ids": ["<span id>", "..."]
-    }}
+    }
   ],
   "failure_modes": [
-    {{
+    {
       "title": "<short title>",
       "severity": "low | medium | high",
       "description": "<what went wrong>",
       "evidence_span_ids": ["<span id>", "..."]
-    }}
+    }
   ],
   "recommendations": ["<concrete, actionable fix>", "..."]
-}}
+}
 ```
+
+Include exactly ONE entry in "guideline_assessments" for every guideline id \
+listed above (<<IDS>>).\
 """
+
+# The recommended-assets array, spliced into the schema only when the rubric asks
+# for assets (guideline 5). Kept as its own fragment so a rubric with
+# ``recommend_assets=False`` produces a prompt that neither asks for nor expects them.
+_ASSETS_SCHEMA_FRAGMENT = """\
+  "recommended_assets": [
+    {
+      "asset_type": "<one of: <<ASSET_TYPES>>>",
+      "title": "<short asset name>",
+      "rationale": "<what trace behaviour justifies it>",
+      "expected_benefit": "<expected token / latency benefit>",
+      "evidence_span_ids": ["<span id>", "..."],
+      "trace_pattern": "<recurring pattern or null>"
+    }
+  ],
+"""
+
+
+def build_review_prompt(trace_id: str, rubric: ReviewRubric = DEFAULT_RUBRIC) -> str:
+    """Render HALO's review prompt for ``trace_id`` from ``rubric``.
+
+    The prompt fixes exactly what to look for and demands a single JSON object
+    (matching :class:`~ail.l3.contract.HaloReviewVerdict`) before the ``<final/>``
+    marker, which :mod:`ail.l3.parser` extracts and validates. The numbered
+    guideline list and the JSON schema's guideline-id / score-range / asset-type
+    hints are all derived from the rubric, so swapping the rubric swaps the
+    review without touching this function.
+
+    The prompt is deliberately crisp and unambiguous about autonomy: HALO must
+    never pause to ask (a no-tool-call turn ends the run and yields an unparseable
+    report — a prior bug), and every score and asset must be grounded in observed
+    trace evidence (no generic advice).
+    """
+    lo, hi = str(rubric.score_min), str(rubric.score_max)
+    lines = [
+        f"{i}. {g.title} (`{g.id}`) — {g.description}"
+        for i, g in enumerate(rubric.guidelines, start=1)
+    ]
+    asset_types = ", ".join(t for t in get_args(AssetType) if t != "other")
+    if rubric.recommend_assets:
+        n = len(rubric.guidelines) + 1
+        lines.append(
+            f"{n}. Recommended assets (`recommended_assets`) — Recommend concrete, "
+            f"specific assets to build that would let the agent {rubric.objective}. "
+            f"Allowed asset types: {asset_types}. Each asset must be justified by "
+            "behaviour you observed in THIS trace (cite span ids, or describe the "
+            "recurring pattern) and state its expected token / latency benefit. Do "
+            "not invent assets the trace does not motivate."
+        )
+    guidelines_block = "\n".join(lines)
+    assets_schema = _ASSETS_SCHEMA_FRAGMENT if rubric.recommend_assets else ""
+
+    return (
+        _PROMPT_TEMPLATE.replace("<<TRACE_ID>>", trace_id)
+        .replace("<<OBJECTIVE>>", rubric.objective)
+        .replace("<<GUIDELINES_BLOCK>>", guidelines_block)
+        .replace("<<ASSETS_SCHEMA>>", assets_schema)
+        .replace("<<ASSET_TYPES>>", asset_types)
+        .replace("<<IDS>>", " | ".join(rubric.guideline_ids()))
+        .replace("<<LO>>", lo)
+        .replace("<<HI>>", hi)
+    )
 
 
 def build_engine_config(
@@ -290,12 +385,19 @@ def _configure_databricks(
     tracking_uri: str,
     registry_uri: str,
     experiment_id: str | None,
+    sql_warehouse_id: str | None = None,
 ) -> None:
     """Point MLflow at Databricks-managed MLflow + UC and set the reviewer experiment.
 
     Mirrors :mod:`ail.ingest.mlflow_source` / :mod:`ail.judges.registration`: an
     optional CLI profile selects the workspace, host is resolved best-effort, and
     the reviewer's own trace is logged to ``experiment_id`` when given.
+
+    ``sql_warehouse_id`` is surfaced as :data:`~ail.compare.monitoring.TRACING_WAREHOUSE_ENV`
+    (``MLFLOW_TRACING_SQL_WAREHOUSE_ID``) so an in-process trace read against the
+    MLflow v4 (UC-backed) store has the warehouse it needs — the same plumbing
+    :mod:`ail.publish` / :mod:`ail.compare.monitoring` use. The calling identity
+    still needs ``CAN_USE`` on that warehouse.
     """
     import mlflow
 
@@ -310,6 +412,9 @@ def _configure_databricks(
                 host = None
             if host:
                 os.environ["DATABRICKS_HOST"] = host
+
+    if sql_warehouse_id:
+        os.environ[TRACING_WAREHOUSE_ENV] = sql_warehouse_id
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_registry_uri(registry_uri)
@@ -332,62 +437,137 @@ def _review_trace_context(attributes: dict[str, Any]) -> Iterator[str]:
 
 
 def _feedback_value(verdict: HaloReviewVerdict) -> int:
-    """The feedback's headline ``value``: the 0–100 token-waste score.
+    """The overall feedback's headline ``value``: the 0–100 token-waste score.
 
     A single scalar by necessity — the Databricks v4 trace store only accepts a
     number / bool / string / list-of-strings as a feedback value (not a struct).
     The numeric waste score is the sortable headline; the categorical grade,
-    counts, and the full structured verdict ride in :func:`_feedback_metadata`.
+    counts, and the full structured verdict ride in :func:`_overall_metadata`.
     """
     return verdict.token_waste_score
 
 
-def _feedback_metadata(verdict: HaloReviewVerdict) -> dict[str, str]:
-    """Assessment metadata: the back-link, provenance, headline grade, full verdict.
+def _common_metadata(verdict: HaloReviewVerdict) -> dict[str, str]:
+    """Provenance every L3 assessment shares: schema, rubric, back-link, judge model.
+
+    ``reviewer_trace_id`` is the token-isolation back-link — it ties the
+    assessment on the subject trace to HALO's *own* trace, where the reviewer's
+    tokens are accounted, so the subject's L0 cost never absorbs the review's
+    spend (``docs/ARCHITECTURE.md`` §11).
+    """
+    metadata: dict[str, str] = {
+        "schema_version": verdict.schema_version,
+        "rubric_id": verdict.rubric_id,
+    }
+    if verdict.reviewer_trace_id:
+        metadata["reviewer_trace_id"] = verdict.reviewer_trace_id
+    if verdict.model:
+        metadata["judge_model"] = verdict.model
+    return metadata
+
+
+def _overall_metadata(verdict: HaloReviewVerdict) -> dict[str, str]:
+    """Overall-assessment metadata: provenance, headline grade, counts, full verdict.
 
     All values are strings (the metadata map is ``dict[str, str]``). The full
     verdict round-trips as ``verdict_json``; the headline grade and counts are
     promoted to top-level keys for quick filtering without parsing that JSON.
     """
-    metadata: dict[str, str] = {
-        "schema_version": verdict.schema_version,
-        "verdict_json": verdict.model_dump_json(),
-        "token_efficiency": verdict.token_efficiency,
-        "token_waste_score": str(verdict.token_waste_score),
-        "n_redundancy_findings": str(len(verdict.redundancy_findings)),
-        "n_failure_modes": str(len(verdict.failure_modes)),
-    }
+    metadata = _common_metadata(verdict)
+    metadata.update(
+        {
+            "verdict_json": verdict.model_dump_json(),
+            "token_efficiency": verdict.token_efficiency,
+            "token_waste_score": str(verdict.token_waste_score),
+            "n_guideline_assessments": str(len(verdict.guideline_assessments)),
+            "n_recommended_assets": str(len(verdict.recommended_assets)),
+            "n_redundancy_findings": str(len(verdict.redundancy_findings)),
+            "n_failure_modes": str(len(verdict.failure_modes)),
+        }
+    )
     if verdict.estimated_wasted_tokens is not None:
         metadata["estimated_wasted_tokens"] = str(verdict.estimated_wasted_tokens)
-    if verdict.reviewer_trace_id:
-        metadata["reviewer_trace_id"] = verdict.reviewer_trace_id
-    if verdict.model:
-        metadata["judge_model"] = verdict.model
     if verdict.parse_warnings:
         metadata["parse_warnings"] = "; ".join(verdict.parse_warnings)
     return metadata
 
 
+def _guideline_metadata(
+    verdict: HaloReviewVerdict, assessment: GuidelineAssessment
+) -> dict[str, str]:
+    """Per-guideline metadata: provenance + the guideline id, score, and evidence."""
+    metadata = _common_metadata(verdict)
+    metadata["guideline_id"] = assessment.guideline_id
+    metadata["score"] = str(assessment.score)
+    metadata["n_evidence_spans"] = str(len(assessment.evidence_span_ids))
+    if assessment.evidence_span_ids:
+        metadata["evidence_span_ids"] = ", ".join(assessment.evidence_span_ids)
+    return metadata
+
+
+def _assets_metadata(verdict: HaloReviewVerdict) -> dict[str, str]:
+    """Recommended-assets metadata: provenance, count, type breakdown, the assets JSON."""
+    metadata = _common_metadata(verdict)
+    metadata["n_recommended_assets"] = str(len(verdict.recommended_assets))
+    if verdict.recommended_assets:
+        metadata["asset_types"] = ", ".join(a.asset_type for a in verdict.recommended_assets)
+    metadata["recommended_assets_json"] = json.dumps(
+        [a.model_dump() for a in verdict.recommended_assets]
+    )
+    return metadata
+
+
 def _attach_verdict(verdict: HaloReviewVerdict, *, source_id: str) -> None:
-    """Attach ``verdict`` to the subject trace as an LLM-judge feedback assessment.
+    """Attach ``verdict`` to the subject trace as a set of LLM-judge assessments.
+
+    Writes one ``rlm_<guideline_id>`` feedback per scored guideline (value = the
+    bounded score), one ``rlm_recommended_assets`` feedback (value = the asset
+    count; the assets ride as JSON in metadata since the v4 store rejects struct
+    values), and one overall ``rlm_review`` feedback (value = the headline
+    token-waste score; the full verdict in metadata).
 
     The source type is ``LLM_JUDGE``: in ``mlflow>=3`` the older ``AI_JUDGE``
-    spelling is a **deprecated alias** that is coerced to ``LLM_JUDGE`` (and emits
-    a ``FutureWarning``), so we use the canonical name directly. This is the same
+    spelling is a **deprecated alias** coerced to ``LLM_JUDGE`` (and emits a
+    ``FutureWarning``), so we use the canonical name directly. It is the same
     source type the L2 judge assessments use (``docs/ARCHITECTURE.md`` §11); the
-    distinct assessment *name* (``l3_halo_review``) keeps it from colliding with
-    them on a shared subject trace.
+    distinct assessment *names* keep these from colliding with the L2/``HUMAN``
+    assessments on a shared subject trace.
     """
     import mlflow
     from mlflow.entities import AssessmentSource, AssessmentSourceType
 
-    mlflow.log_feedback(
-        trace_id=verdict.subject_trace_id,
-        name=FEEDBACK_NAME,
-        value=_feedback_value(verdict),
-        source=AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=source_id),
-        rationale=verdict.summary or None,
-        metadata=_feedback_metadata(verdict),
+    source = AssessmentSource(source_type=AssessmentSourceType.LLM_JUDGE, source_id=source_id)
+
+    def _log(name: str, value: int, rationale: str | None, metadata: dict[str, str]) -> None:
+        mlflow.log_feedback(
+            trace_id=verdict.subject_trace_id,
+            name=name,
+            value=value,
+            source=source,
+            rationale=rationale or None,
+            metadata=metadata,
+        )
+
+    for assessment in verdict.guideline_assessments:
+        _log(
+            guideline_feedback_name(assessment.guideline_id),
+            assessment.score,
+            assessment.rationale,
+            _guideline_metadata(verdict, assessment),
+        )
+
+    _log(
+        ASSETS_FEEDBACK_NAME,
+        len(verdict.recommended_assets),
+        "; ".join(f"[{a.asset_type}] {a.title}" for a in verdict.recommended_assets) or None,
+        _assets_metadata(verdict),
+    )
+
+    _log(
+        OVERALL_FEEDBACK_NAME,
+        _feedback_value(verdict),
+        verdict.summary,
+        _overall_metadata(verdict),
     )
 
 
@@ -396,9 +576,11 @@ def review_trace(
     *,
     experiment_id: str | None = None,
     model: str,
+    rubric: ReviewRubric = DEFAULT_RUBRIC,
     base_url: str | None = None,
     api_key: str | None = None,
     profile: str | None = None,
+    sql_warehouse_id: str | None = None,
     reviewer_experiment_id: str | None = None,
     attach: bool = True,
     source: TraceSource | None = None,
@@ -411,11 +593,14 @@ def review_trace(
     tracking_uri: str = "databricks",
     registry_uri: str = "databricks-uc",
 ) -> HaloReviewVerdict:
-    """Review one trace with HALO and attach a structured verdict to it.
+    """Review one trace with HALO against ``rubric`` and attach the verdict to it.
 
     Runs the full L3 flow: export → HALO review under its own trace → parse →
     attach. The HALO review is isolated as its own MLflow trace so its tokens are
     never summed into the subject trace's L0 cost (``docs/ARCHITECTURE.md`` §11).
+    On a degenerate report the parse raises :class:`~ail.l3.parser.HaloReportParseError`
+    *before* the attach — so a broken review is never recorded as a fake-good
+    assessment.
 
     Args:
         trace_id: The subject trace to review.
@@ -423,15 +608,22 @@ def review_trace(
             context; not required to fetch the trace by id).
         model: Databricks serving-endpoint / FMAPI chat model name the HALO judge
             runs on (e.g. ``"databricks-claude-sonnet-4-6"``).
+        rubric: The review rubric (guidelines + score scale + asset directive).
+            Defaults to :data:`ail.l3.rubric.DEFAULT_RUBRIC` (the user's five
+            guidelines). Drives both the prompt and the parser's validation.
         base_url / api_key: OpenAI-compatible endpoint for HALO. When both are
             ``None`` they are resolved from the Databricks ``profile`` (workspace
             ``/serving-endpoints`` + a minted token); failing that, HALO falls
             back to the ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` env vars.
         profile: Databricks CLI profile selecting the workspace (auth + FMAPI).
+        sql_warehouse_id: SQL warehouse the MLflow v4 (UC-backed) trace read uses,
+            surfaced as ``MLFLOW_TRACING_SQL_WAREHOUSE_ID``. Needed when the
+            backing store can only fetch traces through a warehouse.
         reviewer_experiment_id: Where to log HALO's own review trace. Defaults to
             ``experiment_id``.
-        attach: When ``True`` (default), attach the verdict to the subject trace.
-            ``False`` returns the verdict without writing — useful for dry runs.
+        attach: When ``True`` (default), attach the assessments to the subject
+            trace. ``False`` returns the verdict without writing — useful for dry
+            runs.
         source: Trace source for the export. Defaults to a Databricks
             :class:`~ail.ingest.mlflow_source.MLflowTraceSource`; inject a fake in
             tests.
@@ -454,6 +646,7 @@ def review_trace(
         tracking_uri=tracking_uri,
         registry_uri=registry_uri,
         experiment_id=reviewer_experiment_id or experiment_id,
+        sql_warehouse_id=sql_warehouse_id,
     )
 
     export: OtlpExport = mlflow_trace_to_otlp_jsonl(
@@ -464,11 +657,12 @@ def review_trace(
         profile=profile,
     )
 
-    prompt = REVIEW_PROMPT_TEMPLATE.format(trace_id=export.trace_id)
+    prompt = build_review_prompt(export.trace_id, rubric)
     span_attributes: dict[str, Any] = {
         "ail.l3.subject_trace_id": export.trace_id,
         "ail.l3.subject_experiment_id": experiment_id or "",
         "ail.l3.judge_model": model,
+        "ail.l3.rubric_id": rubric.rubric_id,
         "ail.l3.subject_n_spans": export.n_spans,
     }
 
@@ -493,6 +687,7 @@ def review_trace(
         verdict = parse_halo_report(
             report,
             subject_trace_id=export.trace_id,
+            rubric=rubric,
             reviewer_trace_id=reviewer_trace_id,
             model=model,
             generated_at=datetime.now(UTC).isoformat(),
