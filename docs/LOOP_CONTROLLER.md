@@ -18,10 +18,21 @@ The **action capabilities already exist and are tested**: asset generation
 (`ail.optimize.gepa_runner`), prompt versioning + champion alias
 (`ail.optimize.prompt_registry`), RLM/HALO diagnosis (`ail.l3`), the frozen-suite
 WITH/WITHOUT proof (`ail.compare`), and the readiness/eval-health gates
-(`ail.readiness`). What does **not** exist yet is the **controller that sequences
-them autonomously** and the **in-app approval queue**. Until those are built, each
-action is invoked manually. This document is the design-of-record for building
-them; it is **not** a description of current runtime behavior.
+(`ail.readiness`).
+
+**Lane 2 — the controller that sequences them autonomously + the proposed-action
+model — is now built and tested** (`ail.loop`): the goal-parameterized decision
+rules (`ail.loop.decision_rules`), the typed, inert `ProposedAction` record
+(`ail.loop.proposals`), the fail-closed `run_cycle` orchestrator over injectable
+seams (`ail.loop.controller`), and the agent-scoped publish to the unified
+`agent_proposed_actions` UC table lane 3 reads (`ail.loop.publish_proposals`). The
+controller **detects, decides, proves, gates, and proposes only** — it applies
+nothing and sets no champion alias.
+
+What does **not** exist yet is the **in-app approval queue + the authenticated
+approve/reject + the apply-on-approval** (lane 3). Until that is built, a pending
+proposal is reviewed and applied manually. This document remains the
+design-of-record for lane 3; lanes 1–2 below describe built behavior.
 
 ## The autonomy boundary (Option A)
 
@@ -115,12 +126,16 @@ will be built with care:
 
 1. **Lineage / audit timeline + revert CLI** (in progress) — the record the
    controller writes into and the human audits.
-2. **Loop controller + proposed-action model** — autonomous detect→decide→prove→
-   gate→propose; writes pending proposals (with the why+proof payload); **never
-   applies on its own**. Fail-closed: only proven, gated candidates become
-   proposals.
-3. **App approval queue + authenticated approve/reject + apply-on-approval** — the
-   human control plane; approval triggers the gated apply and the lineage record;
+2. ✅ **Loop controller + proposed-action model — built** (`ail.loop`): autonomous
+   detect→decide→prove→gate→propose; writes pending proposals (with the
+   why+proof+gate payload) to the unified `agent_proposed_actions` table; **never
+   applies on its own** (there is no apply seam to call). Fail-closed: only proven,
+   gated candidates become proposals; a crashed/non-improving candidate or an
+   ungated state yields no proposal. Unit-tested end-to-end with injected fakes
+   (no live MLflow/agent runs).
+3. **App approval queue + authenticated approve/reject + apply-on-approval**
+   (pending — lane 3) — the human control plane; reads the proposals table
+   SELECT-only, and on approval triggers the gated apply and the lineage record;
    reject archives with reason.
 
 After these, the loop is genuinely self-triggering up to the human approval gate:
