@@ -4,6 +4,8 @@ A reusable, agent-agnostic **self-improvement loop** for LLM agents (coding agen
 
 The design's load-bearing principle: **the optimizer is never allowed to train against the evaluation set, and the judge is aligned on a separate cadence from agent optimization.** This is what separates real improvement from a dashboard that says "improved" while quality stalls (the co-adaptation trap that every reference loop we surveyed omits).
 
+> **New here? Start with [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md)** — the hands-on first-time-user guide: connect your traces, state a goal, and walk the six stages from the irrefutable L0 baseline to GEPA optimization and helper-asset generation.
+
 ## Status
 
 Greenfield. The trace-ingestion seam — `src/ail/ingest/` (the `TraceSource` /
