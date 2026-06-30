@@ -1,0 +1,31 @@
+# Phase-2 run plan for the `phase2-mini` suite: task_id -> L1 verification command.
+#
+# Each command runs in that arm's isolated workspace (cwd set BY the harness),
+# with the pristine verify/ restored over the agent's edits first, so `cwd` here
+# is intentionally omitted (ignored for fixture-backed tasks). See
+# docs/PHASE2_LIVE_HARNESS.md and scripts/run_phase2_comparison.py.
+
+ts-fix-01:
+  name: verify
+  command: ["python", "-m", "pytest", "-q", "verify/"]
+  timeout_seconds: 600
+
+ts-impl-02:
+  name: verify
+  command: ["python", "-m", "pytest", "-q", "verify/"]
+  timeout_seconds: 600
+
+ts-refactor-03:
+  name: verify
+  command: ["python", "-m", "pytest", "-q", "verify/"]
+  timeout_seconds: 600
+
+ts-config-04:
+  name: verify
+  command: ["python", "-m", "pytest", "-q", "verify/"]
+  timeout_seconds: 600
+
+ts-route-05:
+  name: verify
+  command: ["python", "-m", "pytest", "-q", "verify/"]
+  timeout_seconds: 600

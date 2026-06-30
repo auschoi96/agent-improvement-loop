@@ -27,6 +27,7 @@ from ail.task_suite.loader import (
     task_suite_path,
     task_suite_root,
 )
+from ail.task_suite.phase2_mini import PHASE2_MINI_VERSION, build_phase2_mini_suite
 from ail.task_suite.schema import (
     SUITE_SCHEMA_VERSION,
     Difficulty,
@@ -59,4 +60,7 @@ __all__ = [
     # seed
     "SEED_VERSION",
     "build_seed_suite",
+    # phase2-mini (runnable live-fixture suite)
+    "PHASE2_MINI_VERSION",
+    "build_phase2_mini_suite",
 ]

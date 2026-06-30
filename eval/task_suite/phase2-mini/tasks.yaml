@@ -1,0 +1,54 @@
+schema_version: ail.task_suite/v1
+version: phase2-mini-v1
+pool: task_suite
+created_at: '2026-06-29T00:00:00+00:00'
+frozen: true
+content_hash: b0fb7c3230ad3c896e1d86fddc6c1013f7c0b83fd95f7f7d672d01b0273e4a45
+tasks:
+- task_id: ts-fix-01
+  prompt: The tests in verify/ are failing. Fix the bug(s) in the shapes/ package so all tests pass. Do
+    not modify the tests.
+  category: repeated_target_boilerplate
+  source_trace_id: phase2-fixture:ts-fix-01
+  difficulty: medium
+  notes: 'Synthetic live fixture eval/phase2_fixtures/ts-fix-01 (stdlib + pytest). Two bugs in two files:
+    shapes/area.py triangle_area uses base*height instead of 0.5*base*height, and shapes/registry.py mis-wires
+    the ''triangle'' entry. Seed fails verify; fixing both passes it.'
+- task_id: ts-impl-02
+  prompt: Implement evaluate() in calc/evaluate.py so verify/ passes, using the existing helpers in calc/ops.py
+    and calc/parser.py. Do not modify the tests.
+  category: typical_short_session
+  source_trace_id: phase2-fixture:ts-impl-02
+  difficulty: medium
+  notes: Synthetic live fixture eval/phase2_fixtures/ts-impl-02 (stdlib + pytest). evaluate() is a NotImplementedError
+    stub; a correct implementation over tokenize/precedence/apply (with * binding tighter than +/- and
+    left-associative equal precedence) gives evaluate('2 + 3 * 4')==14 and evaluate('10 - 2 - 3')==5.
+- task_id: ts-refactor-03
+  prompt: Extract the duplicated currency-formatting logic into a shared helper common.py and use it in
+    all three report modules. verify/ must still pass unchanged. Do not modify the tests.
+  category: repeated_target_boilerplate
+  source_trace_id: phase2-fixture:ts-refactor-03
+  difficulty: medium
+  notes: Synthetic live fixture eval/phase2_fixtures/ts-refactor-03 (stdlib + pytest). The seed's behavior
+    is already correct (render output preserved); the gap is structural — verify also asserts common.py
+    exists and each report module imports format_currency from it, which fails until the duplication is
+    extracted.
+- task_id: ts-config-04
+  prompt: Add a max_retries setting (int, default 3) to app/config.yaml and enforce it in app/settings.py
+    so verify/ passes. Do not modify the tests.
+  category: typical_short_session
+  source_trace_id: phase2-fixture:ts-config-04
+  difficulty: medium
+  notes: Synthetic live fixture eval/phase2_fixtures/ts-config-04 (stdlib + pytest; the config is parsed
+    without PyYAML). The seed has no max_retries; a correct change adds it (default 3) and enforces it
+    (positive int, ValueError otherwise) so load().max_retries==3 and invalid/missing inputs raise.
+- task_id: ts-route-05
+  prompt: Implement and register a get_user handler in api/ so verify/ passes, routing GET /users/<id>
+    to it using the existing User model + store; return the user or a not-found result. Do not modify
+    the tests.
+  category: high_tool_call_volume
+  source_trace_id: phase2-fixture:ts-route-05
+  difficulty: medium
+  notes: Synthetic live fixture eval/phase2_fixtures/ts-route-05 (stdlib + pytest). The seed registers
+    only GET /health; a correct change adds a get_user handler and registers GET /users/<id> so dispatch
+    returns the User for /users/1 and a NotFound for /users/999.
