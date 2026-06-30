@@ -1,4 +1,5 @@
 -- Corpus-wide L0 KPIs (one row). Read-only; all metrics precomputed in Tier A.
+-- @param experiment_id STRING
 SELECT
   trace_count,
   total_tokens,
@@ -15,4 +16,4 @@ SELECT
   priced_traces,
   unpriced_traces
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.l0_corpus_summary
-WHERE experiment_id = '660599403165942'
+WHERE experiment_id = :experiment_id

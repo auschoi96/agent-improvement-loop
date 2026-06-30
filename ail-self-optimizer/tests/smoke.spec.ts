@@ -16,12 +16,19 @@ test('smoke test - leaderboard loads and renders sections + data', async ({ page
 
   // App + section headings (h1/h2).
   await expect(page.getByRole('heading', { name: 'Agent Self-Optimization' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Baseline vs new version' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Corpus summary' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Token heavy tail' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Tool-waste diagnosis' })).toBeVisible();
 
-  // Corpus KPI cards render only after the corpus_summary query resolves, so
-  // this doubles as the "data loaded" wait. 'Traces' is a unique KPI label.
+  // The Phase-B priority visual renders the REAL Phase-2 result once the
+  // version_comparisons query resolves: the -35.4% token headline and the honest
+  // (amber, NOT green) controlled-proof status. Doubles as the "data loaded" wait.
+  await expect(page.getByText('Controlled proof', { exact: false })).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText('-35.4%', { exact: false }).first()).toBeVisible({ timeout: 30000 });
+
+  // Corpus KPI cards render after the corpus_summary query resolves. 'Traces' is
+  // a unique KPI label.
   await expect(page.getByText('Traces', { exact: true })).toBeVisible({ timeout: 30000 });
 });
 

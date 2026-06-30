@@ -5,9 +5,55 @@ import type { SQLTypeMarker, SQLStringMarker, SQLNumberMarker, SQLBooleanMarker,
 
 declare module "@databricks/appkit-ui/react" {
   interface QueryRegistry {
+    agent_versions: {
+        name: "agent_versions";
+        parameters: {
+          /** STRING - use sql.string() */
+          agent_name: SQLStringMarker;
+        };
+        result: Array<{
+          /** @sqlType STRING */
+          agent_version: string;
+          /** @sqlType INT */
+          n_traces: number;
+          /** @sqlType INT */
+          n_traces_total: number;
+          /** @sqlType DOUBLE */
+          total_tokens: number;
+          /** @sqlType DOUBLE */
+          tokens_per_trace: number;
+          /** @sqlType DOUBLE */
+          total_tool_calls: number;
+          /** @sqlType DOUBLE */
+          redundancy_rate: number;
+          /** @sqlType DOUBLE */
+          total_cost_usd: number;
+          /** @sqlType BOOLEAN */
+          cost_priced: boolean;
+          /** @sqlType STRING */
+          basis: string;
+          /** @sqlType STRING */
+          source: string;
+        }>;
+      };
+    agents: {
+        name: "agents";
+        parameters: Record<string, never>;
+        result: Array<{
+          /** @sqlType STRING */
+          agent_name: string;
+          /** @sqlType STRING */
+          experiment_id: string;
+          /** @sqlType STRING */
+          description: string;
+        }>;
+      };
     by_model: {
         name: "by_model";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType STRING */
           model: string;
@@ -23,7 +69,10 @@ declare module "@databricks/appkit-ui/react" {
       };
     by_producer: {
         name: "by_producer";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType STRING */
           producer: string;
@@ -39,7 +88,10 @@ declare module "@databricks/appkit-ui/react" {
       };
     corpus_summary: {
         name: "corpus_summary";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType INT */
           trace_count: number;
@@ -73,7 +125,10 @@ declare module "@databricks/appkit-ui/react" {
       };
     high_token_sessions: {
         name: "high_token_sessions";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType STRING */
           trace: string;
@@ -99,7 +154,10 @@ declare module "@databricks/appkit-ui/react" {
       };
     session_token_bars: {
         name: "session_token_bars";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType STRING */
           trace: string;
@@ -109,7 +167,10 @@ declare module "@databricks/appkit-ui/react" {
       };
     tool_waste_files: {
         name: "tool_waste_files";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType STRING */
           trace: string;
@@ -125,7 +186,10 @@ declare module "@databricks/appkit-ui/react" {
       };
     tool_waste_shell: {
         name: "tool_waste_shell";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType STRING */
           trace: string;
@@ -137,6 +201,84 @@ declare module "@databricks/appkit-ui/react" {
           trace_tools: number;
           /** @sqlType STRING */
           prologue: string;
+        }>;
+      };
+    version_comparisons: {
+        name: "version_comparisons";
+        parameters: {
+          /** STRING - use sql.string() */
+          agent_name: SQLStringMarker;
+        };
+        result: Array<{
+          /** @sqlType STRING */
+          baseline_version: string;
+          /** @sqlType STRING */
+          candidate_version: string;
+          /** @sqlType STRING */
+          objective_metric: string;
+          /** @sqlType STRING */
+          status: string;
+          /** @sqlType STRING */
+          readiness_tier: string;
+          /** @sqlType BOOLEAN */
+          can_prove_improvement: boolean;
+          /** @sqlType INT */
+          trace_count: number;
+          /** @sqlType BOOLEAN */
+          frozen_suite_present: boolean;
+          /** @sqlType INT */
+          n_promote: number;
+          /** @sqlType INT */
+          n_block: number;
+          /** @sqlType INT */
+          n_errored: number;
+          /** @sqlType BOOLEAN */
+          correctness_held: boolean;
+          /** @sqlType STRING */
+          proof_source: string;
+          /** @sqlType STRING */
+          headline_metric: string;
+          /** @sqlType DOUBLE */
+          headline_baseline: number;
+          /** @sqlType DOUBLE */
+          headline_candidate: number;
+          /** @sqlType DOUBLE */
+          headline_delta_pct: number;
+          /** @sqlType BOOLEAN */
+          headline_improved: boolean;
+          /** @sqlType STRING */
+          reasons: string;
+        }>;
+      };
+    version_metric_deltas: {
+        name: "version_metric_deltas";
+        parameters: {
+          /** STRING - use sql.string() */
+          agent_name: SQLStringMarker;
+          /** STRING - use sql.string() */
+          baseline_version: SQLStringMarker;
+          /** STRING - use sql.string() */
+          candidate_version: SQLStringMarker;
+        };
+        result: Array<{
+          /** @sqlType STRING */
+          metric: string;
+          /** @sqlType STRING */
+          unit: string;
+          /** @sqlType STRING */
+          metric_tier: string;
+          /** @sqlType BOOLEAN */
+          lower_is_better: boolean;
+          /** @sqlType DOUBLE */
+          baseline_value: number;
+          /** @sqlType DOUBLE */
+          candidate_value: number;
+          /** @sqlType DOUBLE */
+          delta_absolute: number;
+          /** @sqlType DOUBLE */
+          delta_pct: number;
+          /** @sqlType BOOLEAN */
+          improved: boolean;
         }>;
       };
   }

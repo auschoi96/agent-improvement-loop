@@ -116,3 +116,42 @@ Depends on the **prompt registry** (the lineage source of truth, lane in flight)
 landing first. Then: Phase A (minimal — enough to define/select an agent) →
 **Phase B shipped and reviewed before moving on** → Phase C. Each phase is its
 own PR with cross-vendor review; the human merges.
+
+## What shipped (Phases A + B)
+
+This PR delivers Phase A (minimal) and Phase B (the priority visual). Phase C is
+out of scope.
+
+**Phase A — agent registry + multi-agent landing.**
+- `src/ail/registry.py` — the typed, config-driven registry (`Agent` /
+  `AgentRegistry`, pydantic v2, `extra="forbid"`) mapping `agent_name →
+  experiment_id (+ optional judge_config / tag_filter)`. Seeded with
+  `claude_code → 660599403165942`; `config/agents.yaml` is the operator-facing
+  mirror (a test keeps the two in sync).
+- The app keeps the current landing page and adds an **agent switcher**
+  (`client/src/components/AgentSwitcher.tsx`); the L0 leaderboard is now
+  parameterized per selected agent's `experiment_id`.
+
+**Phase B — live baseline-vs-new version comparison.**
+- `src/ail/publish_versions.py` extends Tier A to aggregate L0 **per (agent,
+  agent_version)** — reusing `ail.metrics` outputs carried in the Phase-2
+  artifact (no metric recomputed) — into unified UC tables keyed by
+  `(agent_name, agent_version)`: `agent_registry`, `agent_version_l0`,
+  `agent_version_comparison`, `agent_version_readiness`. Writes reuse
+  `ail.publish`'s atomic, idempotent staging→`REPLACE WHERE` swap, scoped by a
+  composite per-version predicate.
+- **Seed (committed-artifact fallback):** `artifacts/phase2_token_lever.json` is
+  published as `agent='claude_code'`, `v0-baseline-no-skill` vs
+  `v1-token-efficiency-skill`, so the view renders the real **−35.4% token
+  reduction with correctness held** (2 PROMOTE / 3 honest BLOCK) day one without
+  live trace auth.
+- **Honest readiness gating.** `ail.readiness.compute_readiness` is wired into the
+  publish; the comparison carries a Python-decided display status. The 35.4% is a
+  real, measured controlled-comparison result, but because organic readiness has
+  not cleared (5 traces < the baseline floor) the view shows
+  **`controlled_proof_collecting`** (amber) — never a green "proven improvement"
+  the readiness wall has not cleared, and never a fabricated delta.
+
+**Liveness.** "Live" = the publish cadence; the view notes the controlled-proof
+provenance and the organic-readiness state honestly. The publish is
+per-version-capable and idempotent; the scheduled-publish job is not built here.

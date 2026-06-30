@@ -188,7 +188,13 @@ def test_atomic_replace_swaps_via_staging_then_replace_where() -> None:
     report = _report()
     client = _FakeClient()
     n = _atomic_replace_table(
-        client, "wh", SCHEMA_FQN, SESSION_TABLE, SESSION_COLUMNS, _session_rows(report), EXPERIMENT
+        client,
+        "wh",
+        SCHEMA_FQN,
+        SESSION_TABLE,
+        SESSION_COLUMNS,
+        _session_rows(report),
+        f"experiment_id = {_lit(EXPERIMENT)}",
     )
     stmts = client.statement_execution.statements
     assert n == report.n_traces
@@ -248,7 +254,7 @@ def test_atomic_replace_failure_leaves_live_table_untouched() -> None:
             SESSION_TABLE,
             SESSION_COLUMNS,
             _session_rows(report),
-            EXPERIMENT,
+            f"experiment_id = {_lit(EXPERIMENT)}",
         )
     stmts = client.statement_execution.statements
     # Invariant: the live table is mutated only by REPLACE WHERE, which must NOT
