@@ -10,6 +10,7 @@ one test that exercises the default ``mlflow.genai``-backed client monkeypatches
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -254,6 +255,22 @@ class TestCandidateImprovement:
         assert ok is False
         assert "cannot prove improvement" in reason
 
+    def test_nan_delta_is_not_improving(self) -> None:
+        # nan <= 0 is False, so a NaN delta must be trapped explicitly or it slips
+        # through and registers as a fake improvement (`+nan pct-pts beats seed`).
+        result = _result(evolved_savings=float("nan"), seed_savings=30.0)
+        assert not math.isfinite(result.holdout_savings_delta_pct)  # precondition
+        ok, reason = candidate_improvement(result)
+        assert ok is False
+        assert "does not beat seed" in reason
+
+    def test_positive_inf_delta_is_not_improving(self) -> None:
+        # inf <= 0 is also False; +inf must not pass the guard either.
+        result = _result(evolved_savings=float("inf"), seed_savings=30.0)
+        ok, reason = candidate_improvement(result)
+        assert ok is False
+        assert "does not beat seed" in reason
+
 
 # ---------------------------------------------------------------------------
 # register_gepa_candidate
@@ -335,6 +352,44 @@ class TestRegisterGepaCandidate:
         out = register_gepa_candidate(path, client=client, force=True)
         assert out.forced is False
         assert "ail.prompt.forced" not in client.register_calls[0]["tags"]
+
+    @pytest.mark.parametrize("delta_value", [float("nan"), float("inf")])
+    def test_refuses_nonfinite_delta_and_never_registers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delta_value: float
+    ) -> None:
+        # pydantic null-ifies NaN/inf through JSON, so to exercise the in-memory
+        # non-finite trap we parse to a result whose computed delta is non-finite.
+        result = _result(evolved_savings=delta_value, seed_savings=30.0)
+        assert not math.isfinite(result.holdout_savings_delta_pct)  # precondition
+        monkeypatch.setattr(
+            GepaOptimizationResult,
+            "model_validate_json",
+            classmethod(lambda cls, data: result),
+        )
+        path = tmp_path / "candidate.json"
+        path.write_text("{}", encoding="utf-8")
+        client = FakeRegistryClient()
+        with pytest.raises(NonImprovingCandidateError, match="does not beat seed"):
+            register_gepa_candidate(path, client=client)
+        assert client.register_calls == []  # register_prompt NEVER called
+
+    def test_force_with_custom_commit_message_keeps_force_prefix(self, tmp_path: Path) -> None:
+        path = _write_candidate(tmp_path, _result(evolved_savings=20.0, seed_savings=30.0))
+        client = FakeRegistryClient()
+        register_gepa_candidate(
+            path, client=client, force=True, commit_message="Ship for the demo per Austin"
+        )
+        msg = client.register_calls[0]["commit_message"]
+        assert msg.startswith("FORCE-registered non-improving GEPA candidate:")
+        assert "Ship for the demo per Austin" in msg  # caller text preserved, not dropped
+        assert client.register_calls[0]["tags"]["ail.prompt.forced"] == "true"
+
+    def test_custom_commit_message_passthrough_when_not_forced(self, tmp_path: Path) -> None:
+        path = _write_candidate(tmp_path, _result(evolved_savings=45.0, seed_savings=30.0))
+        client = FakeRegistryClient()
+        register_gepa_candidate(path, client=client, commit_message="Promote per review")
+        # a genuine (non-forced) promotion keeps the caller's message verbatim
+        assert client.register_calls[0]["commit_message"] == "Promote per review"
 
 
 # ---------------------------------------------------------------------------

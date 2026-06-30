@@ -40,6 +40,7 @@ URI convention (tracking ``databricks``, registry ``databricks-uc``). See
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -267,7 +268,10 @@ def candidate_improvement(result: GepaOptimizationResult) -> tuple[bool, str]:
             "held-out realized savings unavailable for the evolved or seed body: "
             "cannot prove improvement",
         )
-    if delta <= 0:
+    # Trap non-finite deltas (NaN/±inf) explicitly: `nan <= 0` and `inf <= 0` are both
+    # False, so a NaN from an empty PROMOTE set or an upstream math error would slip
+    # through a bare `delta <= 0` and register as a fake improvement. Fail closed.
+    if not math.isfinite(delta) or delta <= 0:
         return (
             False,
             f"held-out savings delta {delta} pct-pts does not beat seed "
@@ -447,11 +451,15 @@ def register_gepa_candidate(
         forced=forced,
     )
 
+    forced_prefix = "FORCE-registered non-improving GEPA candidate"
     if commit_message is None:
-        prefix = (
-            "FORCE-registered non-improving GEPA candidate" if forced else "Promote GEPA candidate"
-        )
+        prefix = forced_prefix if forced else "Promote GEPA candidate"
         commit_message = f"{prefix}: {reason}"
+    elif forced:
+        # A forced (non-improving) registration must NEVER record a clean message: prepend
+        # the warning (and reason) even to a caller-supplied message, keeping their text
+        # after it, so a forced version can't masquerade as genuine in the audit log.
+        commit_message = f"{forced_prefix}: {reason}\n\n{commit_message}"
 
     return register_prompt_body(
         body=result.evolved_skill_body,
