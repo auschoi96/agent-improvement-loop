@@ -172,6 +172,24 @@ class TestReviewTrace:
         assert overall["metadata"]["n_guideline_assessments"] == "4"
         assert "verdict_json" in overall["metadata"]
 
+    def test_recommend_assets_false_skips_assets_feedback(
+        self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
+    ) -> None:
+        from ail.l3.rubric import DEFAULT_GUIDELINES, ReviewRubric
+
+        # A rubric that opts out of assets must not attach a spurious
+        # rlm_recommended_assets=0 assessment.
+        rubric = ReviewRubric(
+            rubric_id="no-assets/v1", guidelines=DEFAULT_GUIDELINES, recommend_assets=False
+        )
+        trace = normalize_trace(synthetic_trace)
+        rv.review_trace(trace.trace_id, model="m", source=_FakeSource(trace), rubric=rubric)
+        names = {c["name"] for c in captured_feedback}
+        assert "rlm_recommended_assets" not in names
+        # The scored guidelines and the overall verdict are still attached.
+        assert "rlm_review" in names
+        assert "rlm_tool_calling_efficiency" in names
+
     def test_attach_false_skips_feedback(
         self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
     ) -> None:

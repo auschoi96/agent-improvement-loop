@@ -88,13 +88,21 @@ class TestAggregateAssets:
 
 
 class _FakeCohortSource(TraceSource):
-    """Yields a fixed set of traces; ``filter_string`` is ignored (post-filter is truth)."""
+    """Yields a fixed set of traces; records the ``filter_string`` it was scanned with.
+
+    The cohort post-filter (``Cohort.select``) is the source of truth, so the fake
+    deliberately ignores ``filter_string`` for membership — but it captures the
+    value so a test can assert the runner pushed down the *machine* filter
+    (``Cohort.to_mlflow_filter``), not the human-readable description.
+    """
 
     def __init__(self, traces: list[NormalizedTrace]) -> None:
         self._traces = traces
         self._by_id = {t.trace_id: t for t in traces}
+        self.seen_filter: str | None = None
 
-    def iter_traces(self, **_: Any) -> Any:
+    def iter_traces(self, *, filter_string: str | None = None, **_: Any) -> Any:
+        self.seen_filter = filter_string
         yield from self._traces
 
     def get_trace(self, trace_id: str) -> NormalizedTrace | None:
@@ -179,17 +187,20 @@ def _source() -> _FakeCohortSource:
 
 class TestReviewCohort:
     def test_tag_filter_selects_the_cohort(self, cohort_env: list[dict[str, Any]]) -> None:
+        src = _source()
         report = review_cohort(
             "exp-1",
             {"ail.agent": "claude_code"},
             judge_model="m",
-            source=_source(),
+            source=src,
         )
         reviewed_ids = {o.trace_id for o in report.outcomes}
         # The codex trace is excluded even though it is the largest by tokens.
         assert "tr-other" not in reviewed_ids
         assert reviewed_ids == {"tr-1", "tr-2", "tr-3"}
         assert report.n_selected == 3
+        # The backend scan got the machine pushdown filter (not the human label).
+        assert src.seen_filter == "tags.`ail.agent` = 'claude_code'"
         assert "ail.agent=claude_code" in report.tag_filter
         assert report.judge_model == "m"
         assert report.guideline_ids == list(DEFAULT_RUBRIC.guideline_ids())

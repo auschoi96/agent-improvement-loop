@@ -144,8 +144,8 @@ def aggregate_assets(verdicts: Iterable[HaloReviewVerdict]) -> list[RankedAsset]
             )
 
     # Stable rank: most distinct traces first, then most total recommendations,
-    # then a deterministic type/title tie-break (``order.index`` keeps first-seen
-    # order among full ties).
+    # then a deterministic type/title tie-break. Iterating ``order`` (first-seen
+    # order) through Python's stable ``sorted`` keeps ties in encounter order.
     ranked = sorted(
         (acc[key] for key in order),
         key=lambda e: (-len(e.trace_ids), -e.occurrences, e.asset_type, e.title.lower()),
@@ -236,6 +236,10 @@ def review_cohort(
 
     # Push the cohort's equality filter into the backend scan, then enforce the
     # full cohort filter in memory (the source of truth), then L3-size-select.
+    # This mirrors MLflowTraceSource.iter_cohort_traces' pushdown + post-filter,
+    # but over the base TraceSource interface (fetch_traces + Cohort.select) so the
+    # runner works with any injected source — including the test fakes — not only
+    # the concrete MLflow source that carries the cohort-aware methods.
     scanned = src.fetch_traces(
         experiment_id=location,
         filter_string=cohort.to_mlflow_filter(),

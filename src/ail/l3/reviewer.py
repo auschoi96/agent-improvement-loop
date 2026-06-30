@@ -217,15 +217,20 @@ def build_review_prompt(trace_id: str, rubric: ReviewRubric = DEFAULT_RUBRIC) ->
     guidelines_block = "\n".join(lines)
     assets_schema = _ASSETS_SCHEMA_FRAGMENT if rubric.recommend_assets else ""
 
+    # Resolve the structural sentinels FIRST (splice the assets schema before its
+    # own <<ASSET_TYPES>> token), then substitute the user-supplied content
+    # (guideline text, objective) and the trace id LAST — so rubric text that
+    # happened to contain a sentinel literal cannot be re-scanned and corrupted by
+    # a later replace. The rendering is then hermetic to arbitrary rubric content.
     return (
-        _PROMPT_TEMPLATE.replace("<<TRACE_ID>>", trace_id)
-        .replace("<<OBJECTIVE>>", rubric.objective)
-        .replace("<<GUIDELINES_BLOCK>>", guidelines_block)
-        .replace("<<ASSETS_SCHEMA>>", assets_schema)
+        _PROMPT_TEMPLATE.replace("<<ASSETS_SCHEMA>>", assets_schema)
         .replace("<<ASSET_TYPES>>", asset_types)
         .replace("<<IDS>>", " | ".join(rubric.guideline_ids()))
         .replace("<<LO>>", lo)
         .replace("<<HI>>", hi)
+        .replace("<<GUIDELINES_BLOCK>>", guidelines_block)
+        .replace("<<OBJECTIVE>>", rubric.objective)
+        .replace("<<TRACE_ID>>", trace_id)
     )
 
 
@@ -517,14 +522,19 @@ def _assets_metadata(verdict: HaloReviewVerdict) -> dict[str, str]:
     return metadata
 
 
-def _attach_verdict(verdict: HaloReviewVerdict, *, source_id: str) -> None:
+def _attach_verdict(
+    verdict: HaloReviewVerdict, *, source_id: str, recommend_assets: bool = True
+) -> None:
     """Attach ``verdict`` to the subject trace as a set of LLM-judge assessments.
 
     Writes one ``rlm_<guideline_id>`` feedback per scored guideline (value = the
-    bounded score), one ``rlm_recommended_assets`` feedback (value = the asset
-    count; the assets ride as JSON in metadata since the v4 store rejects struct
-    values), and one overall ``rlm_review`` feedback (value = the headline
-    token-waste score; the full verdict in metadata).
+    bounded score), one overall ``rlm_review`` feedback (value = the headline
+    token-waste score; the full verdict in metadata), and — when
+    ``recommend_assets`` (the rubric asked for assets) — one
+    ``rlm_recommended_assets`` feedback (value = the asset count, ``0`` meaning
+    "asked, found none"; the assets ride as JSON in metadata since the v4 store
+    rejects struct values). A rubric that opted out of assets attaches no
+    ``rlm_recommended_assets`` assessment at all.
 
     The source type is ``LLM_JUDGE``: in ``mlflow>=3`` the older ``AI_JUDGE``
     spelling is a **deprecated alias** coerced to ``LLM_JUDGE`` (and emits a
@@ -556,12 +566,13 @@ def _attach_verdict(verdict: HaloReviewVerdict, *, source_id: str) -> None:
             _guideline_metadata(verdict, assessment),
         )
 
-    _log(
-        ASSETS_FEEDBACK_NAME,
-        len(verdict.recommended_assets),
-        "; ".join(f"[{a.asset_type}] {a.title}" for a in verdict.recommended_assets) or None,
-        _assets_metadata(verdict),
-    )
+    if recommend_assets:
+        _log(
+            ASSETS_FEEDBACK_NAME,
+            len(verdict.recommended_assets),
+            "; ".join(f"[{a.asset_type}] {a.title}" for a in verdict.recommended_assets) or None,
+            _assets_metadata(verdict),
+        )
 
     _log(
         OVERALL_FEEDBACK_NAME,
@@ -694,6 +705,8 @@ def review_trace(
         )
 
     if attach:
-        _attach_verdict(verdict, source_id=model or "halo")
+        _attach_verdict(
+            verdict, source_id=model or "halo", recommend_assets=rubric.recommend_assets
+        )
 
     return verdict
