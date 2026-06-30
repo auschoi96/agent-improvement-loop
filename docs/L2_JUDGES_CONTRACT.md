@@ -136,18 +136,25 @@ outcome = align_judge(correctness, alignment_set)      # optimizer=None → MLfl
 aligned_judge = outcome.judge                          # better-aligned MLflow Judge
 record = outcome.report                                # serializable AlignmentReport
 
-# To configure MemAlign (requires the optional `dspy` dependency):
+# To configure MemAlign (requires the optional `align` extra — see below):
 optimizer = build_memalign_optimizer(MemAlignConfig(retrieval_k=3, reflection_lm="databricks:/..."))
 outcome = align_judge(correctness, alignment_set, optimizer=optimizer)
 ```
+
+> **To run MemAlign alignment, install the optional `align` extra:**
+> `pip install -e ".[align]"` (or `pip install "ail[align]"`). It pulls in
+> `dspy`, the optimizer backend MLflow's `MemAlignOptimizer` requires. The extra
+> is **optional and lazy-imported**: the base (unaligned) judges, `import
+> ail.judges`, and CI all work without it — only the judge-alignment cadence
+> (`build_memalign_optimizer` / `align_judge` with a real optimizer) needs it.
 
 - `align_judge(judge, alignment_set, *, optimizer=None, generated_at=None) -> AlignmentOutcome`
   — wraps `judge.align(traces=..., optimizer=...)`. Raises `ValueError` on an
   empty set.
 - `build_memalign_optimizer(config=None)` — constructs a configured
   `MemAlignOptimizer`. **Imported lazily**; raises a clear `ImportError` when the
-  optional `dspy` dependency is absent (so importing this package, and CI, never
-  require `dspy`).
+  optional `align` extra (`dspy`) is absent (so importing this package, and CI,
+  never require `dspy`).
 - `MemAlignConfig(reflection_lm, retrieval_k, embedding_model, embedding_dim)` —
   mirrors the public optimizer constructor; `None` values defer to MLflow's
   defaults.
