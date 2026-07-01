@@ -1,19 +1,25 @@
 """Post-deploy bootstrap that makes the framework's SQL-warehouse access turnkey.
 
 ``databricks bundle deploy`` uploads the publish job, the app, and (later) the
-scheduled scorers, but three operational facts still have to be true before any
+scheduled scorers, but four operational facts still have to be true before any
 of them can read traces *through* a SQL warehouse:
 
 1. a warehouse exists — provided by the deployer, or provisioned here;
-2. the single framework service principal has ``CAN_USE`` on it; and
-3. the target MLflow experiment carries the monitoring tag
+2. the single framework service principal has ``CAN_USE`` on it;
+3. every table the deployed app's SQL queries read exists (empty is fine), so the
+   AppKit build's typegen ``DESCRIBE QUERY`` — and every runtime ``SELECT`` — has
+   a table to resolve (see :mod:`ail.jobs.bootstrap_tables`); and
+4. the target MLflow experiment carries the monitoring tag
    :data:`ail.compare.monitoring.MONITORING_WAREHOUSE_TAG`
    (``mlflow.monitoring.sqlWarehouseId``) so MLflow's monitoring job fetches the
    v4 Unity Catalog traces the scorers score.
 
-This script performs all three **idempotently**, so re-running it is a no-op
+This script performs all four **idempotently**, so re-running it is a no-op
 beyond confirming state. It is the *conditional* half of the warehouse story a
-Declarative Automation Bundle cannot express on its own.
+Declarative Automation Bundle cannot express on its own. Because the app build's
+typegen fails hard on a not-yet-created table, this bootstrap must run **before**
+the app bundle is deployed/started — see ``docs/DEPLOY.md`` for the enforced
+sequence.
 
 Why this is not pure bundle YAML
 --------------------------------
@@ -49,7 +55,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ail.compare.monitoring import MonitoringWarehouseConfig, configure_monitoring_warehouse
-from ail.publish import REFERENCE_EXPERIMENT
+from ail.jobs.bootstrap_tables import ensure_app_tables
+from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA, REFERENCE_EXPERIMENT
 
 if TYPE_CHECKING:
     from mlflow import MlflowClient
@@ -75,6 +82,7 @@ class BootstrapResult:
     warehouse_id: str
     warehouse_created: bool
     granted_sp_id: str | None
+    tables_ensured: list[str]
     monitoring: MonitoringWarehouseConfig | None
 
 
@@ -164,10 +172,12 @@ def bootstrap(
     warehouse_name: str = DEFAULT_WAREHOUSE_NAME,
     cluster_size: str = DEFAULT_CLUSTER_SIZE,
     auto_stop_mins: int = DEFAULT_AUTO_STOP_MINS,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
     client: Any | None = None,
     mlflow_client: MlflowClient | None = None,
 ) -> BootstrapResult:
-    """Idempotently provision/resolve the warehouse, grant it, and tag the experiment.
+    """Idempotently provision/resolve the warehouse, ensure the app tables, grant it, and tag.
 
     Args:
         experiment_id: MLflow experiment to tag with the monitoring warehouse.
@@ -178,6 +188,9 @@ def bootstrap(
             needs no extra grant).
         warehouse_name, cluster_size, auto_stop_mins: serverless-warehouse spec
             used only on the create path.
+        catalog, schema: Unity Catalog location of the app's tables; the
+            table-ensure step creates every app-read table here (defaults match
+            the app's ``config/queries/*.sql`` and the writer modules).
         client: Databricks ``WorkspaceClient`` (injectable for tests).
         mlflow_client: ``MlflowClient`` passed through to
             :func:`configure_monitoring_warehouse` (injectable for tests).
@@ -199,6 +212,12 @@ def bootstrap(
         auto_stop_mins=auto_stop_mins,
     )
 
+    # Ensure every table the app's SQL queries read exists (empty), using each
+    # writer module's own authoritative _ddl(). This is what lets the AppKit
+    # build's typegen DESCRIBE QUERY (and every runtime SELECT) resolve on a
+    # clean workspace; idempotent CREATE ... IF NOT EXISTS, never DROP/ALTER.
+    tables_ensured = ensure_app_tables(client, resolved_id, catalog=catalog, schema=schema)
+
     granted: str | None = None
     if framework_sp_id and framework_sp_id.strip():
         grant_warehouse_can_use(client, resolved_id, framework_sp_id.strip())
@@ -218,6 +237,7 @@ def bootstrap(
         warehouse_id=resolved_id,
         warehouse_created=created,
         granted_sp_id=granted,
+        tables_ensured=tables_ensured,
         monitoring=monitoring,
     )
 
@@ -247,6 +267,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--warehouse-name", default=DEFAULT_WAREHOUSE_NAME)
     parser.add_argument("--cluster-size", default=DEFAULT_CLUSTER_SIZE)
     parser.add_argument("--auto-stop-mins", default=DEFAULT_AUTO_STOP_MINS, type=int)
+    parser.add_argument(
+        "--catalog",
+        default=DEFAULT_CATALOG,
+        help="Unity Catalog catalog holding the app's tables (table-ensure step).",
+    )
+    parser.add_argument(
+        "--schema",
+        default=DEFAULT_SCHEMA,
+        help="Schema (within --catalog) holding the app's tables (table-ensure step).",
+    )
     return parser.parse_args(argv)
 
 
@@ -261,12 +291,16 @@ def main(argv: list[str] | None = None) -> int:
         warehouse_name=args.warehouse_name,
         cluster_size=args.cluster_size,
         auto_stop_mins=args.auto_stop_mins,
+        catalog=args.catalog,
+        schema=args.schema,
     )
     action = "created" if result.warehouse_created else "reused"
     grant = result.granted_sp_id or "(skipped — no framework_sp_id)"
     print(
         f"[ail.jobs.bootstrap_grants] warehouse={result.warehouse_id} ({action}) "
-        f"grant_can_use={grant} experiment={args.experiment} "
+        f"grant_can_use={grant} "
+        f"tables_ensured={len(result.tables_ensured)} in {args.catalog}.{args.schema} "
+        f"experiment={args.experiment} "
         f"monitoring_tag_set={result.monitoring is not None}"
     )
     return 0
