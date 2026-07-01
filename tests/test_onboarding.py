@@ -40,6 +40,7 @@ from ail.onboarding.service import (
     run_create,
     run_register,
     run_requirements,
+    run_validate,
 )
 
 # ---------------------------------------------------------------------------
@@ -461,3 +462,82 @@ def test_run_register_errors_without_warehouse(monkeypatch) -> None:  # type: ig
 def test_run_create_refuses_anonymous() -> None:
     result = run_create("Fresh", actor="")
     assert result.outcome is OnboardingOutcome.REFUSED
+
+
+# ---------------------------------------------------------------------------
+# run_validate — freshness is FULLY fail-closed: BOTH checks must run (BLOCKING 1)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_fresh_only_when_both_checks_run() -> None:
+    # Happy path: the MLflow-traces check (fake: exists + 0 traces) AND the
+    # registry-claims check (explicit empty dict = it ran, found none) both ran.
+    client = _FakeExperimentClient(
+        by_id={"exp-1": ExperimentInfo("exp-1", "/Users/a/agent")}, traces={"exp-1": 0}
+    )
+    result = run_validate(
+        "exp-1", actor="dev@databricks.com", experiment_client=client, claimed_experiment_ids={}
+    )
+    assert result.outcome is OnboardingOutcome.VALIDATED
+    assert result.fresh is True
+
+
+def test_validate_failclosed_when_claims_check_cannot_run(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # No warehouse configured => the registry-claims check cannot run. Even though
+    # the experiment exists with zero traces, we must NOT report fresh (that would
+    # fabricate an unverified 'not claimed' state). Honest ERROR naming the prereq.
+    monkeypatch.delenv("DATABRICKS_WAREHOUSE_ID", raising=False)
+    client = _FakeExperimentClient(
+        by_id={"exp-1": ExperimentInfo("exp-1", "/Users/a/agent")}, traces={"exp-1": 0}
+    )
+    result = run_validate(
+        "exp-1", actor="dev@databricks.com", experiment_client=client, claimed_experiment_ids=None
+    )
+    assert result.outcome is OnboardingOutcome.ERROR
+    assert result.fresh is False
+    assert "unclaimed" in (result.error or "") and "DATABRICKS_WAREHOUSE_ID" in (result.error or "")
+
+
+def test_validate_failclosed_when_registry_read_raises(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A warehouse IS configured but the registry read fails (permission/authority) —
+    # the claims check raised, so we fail closed with an honest error, never fresh.
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh")
+
+    def _boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("PERMISSION_DENIED reading agent_registry")
+
+    monkeypatch.setattr("ail.onboarding.service._claimed_experiments", _boom)
+    client = _FakeExperimentClient(
+        by_id={"exp-1": ExperimentInfo("exp-1", "/Users/a/agent")}, traces={"exp-1": 0}
+    )
+    result = run_validate(
+        "exp-1", actor="dev@databricks.com", experiment_client=client, claimed_experiment_ids=None
+    )
+    assert result.outcome is OnboardingOutcome.ERROR
+    assert result.fresh is False
+    assert "PERMISSION_DENIED" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# requirements — gate descriptions come from Python with the real floors (BLOCKING 2)
+# ---------------------------------------------------------------------------
+
+
+def test_python_owns_the_gate_descriptions_with_real_floors() -> None:
+    # The per-goal + overall summaries are composed in Python from the computed gate
+    # set + ReadinessThresholds, so the client renders them verbatim (no TS numbers).
+    judged = build_requirements(["accuracy"])
+    (acc,) = judged.selected
+    assert "20" in acc.summary  # quality_min_labels, from ReadinessThresholds
+    assert "50" in acc.summary  # prove_min_traces
+    assert "20" in judged.summary  # overall note names the label floor
+    assert judged.summary  # non-empty when goals selected
+
+    deterministic = build_requirements(["cost"])
+    (cost,) = deterministic.selected
+    assert "50" in cost.summary  # needs traces to prove
+    assert "20" not in cost.summary  # a deterministic goal never needs the 20 labels
+    assert "no human labels" in deterministic.summary
+
+    # No goals selected => no fabricated summary.
+    assert build_requirements(None).summary == ""

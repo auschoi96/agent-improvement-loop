@@ -268,7 +268,14 @@ class GateRequirement(_Contract):
 
 
 class GoalRequirement(_Contract):
-    """A chosen goal's scorer mapping + the exact gates it needs (Page 3 source)."""
+    """A chosen goal's scorer mapping + the exact gates it needs (Page 3 source).
+
+    ``summary`` is a Python-composed, human-readable one-line description of exactly
+    what this goal needs, built from the *computed* gate set + the real
+    :class:`ReadinessThresholds` numbers. It is the source-of-truth string the client
+    renders **verbatim** — no threshold or gate-bundle text is authored in TypeScript
+    (the two-tier discipline), so a floor change here can never drift from the UI.
+    """
 
     key: str
     label: str
@@ -280,6 +287,7 @@ class GoalRequirement(_Contract):
     guardrail_judges: list[str] = Field(default_factory=list)
     optional_quality_judge: str | None = None
     gates: list[GateRequirement] = Field(default_factory=list)
+    summary: str = ""
 
 
 class Thresholds(_Contract):
@@ -305,6 +313,9 @@ class RequirementsResult(_Contract):
     selected: list[GoalRequirement] = Field(default_factory=list)
     union_gates: list[GateRequirement] = Field(default_factory=list)
     requires_labels: bool = False
+    #: A Python-composed overall data-gate note (with the real threshold numbers)
+    #: the client renders verbatim; empty when no goals are selected.
+    summary: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +352,41 @@ def _gate_requirement(gate: Gate, th: ReadinessThresholds) -> GateRequirement:
         label=_GATE_LABELS.get(gate.name, gate.name.value),
         needed=gate.reason,
         threshold=_threshold_for(gate.name, th),
+    )
+
+
+def _gate_phrase(gate: GateRequirement) -> str:
+    """One gate as a short phrase, with its real threshold number (from the gate)."""
+    if gate.name == GateName.SCORED_COVERAGE.value and gate.threshold is not None:
+        return f"{gate.label.lower()} (≥{gate.threshold:.0%})"
+    if gate.threshold is not None:
+        return f"{gate.label.lower()} (≥{gate.threshold:g})"
+    return gate.label.lower()
+
+
+def _goal_summary(gates: list[GateRequirement]) -> str:
+    """A one-line, source-of-truth description of what a goal needs.
+
+    Composed **in Python** from the *computed* gate set (so it can never drift from
+    the gates the readiness module built) with the real threshold numbers — the
+    string the client renders verbatim (never re-authored in TypeScript).
+    """
+    if not gates:
+        return ""
+    return "Needs " + ", ".join(_gate_phrase(g) for g in gates) + "."
+
+
+def _selection_summary(requires_labels: bool, th: ReadinessThresholds) -> str:
+    """The overall data-gate note (with real threshold numbers), composed in Python."""
+    base = "Optimization will not act on this agent until the gates below are met."
+    if requires_labels:
+        return (
+            f"{base} A judged goal (Accuracy) additionally needs {th.quality_min_labels} "
+            "human labels to align the MemAlign judge before any quality claim is trusted."
+        )
+    return (
+        f"{base} Your selection is purely deterministic — it needs traces "
+        f"(≥{th.prove_min_traces} to prove) but no human labels."
     )
 
 
@@ -387,6 +433,7 @@ def build_requirements(goal_keys: list[str] | None = None) -> RequirementsResult
                 guardrail_judges=list(spec.guardrail_names),
                 optional_quality_judge=spec.optional_quality_judge,
                 gates=gates,
+                summary=_goal_summary(gates),
             )
         )
         for gate in gates:
@@ -403,6 +450,7 @@ def build_requirements(goal_keys: list[str] | None = None) -> RequirementsResult
         selected=selected,
         union_gates=list(union.values()),
         requires_labels=requires_labels,
+        summary=_selection_summary(requires_labels, th) if selected else "",
     )
 
 

@@ -42,6 +42,9 @@ export interface GoalRequirement {
   guardrail_judges: string[];
   optional_quality_judge: string | null;
   gates: GateRequirement[];
+  // Python-composed, human-readable gate description (with the real threshold
+  // numbers). The client renders it VERBATIM — no thresholds/bundles authored in TS.
+  summary: string;
 }
 
 export interface Thresholds {
@@ -58,6 +61,9 @@ export interface RequirementsResponse {
   selected: GoalRequirement[];
   union_gates: GateRequirement[];
   requires_labels: boolean;
+  // Python-composed overall data-gate note (with real threshold numbers), rendered
+  // verbatim by the client. Empty when no goals are selected.
+  summary: string;
   error?: string;
 }
 
@@ -302,4 +308,39 @@ export function resolvedFromCreation(resp: CreationResponse): ResolvedExperiment
     return { experiment_id: resp.experiment_id, name: resp.name ?? '', fresh: true };
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Data-gate view model (two-tier: rendered VERBATIM from the Python response)
+// ---------------------------------------------------------------------------
+
+export interface DataGatePerGoal {
+  key: string;
+  label: string;
+  scorer: string;
+  summary: string;
+}
+
+export interface DataGateView {
+  summary: string; // overall note, verbatim from Python
+  gates: GateRequirement[]; // union gates, rendered verbatim (label + needed)
+  perGoal: DataGatePerGoal[]; // per-goal descriptions, verbatim from Python
+}
+
+// Build the data-gate page's view model from the Python `requirements` response.
+// Every gate fact is passed through VERBATIM — the overall note, the per-gate
+// `needed` strings (which carry the real threshold numbers), and each goal's
+// `summary`. No readiness threshold or gate-bundle text is ever authored in
+// TypeScript, and nothing is derived from `requires_labels` (two-tier discipline).
+export function dataGateView(req: RequirementsResponse): DataGateView {
+  return {
+    summary: req.summary ?? '',
+    gates: req.union_gates,
+    perGoal: req.selected.map((g) => ({
+      key: g.key,
+      label: g.label,
+      scorer: g.scorer,
+      summary: g.summary ?? '',
+    })),
+  };
 }

@@ -16,6 +16,8 @@ import {
   registerMessage,
   resolvedFromValidation,
   resolvedFromCreation,
+  dataGateView,
+  type RequirementsResponse,
   type WizardState,
 } from './onboarding';
 
@@ -146,5 +148,58 @@ describe('resolved-experiment gating', () => {
   it('only a real creation resolves the experiment', () => {
     expect(resolvedFromCreation({ outcome: 'created', experiment_id: 'exp-9' })).not.toBeNull();
     expect(resolvedFromCreation({ outcome: 'error', error: 'denied' })).toBeNull();
+  });
+});
+
+describe('dataGateView — renders Python gate facts verbatim (no TS thresholds/bundles)', () => {
+  // A requirements response whose gate strings are DISTINCTIVE sentinels: if the
+  // client ever re-authored the thresholds/bundle in TS instead of rendering the
+  // Python strings, these exact sentinels could not appear.
+  const req: RequirementsResponse = {
+    outcome: 'requirements',
+    thresholds: {
+      baseline_min_traces: 10,
+      prove_min_traces: 50,
+      quality_min_labels: 20,
+      scored_coverage_floor: 0.5,
+    },
+    catalog: [],
+    requires_labels: true,
+    summary: 'PY_OVERALL_NOTE_with_20_labels',
+    union_gates: [
+      { name: 'human_labels', label: 'Human labels to align the judge', needed: 'PY_NEEDED_20_labels', threshold: 20 },
+    ],
+    selected: [
+      {
+        key: 'accuracy',
+        label: 'Accuracy',
+        objective_metric: 'correctness',
+        scorer: 'MemAlign judge (correctness)',
+        scorer_kind: 'memalign_judge',
+        requires_quality: true,
+        requires_labels: true,
+        guardrail_judges: ['correctness'],
+        optional_quality_judge: null,
+        gates: [],
+        summary: 'PY_ACCURACY_SUMMARY',
+      },
+    ],
+  };
+
+  it('passes the overall note, per-gate needed text, and per-goal summary through verbatim', () => {
+    const view = dataGateView(req);
+    expect(view.summary).toBe('PY_OVERALL_NOTE_with_20_labels');
+    expect(view.gates[0].needed).toBe('PY_NEEDED_20_labels');
+    expect(view.perGoal[0].summary).toBe('PY_ACCURACY_SUMMARY');
+  });
+
+  it('does not derive per-goal text from requires_labels — it uses the Python summary', () => {
+    // Even with requires_labels flipped, the rendered per-goal text is the Python
+    // summary verbatim (proving the old hardcoded "traces + 20 labels…" bundle is gone).
+    const flipped: RequirementsResponse = {
+      ...req,
+      selected: [{ ...req.selected[0], requires_labels: false, summary: 'PY_SUMMARY_WINS' }],
+    };
+    expect(dataGateView(flipped).perGoal[0].summary).toBe('PY_SUMMARY_WINS');
   });
 });

@@ -22,6 +22,7 @@ import {
   clampStep,
   createExperimentBody,
   creationMessage,
+  dataGateView,
   freshnessMessage,
   initialWizardState,
   isLastStep,
@@ -34,7 +35,6 @@ import {
   toggleGoal,
   validateExperimentBody,
   type CreationResponse,
-  type GoalRequirement,
   type RegisterResponse,
   type RequirementsResponse,
   type Tone,
@@ -395,40 +395,32 @@ function GoalsStep({ state, patch, requirements, reqError }: RequirementsProps) 
 function DataGateStep({ state, patch, requirements, reqError }: RequirementsProps) {
   if (reqError) return <p className="text-sm text-destructive">{reqError}</p>;
   if (!requirements) return <Skeleton className="h-40 w-full" />;
-  const th = requirements.thresholds;
+  // Two-tier: the whole data-gate view is rendered VERBATIM from the Python engine.
+  // No threshold number or gate-bundle string is authored here — the overall note,
+  // the per-gate `needed` text, and each goal's `summary` all come from ail.readiness
+  // via the requirements response, so the UI can never drift from the real floors.
+  const view = dataGateView(requirements);
   return (
     <div className="space-y-4">
-      <p className="text-sm">
-        Optimization will <strong>not act</strong> until these code-enforced gates are met. The framework refuses to
-        claim an improvement it cannot prove.
-      </p>
+      {view.summary && <p className="text-sm">{view.summary}</p>}
 
       <div className="rounded-md border p-3 space-y-2">
         <p className="text-sm font-medium">Gates for your goal(s)</p>
         <ul className="space-y-1 text-sm">
-          {requirements.union_gates.map((gate) => (
+          {view.gates.map((gate) => (
             <li key={gate.name} className="text-muted-foreground">
               <span className="text-foreground">{gate.label}</span>: {gate.needed}
             </li>
           ))}
         </ul>
-        {requirements.requires_labels ? (
-          <p className="text-xs text-amber-700 dark:text-amber-300">
-            A judged goal (Accuracy) additionally needs {th.quality_min_labels} human labels to align the MemAlign judge
-            before any quality claim is trusted.
-          </p>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            Your selection is purely deterministic — it needs traces (≥ {th.prove_min_traces} to prove) but no human
-            labels.
-          </p>
-        )}
       </div>
 
-      {requirements.selected.length > 0 && (
+      {view.perGoal.length > 0 && (
         <div className="space-y-2">
-          {requirements.selected.map((goal) => (
-            <PerGoalGates key={goal.key} goal={goal} />
+          {view.perGoal.map((goal) => (
+            <div key={goal.key} className="text-xs text-muted-foreground">
+              <span className="text-foreground font-medium">{goal.label}</span> ({goal.scorer}): {goal.summary}
+            </div>
           ))}
         </div>
       )}
@@ -439,15 +431,6 @@ function DataGateStep({ state, patch, requirements, reqError }: RequirementsProp
           I understand optimization will not act on this agent until these data gates are met.
         </span>
       </label>
-    </div>
-  );
-}
-
-function PerGoalGates({ goal }: { goal: GoalRequirement }) {
-  return (
-    <div className="text-xs text-muted-foreground">
-      <span className="text-foreground font-medium">{goal.label}</span> ({goal.scorer}):{' '}
-      {goal.requires_labels ? 'traces + 20 labels + a trusted judge + scored-coverage' : 'traces only (no labels)'}
     </div>
   );
 }

@@ -354,10 +354,34 @@ def run_validate(
         )
     try:
         client = experiment_client or build_experiment_client(profile)
+        # A 'fresh' verdict requires BOTH the MLflow-traces emptiness check AND the
+        # registry-claims check to have actually RUN. When claims are injected
+        # (tests / a caller that already resolved them) that check has run; on the
+        # live path it needs a warehouse to read agent_registry. If it CANNOT run —
+        # no warehouse configured, or a registry-read permission/authority error —
+        # we must NOT assume "no claims" and report fresh: that would fabricate an
+        # unverified 'not claimed' state. Return an honest undetermined error naming
+        # the prerequisite instead (fail-closed, no fabricated freshness).
         claimed = claimed_experiment_ids
         if claimed is None:
             wh = warehouse_id or os.environ.get("DATABRICKS_WAREHOUSE_ID")
-            claimed = _claimed_experiments(wh, profile, catalog, schema) if wh else {}
+            if not wh:
+                return ValidationResult(
+                    outcome=OnboardingOutcome.ERROR,
+                    experiment_id=exp,
+                    actor=actor,
+                    error=(
+                        "cannot verify the experiment is unclaimed — no SQL warehouse "
+                        "configured to read the agent_registry. Set DATABRICKS_WAREHOUSE_ID "
+                        "(and ensure the app SP can read agent_registry) so the registry-claim "
+                        "check can run; refusing to report a freshness verdict it could not verify"
+                    ),
+                )
+            # _claimed_experiments raises (RuntimeError / ExperimentAccessError) on a
+            # registry-read failure — caught below and surfaced as an honest ERROR,
+            # never a fresh verdict. A genuinely-absent table is an empty registry
+            # (the check ran and found no claims), which is a legitimate 'not claimed'.
+            claimed = _claimed_experiments(wh, profile, catalog, schema)
         validation = validate_experiment_probe(exp, client=client, claimed_experiment_ids=claimed)
     except (ExperimentAccessError, RuntimeError) as exc:
         return ValidationResult(
