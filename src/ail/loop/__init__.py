@@ -14,10 +14,31 @@ change** — a human approves the apply in the app (lane 3).
   the loop over injectable seams (fail-closed, unit-testable without live runs).
 * :mod:`ail.loop.publish_proposals` — write pending proposals to the unified
   ``agent_proposed_actions`` UC table lane 3 reads.
+* :mod:`ail.loop.apply` — lane 3a: the fail-closed apply-on-approval engine the
+  app's Approve button calls (register a version + set champion, ``CREATE`` a view,
+  or revert), recorded to the lineage / audit timeline.
 """
 
 from __future__ import annotations
 
+from ail.loop.apply import (
+    CHAMPION_ALIAS,
+    AppliedChangeRecord,
+    ApplyOutcome,
+    ApplyRecordError,
+    ApplyRefused,
+    ApplyRegistryClient,
+    ApplyResult,
+    ApprovalDecision,
+    BodyResolver,
+    DecisionKind,
+    GateRecheck,
+    GateRecheckResult,
+    LineageRecorder,
+    RegisterableBody,
+    WarehouseExecutor,
+    apply_approved_proposal,
+)
 from ail.loop.controller import (
     Candidate,
     CandidateBuilder,
@@ -56,6 +77,23 @@ from ail.loop.proposals import (
 )
 
 __all__ = [
+    # apply-on-approval engine (lane 3a)
+    "CHAMPION_ALIAS",
+    "DecisionKind",
+    "ApprovalDecision",
+    "ApplyOutcome",
+    "ApplyResult",
+    "AppliedChangeRecord",
+    "GateRecheckResult",
+    "RegisterableBody",
+    "ApplyRefused",
+    "ApplyRecordError",
+    "ApplyRegistryClient",
+    "WarehouseExecutor",
+    "LineageRecorder",
+    "GateRecheck",
+    "BodyResolver",
+    "apply_approved_proposal",
     # proposals
     "ActionKind",
     "RiskClass",
