@@ -191,6 +191,30 @@ declare module "@databricks/appkit-ui/react" {
           registered_at: string;
         }>;
       };
+    recent_activity: {
+        name: "recent_activity";
+        parameters: Record<string, never>;
+        result: Array<{
+          /** @sqlType STRING */
+          proposal_id: string;
+          /** @sqlType STRING */
+          agent_name: string;
+          /** @sqlType STRING */
+          status: string;
+          /** @sqlType STRING */
+          action_kind: string;
+          /** @sqlType STRING */
+          risk_class: string;
+          /** @sqlType STRING */
+          objective_metric: string;
+          /** @sqlType STRING */
+          trigger_summary: string;
+          /** @sqlType STRING */
+          created_at: string;
+          /** @sqlType STRING */
+          generated_at: string;
+        }>;
+      };
     proposed_actions: {
         name: "proposed_actions";
         parameters: {

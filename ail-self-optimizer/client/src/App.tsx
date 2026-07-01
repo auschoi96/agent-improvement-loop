@@ -18,6 +18,7 @@ import { LineageTimeline } from './components/LineageTimeline';
 import { ApprovalQueue } from './components/ApprovalQueue';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { TutorialGuide } from './components/TutorialGuide';
+import { ActivityJobs } from './components/ActivityJobs';
 
 const BRAND_BLUE = '#40d1f5';
 
@@ -39,6 +40,9 @@ export default function App() {
   // The read-only "How it works" tutorial panel. Mutually exclusive with the wizard:
   // opening one closes the other so the header buttons stay unambiguous.
   const [tutorialOpen, setTutorialOpen] = useState(false);
+  // The read-only Activity / jobs-progress panel — also mutually exclusive with the
+  // wizard and the tutorial (one full-width panel at a time).
+  const [activityOpen, setActivityOpen] = useState(false);
   // Bumped when the onboarding wizard registers a new agent, remounting the
   // AgentSwitcher so it refetches the registry and the new agent appears.
   const [registryKey, setRegistryKey] = useState(0);
@@ -68,6 +72,7 @@ export default function App() {
             onClick={() => {
               setWizardOpen((open) => !open);
               setTutorialOpen(false);
+              setActivityOpen(false);
             }}
           >
             {wizardOpen ? 'Hide wizard' : 'Add an agent'}
@@ -77,9 +82,20 @@ export default function App() {
             onClick={() => {
               setTutorialOpen((open) => !open);
               setWizardOpen(false);
+              setActivityOpen(false);
             }}
           >
             {tutorialOpen ? 'Hide guide' : 'How it works'}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setActivityOpen((open) => !open);
+              setWizardOpen(false);
+              setTutorialOpen(false);
+            }}
+          >
+            {activityOpen ? 'Hide activity' : 'Activity'}
           </Button>
         </div>
       </header>
@@ -91,6 +107,10 @@ export default function App() {
       ) : tutorialOpen ? (
         <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
           <TutorialGuide onClose={() => setTutorialOpen(false)} />
+        </main>
+      ) : activityOpen ? (
+        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
+          <ActivityJobs onClose={() => setActivityOpen(false)} />
         </main>
       ) : !agent ? (
         <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
