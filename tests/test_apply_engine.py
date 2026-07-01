@@ -1,0 +1,580 @@
+"""Apply-on-approval engine tests (:mod:`ail.loop.apply`) — fail-closed, seams faked.
+
+Every test is **offline**: the registry client, warehouse executor, lineage
+recorder, gate re-check, and body resolver are injected fakes, so no live
+MLflow/warehouse write is ever made (no ``live`` marker). Covers the lane-3a plan
+items (a)-(h):
+
+* (a) approve a proven+gated PENDING metric_view → the CREATE SQL reaches the
+  warehouse executor, lineage recorded, status=applied;
+* (b) approve a proven+gated skill_update / gepa_prompt → register + champion alias
+  set, lineage recorded, status=applied;
+* (c) approve a revert → champion alias re-pointed to the target version;
+* (d) reject → status=rejected + reason stored, NO capability called;
+* (e) refuse a non-pending (already applied/rejected) proposal;
+* (f) refuse when the apply-time gate re-check fails (no capability called);
+* (g) refuse when the proof no longer shows proved_improvement / correctness_held;
+* (h) the approver identity is recorded on the decision (and flows to the audit).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from ail.loop.apply import (
+    CHAMPION_ALIAS,
+    ApplyOutcome,
+    ApplyRefused,
+    ApprovalDecision,
+    DecisionKind,
+    GateRecheckResult,
+    RegisterableBody,
+    apply_approved_proposal,
+)
+from ail.loop.proposals import (
+    ActionKind,
+    ChangeKind,
+    GateStatus,
+    ProofSummary,
+    ProposalStatus,
+    ProposedAction,
+    ProposedChange,
+    TriggerKind,
+    TriggerSignal,
+    default_risk_class,
+)
+from ail.optimize.gepa_runner import GepaOptimizationResult
+from ail.optimize.phase2 import Phase2Artifact
+from ail.optimize.prompt_registry import (
+    DEFAULT_CATALOG,
+    DEFAULT_PROMPT_NAME,
+    DEFAULT_SCHEMA,
+    PromptProvenance,
+    PromptSource,
+)
+
+FULL_PROMPT_NAME = f"{DEFAULT_CATALOG}.{DEFAULT_SCHEMA}.{DEFAULT_PROMPT_NAME}"
+METRIC_VIEW_SQL = (
+    "CREATE OR REPLACE VIEW `cat`.`sch`.`mv_token_waste`\n"
+    "WITH METRICS\nLANGUAGE YAML\nAS $$\nversion: '1.1'\n$$"
+)
+
+
+# ---------------------------------------------------------------------------
+# Fakes for every seam (no live MLflow / warehouse write on any path)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FakeVersion:
+    version: int
+    uri: str = ""
+
+
+@dataclass
+class FakeRegistryClient:
+    """Combined stand-in for the prompt-registry + lineage registry seams.
+
+    Implements every method of :class:`ail.loop.apply.ApplyRegistryClient` (the union
+    of ``PromptRegistryClient`` and ``LineageRegistryClient``) and records calls.
+    """
+
+    next_version: int = 1
+    versions: list[FakeVersion] = field(default_factory=list)
+    alias_to_version: dict[str, int] = field(default_factory=dict)
+    register_calls: list[dict[str, Any]] = field(default_factory=list)
+    alias_calls: list[tuple[str, str, int]] = field(default_factory=list)
+
+    # -- PromptRegistryClient --
+    def register_prompt(
+        self,
+        name: str,
+        template: str,
+        commit_message: str | None,
+        tags: dict[str, str] | None,
+    ) -> FakeVersion:
+        self.register_calls.append(
+            {"name": name, "template": template, "commit_message": commit_message, "tags": tags}
+        )
+        version = self.next_version
+        self.next_version += 1
+        fv = FakeVersion(version=version, uri=f"prompts:/{name}/{version}")
+        self.versions.append(fv)
+        return fv
+
+    def set_prompt_alias(self, name: str, alias: str, version: int) -> None:
+        self.alias_calls.append((name, alias, version))
+        self.alias_to_version[alias] = version
+
+    def search_prompts(self, filter_string: str | None) -> list[Any]:
+        return []
+
+    def load_prompt(self, name_or_uri: str) -> Any:
+        return None
+
+    # -- LineageRegistryClient --
+    def search_prompt_versions(self, name: str) -> list[FakeVersion]:
+        return list(self.versions)
+
+    def get_prompt_version_by_alias(self, name: str, alias: str) -> FakeVersion | None:
+        v = self.alias_to_version.get(alias)
+        if v is None:
+            return None
+        return next((fv for fv in self.versions if fv.version == v), None)
+
+    @property
+    def any_write(self) -> bool:
+        """True iff any registry write (register or alias) happened."""
+        return bool(self.register_calls or self.alias_calls)
+
+
+@dataclass
+class Seams:
+    """The four+one injected seams plus the spies that prove what was (not) called."""
+
+    registry: FakeRegistryClient = field(default_factory=FakeRegistryClient)
+    warehouse_sql: list[str] = field(default_factory=list)
+    lineage_records: list[Any] = field(default_factory=list)
+    gate_calls: list[ProposedAction] = field(default_factory=list)
+    gate_result: GateRecheckResult = field(default_factory=lambda: GateRecheckResult(ok=True))
+
+    def warehouse(self, sql: str) -> None:
+        self.warehouse_sql.append(sql)
+
+    def lineage(self, record: Any) -> None:
+        self.lineage_records.append(record)
+
+    def gate(self, proposal: ProposedAction) -> GateRecheckResult:
+        self.gate_calls.append(proposal)
+        return self.gate_result
+
+    @property
+    def any_capability_called(self) -> bool:
+        """True iff any live-effecting capability ran (warehouse / registry write)."""
+        return bool(self.warehouse_sql) or self.registry.any_write
+
+
+def _resolver(proposal: ProposedAction) -> RegisterableBody:
+    """A body resolver that returns a full skill body (the reviewed change, in lane 3b)."""
+    return RegisterableBody(
+        body="# Read-cache skill\n\nReuse prior reads; do not re-read unchanged files.",
+        # Source is the resolver's (lane 3b's) call; the engine registers verbatim.
+        provenance=PromptProvenance(source=PromptSource.SEED, registration_reason="skill_update"),
+        commit_message="Apply approved read-cache skill update",
+    )
+
+
+def _forbidden_resolver(proposal: ProposedAction) -> RegisterableBody:
+    raise AssertionError("body_resolver must not be called on this path")
+
+
+# ---------------------------------------------------------------------------
+# Proposal builders
+# ---------------------------------------------------------------------------
+
+
+def _proposal(
+    action_kind: ActionKind,
+    change: ProposedChange,
+    *,
+    proposal_id: str = "prop-1",
+    status: ProposalStatus = ProposalStatus.PENDING,
+    proved_improvement: bool = True,
+    correctness_held: bool = True,
+) -> ProposedAction:
+    return ProposedAction(
+        proposal_id=proposal_id,
+        agent_name="claude_code",
+        action_kind=action_kind,
+        risk_class=default_risk_class(action_kind),
+        status=status,
+        objective_metric="total_tokens",
+        goal_cohort="claude_code",
+        trigger=TriggerSignal(
+            kind=TriggerKind.RLM_RECOMMENDED_ASSET,
+            summary="RLM recommended a token-waste metric view",
+            trace_refs=["t1", "t2"],
+        ),
+        change=change,
+        proof=ProofSummary(
+            objective_metric="total_tokens",
+            proved_improvement=proved_improvement,
+            correctness_held=correctness_held,
+            realized_savings_pct=35.4,
+            n_promote=3,
+        ),
+        gate_status=GateStatus(readiness_tier="ready_to_prove", gated=True),
+    )
+
+
+def _metric_view_proposal(**kw: Any) -> ProposedAction:
+    change = ProposedChange(
+        kind=ChangeKind.METRIC_VIEW_SQL, summary="token waste view", sql=METRIC_VIEW_SQL
+    )
+    return _proposal(ActionKind.METRIC_VIEW, change, **kw)
+
+
+def _skill_update_proposal(**kw: Any) -> ProposedAction:
+    change = ProposedChange(
+        kind=ChangeKind.SKILL_DIFF, summary="read-cache skill", diff="--- a/skill\n+++ b/skill"
+    )
+    return _proposal(ActionKind.SKILL_UPDATE, change, **kw)
+
+
+def _gepa_proposal(candidate_path: Path, **kw: Any) -> ProposedAction:
+    change = ProposedChange(
+        kind=ChangeKind.EVOLVED_BODY_REF,
+        summary="gepa-evolved skill",
+        evolved_body_ref=str(candidate_path),
+    )
+    return _proposal(ActionKind.GEPA_PROMPT, change, **kw)
+
+
+def _revert_proposal(target: str = "v1", **kw: Any) -> ProposedAction:
+    change = ProposedChange(
+        kind=ChangeKind.REVERT_REF, summary="revert regression", revert_target=target
+    )
+    return _proposal(ActionKind.REVERT, change, **kw)
+
+
+def _approve(
+    proposal: ProposedAction, *, approver: str = "austin@databricks.com"
+) -> ApprovalDecision:
+    return ApprovalDecision(
+        proposal_id=proposal.proposal_id,
+        decision=DecisionKind.APPROVE,
+        approver=approver,
+        decided_at="2026-06-30T12:00:00+00:00",
+    )
+
+
+def _reject(
+    proposal: ProposedAction, *, approver: str = "austin@databricks.com", reason: str = "mis-fired"
+) -> ApprovalDecision:
+    return ApprovalDecision(
+        proposal_id=proposal.proposal_id,
+        decision=DecisionKind.REJECT,
+        approver=approver,
+        reason=reason,
+        decided_at="2026-06-30T12:00:00+00:00",
+    )
+
+
+def _improving_candidate_json(tmp_path: Path) -> Path:
+    """Write a GEPA candidate that beats seed on the held-out split (so apply proceeds)."""
+    result = GepaOptimizationResult(
+        component_name="token-efficient-execution",
+        seed_skill_body="# Seed skill\n\nAvoid re-reading.",
+        evolved_skill_body="# Evolved skill\n\nReuse context; skip redundant reads.",
+        changed=True,
+        reflection_lm="databricks:/databricks-claude-sonnet-4-6",
+        gepa_num_candidates=4,
+        gepa_best_val_score=0.82,
+        suite_version="phase2-mini",
+        suite_content_hash="deadbeefcafe0001",
+        holdout_task_ids=["ts-04", "ts-05"],
+        train_task_ids=["ts-01", "ts-02", "ts-03"],
+        holdout_evolved=Phase2Artifact(n_tasks=3, n_promote=2, realized_token_savings_pct=45.0),
+        holdout_seed_baseline=Phase2Artifact(
+            n_tasks=3, n_promote=1, realized_token_savings_pct=30.0
+        ),
+    )
+    path = tmp_path / "gepa_candidate.json"
+    path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
+def _run(
+    proposal: ProposedAction,
+    decision: ApprovalDecision,
+    *,
+    seams: Seams,
+    body_resolver: Any = _forbidden_resolver,
+) -> Any:
+    return apply_approved_proposal(
+        proposal,
+        decision,
+        registry_client=seams.registry,
+        warehouse_executor=seams.warehouse,
+        lineage_recorder=seams.lineage,
+        gate_recheck=seams.gate,
+        body_resolver=body_resolver,
+    )
+
+
+# ---------------------------------------------------------------------------
+# (a) approve a proven+gated PENDING metric_view -> CREATE SQL to the warehouse
+# ---------------------------------------------------------------------------
+
+
+def test_approve_metric_view_executes_create_sql_and_records_lineage() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal()
+    result = _run(proposal, _approve(proposal), seams=seams)
+
+    # the CREATE DDL reached the warehouse executor verbatim (no regeneration)
+    assert seams.warehouse_sql == [METRIC_VIEW_SQL]
+    # no prompt registry write for an additive asset
+    assert not seams.registry.any_write
+    # gate was re-checked at apply time
+    assert len(seams.gate_calls) == 1
+    # lineage recorded once, carrying what/why/who
+    assert len(seams.lineage_records) == 1
+    rec = seams.lineage_records[0]
+    assert rec.action_kind is ActionKind.METRIC_VIEW
+    assert rec.created_view == "cat.sch.mv_token_waste"
+    assert rec.approver == "austin@databricks.com"
+    assert rec.trigger_summary.startswith("RLM recommended")
+    # typed result
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert result.proposal.status is ProposalStatus.APPLIED
+    assert result.created_view == "cat.sch.mv_token_waste"
+    assert result.lineage_recorded is True
+
+
+# ---------------------------------------------------------------------------
+# (b) approve a proven+gated skill_update / gepa_prompt -> register + champion
+# ---------------------------------------------------------------------------
+
+
+def test_approve_skill_update_registers_body_and_sets_champion() -> None:
+    seams = Seams()
+    proposal = _skill_update_proposal()
+    result = _run(proposal, _approve(proposal), seams=seams, body_resolver=_resolver)
+
+    # the resolved body (not the diff) was registered
+    assert len(seams.registry.register_calls) == 1
+    assert seams.registry.register_calls[0]["template"].startswith("# Read-cache skill")
+    assert seams.registry.register_calls[0]["name"] == FULL_PROMPT_NAME
+    # champion alias pointed at the new version
+    assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]
+    # no warehouse write for a prompt change
+    assert seams.warehouse_sql == []
+    # lineage + status
+    assert len(seams.lineage_records) == 1
+    assert seams.lineage_records[0].new_version == 1
+    assert seams.lineage_records[0].champion_alias == CHAMPION_ALIAS
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert result.proposal.status is ProposalStatus.APPLIED
+    assert result.new_version == 1
+    assert result.champion_alias == CHAMPION_ALIAS
+
+
+def test_approve_skill_update_without_resolver_is_refused() -> None:
+    seams = Seams()
+    proposal = _skill_update_proposal()
+    with pytest.raises(ApplyRefused, match="body_resolver"):
+        apply_approved_proposal(
+            proposal,
+            _approve(proposal),
+            registry_client=seams.registry,
+            warehouse_executor=seams.warehouse,
+            lineage_recorder=seams.lineage,
+            gate_recheck=seams.gate,
+            body_resolver=None,
+        )
+    # fail-closed: never register a diff as a body
+    assert not seams.any_capability_called
+    assert seams.lineage_records == []
+
+
+def test_approve_gepa_prompt_registers_evolved_body_and_sets_champion(tmp_path: Path) -> None:
+    seams = Seams()
+    candidate = _improving_candidate_json(tmp_path)
+    proposal = _gepa_proposal(candidate)
+    result = _run(proposal, _approve(proposal), seams=seams)
+
+    # the evolved body from the candidate artifact was registered + champion set
+    assert len(seams.registry.register_calls) == 1
+    assert seams.registry.register_calls[0]["template"].startswith("# Evolved skill")
+    assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert result.new_version == 1
+    assert seams.lineage_records[0].action_kind is ActionKind.GEPA_PROMPT
+
+
+def test_approve_gepa_prompt_missing_artifact_is_refused(tmp_path: Path) -> None:
+    seams = Seams()
+    proposal = _gepa_proposal(tmp_path / "does_not_exist.json")
+    with pytest.raises(ApplyRefused, match="not a readable candidate artifact"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+
+
+# ---------------------------------------------------------------------------
+# (c) approve a revert -> champion alias re-pointed to the target version
+# ---------------------------------------------------------------------------
+
+
+def test_approve_revert_repoints_champion_alias() -> None:
+    seams = Seams(
+        registry=FakeRegistryClient(
+            versions=[FakeVersion(1, "prompts:/p/1"), FakeVersion(2, "prompts:/p/2")],
+            alias_to_version={CHAMPION_ALIAS: 2},  # current champion is v2
+            next_version=3,
+        )
+    )
+    proposal = _revert_proposal(target="v1")
+    result = _run(proposal, _approve(proposal), seams=seams)
+
+    # champion re-pointed from v2 to the target v1 (reusing the guarded revert logic)
+    assert (FULL_PROMPT_NAME, CHAMPION_ALIAS, 1) in seams.registry.alias_calls
+    assert seams.registry.alias_to_version[CHAMPION_ALIAS] == 1
+    # a revert registers no new version
+    assert seams.registry.register_calls == []
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert result.reverted_to_version == 1
+    assert seams.lineage_records[0].reverted_to_version == 1
+
+
+def test_approve_revert_unknown_version_is_refused() -> None:
+    seams = Seams(
+        registry=FakeRegistryClient(
+            versions=[FakeVersion(1), FakeVersion(2)],
+            alias_to_version={CHAMPION_ALIAS: 2},
+        )
+    )
+    proposal = _revert_proposal(target="v99")  # no such version
+    with pytest.raises(ApplyRefused, match="refused"):
+        _run(proposal, _approve(proposal), seams=seams)
+    # guarded revert never points champion at a missing version
+    assert seams.registry.alias_calls == []
+    assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# (d) reject -> status=rejected + reason stored, NO capability called
+# ---------------------------------------------------------------------------
+
+
+def test_reject_records_reason_and_calls_no_capability() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal()
+    result = _run(
+        proposal, _reject(proposal, reason="rule mis-fired, view not useful"), seams=seams
+    )
+
+    assert result.outcome is ApplyOutcome.REJECTED
+    assert result.proposal.status is ProposalStatus.REJECTED
+    assert result.reason == "rule mis-fired, view not useful"
+    assert result.approver == "austin@databricks.com"
+    # no capability, no gate re-check, no lineage on reject
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []
+    assert seams.lineage_records == []
+
+
+def test_reject_without_reason_is_rejected_at_construction() -> None:
+    proposal = _metric_view_proposal()
+    with pytest.raises(ValueError, match="non-empty reason"):
+        ApprovalDecision(
+            proposal_id=proposal.proposal_id,
+            decision=DecisionKind.REJECT,
+            approver="austin@databricks.com",
+            decided_at="2026-06-30T12:00:00+00:00",
+        )
+
+
+# ---------------------------------------------------------------------------
+# (e) refuse a non-pending proposal (already applied / rejected / superseded)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status", [ProposalStatus.APPLIED, ProposalStatus.REJECTED, ProposalStatus.SUPERSEDED]
+)
+def test_refuse_non_pending_proposal(status: ProposalStatus) -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal(status=status)
+    with pytest.raises(ApplyRefused, match="not pending"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []  # short-circuits before the gate re-check
+    assert seams.lineage_records == []
+
+
+def test_refuse_decision_referencing_a_different_proposal() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal(proposal_id="prop-A")
+    other_decision = _approve(_metric_view_proposal(proposal_id="prop-B"))
+    with pytest.raises(ApplyRefused, match="references proposal"):
+        _run(proposal, other_decision, seams=seams)
+    assert not seams.any_capability_called
+
+
+# ---------------------------------------------------------------------------
+# (f) refuse when the apply-time gate re-check fails (fail-closed, no capability)
+# ---------------------------------------------------------------------------
+
+
+def test_refuse_when_gate_recheck_fails() -> None:
+    seams = Seams(
+        gate_result=GateRecheckResult(ok=False, reasons=["judge modularity went distrusted"])
+    )
+    proposal = _metric_view_proposal()
+    with pytest.raises(ApplyRefused, match="gate re-check failed"):
+        _run(proposal, _approve(proposal), seams=seams)
+    # the gate WAS consulted, but nothing was applied
+    assert len(seams.gate_calls) == 1
+    assert not seams.any_capability_called
+    assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# (g) refuse when the proof no longer shows proved_improvement / correctness_held
+# ---------------------------------------------------------------------------
+
+
+def test_refuse_when_not_proved_improvement() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal(proved_improvement=False)
+    with pytest.raises(ApplyRefused, match="no longer carries a proven improvement"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+    # proof is checked before the gate re-check
+    assert seams.gate_calls == []
+    assert seams.lineage_records == []
+
+
+def test_refuse_when_correctness_not_held() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal(correctness_held=False)
+    with pytest.raises(ApplyRefused, match="no longer carries a proven improvement"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+    assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# (h) the approver identity is recorded on the decision (and flows to the audit)
+# ---------------------------------------------------------------------------
+
+
+def test_approver_identity_recorded_on_decision_and_audit() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal()
+    decision = _approve(proposal, approver="reviewer@databricks.com")
+    result = _run(proposal, decision, seams=seams)
+
+    assert decision.approver == "reviewer@databricks.com"
+    assert decision.decided_at == "2026-06-30T12:00:00+00:00"
+    assert result.approver == "reviewer@databricks.com"
+    assert result.decided_at == "2026-06-30T12:00:00+00:00"
+    rec = seams.lineage_records[0]
+    assert rec.approver == "reviewer@databricks.com"
+    assert rec.decided_at == "2026-06-30T12:00:00+00:00"
+
+
+def test_decision_requires_non_empty_approver() -> None:
+    proposal = _metric_view_proposal()
+    with pytest.raises(ValueError, match="approver identity"):
+        ApprovalDecision(
+            proposal_id=proposal.proposal_id,
+            decision=DecisionKind.APPROVE,
+            approver="   ",
+            decided_at="2026-06-30T12:00:00+00:00",
+        )
