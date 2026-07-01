@@ -299,27 +299,52 @@ def _persist(
     decision_writer: DecisionWriter,
     status_writer: StatusWriter | None,
 ) -> None:
-    """Advance status (when a writer is given) and append the decision audit row.
+    """Advance the proposal status and append the decision audit row.
 
-    Best-effort and non-fatal: the live change (if any) already happened inside the
-    engine, so a failure to record the decision must not masquerade as *not applied*.
-    A persistence failure is folded into the result (``decision_recorded=False`` +
-    ``error``) rather than raised, so the reviewer still sees the true outcome.
+    The live change (if any) already happened inside the engine, so a persistence
+    failure must never masquerade as *not applied* — it is folded into the result
+    rather than raised. **Audit-integrity invariant (fail-loud):** when the engine
+    outcome was a LIVE apply (``APPLIED``/``APPLIED_UNRECORDED``) and *either* the
+    status advancement *or* the decision-audit append then fails, the surfaced
+    outcome is downgraded to :attr:`~ApplyServiceOutcome.APPLIED_UNRECORDED` — the
+    change is live but its record did not fully land, so the caller/UI treats it as
+    needs-reconcile, never a clean ``applied``. A genuine ``REJECTED``/``REFUSED``
+    outcome (no live change) is left as-is; only its ``error`` is annotated.
+
+    The two writes are attempted independently so a live apply plus *any* failed
+    persistence deterministically returns ``APPLIED_UNRECORDED``.
     """
-    try:
-        target_status = _status_for_outcome(service.outcome)
-        if status_writer is not None and target_status is not None:
+    live_apply = service.outcome in (
+        ApplyServiceOutcome.APPLIED,
+        ApplyServiceOutcome.APPLIED_UNRECORDED,
+    )
+    errors: list[str] = []
+
+    target_status = _status_for_outcome(service.outcome)
+    if status_writer is not None and target_status is not None:
+        try:
             status_writer(
                 agent_name=proposal.agent_name,
                 proposal_id=proposal.proposal_id,
                 status=target_status,
             )
+        except Exception as exc:  # noqa: BLE001 - a status-write failure must not fake a rollback
+            errors.append(f"status not advanced ({type(exc).__name__}: {exc})")
+
+    try:
         decision_writer(service)
         service.decision_recorded = True
-    except Exception as exc:  # noqa: BLE001 - a record failure must not fake a rollback
+    except Exception as exc:  # noqa: BLE001 - an audit-write failure must not fake a rollback
         service.decision_recorded = False
+        errors.append(f"decision audit not recorded ({type(exc).__name__}: {exc})")
+
+    if errors:
         prior = f"{service.error}; " if service.error else ""
-        service.error = f"{prior}decision audit not recorded ({type(exc).__name__}: {exc})"
+        service.error = prior + "; ".join(errors)
+        # A LIVE apply whose status/audit record did not fully land is applied-but-
+        # unrecorded (reconcile) — never a clean success. Do not touch REJECTED/REFUSED.
+        if live_apply:
+            service.outcome = ApplyServiceOutcome.APPLIED_UNRECORDED
 
 
 def _status_for_outcome(outcome: ApplyServiceOutcome) -> ProposalStatus | None:
@@ -561,7 +586,18 @@ def build_body_resolver(
             raise ValueError(
                 f"current champion {uri!r} has no body to apply the reviewed diff onto"
             )
-        new_body = _apply_unified_diff(str(current), diff)
+        current_str = str(current)
+        new_body = _apply_unified_diff(current_str, diff)
+        # Fail-closed on a no-op / diff-equal patch: a body identical to the current
+        # champion is not a change and must NOT be registered as a new version (it
+        # would create a fake "change" in the lineage). Compared against the applier's
+        # own splitlines-normalized source (same normalization the patched body uses).
+        if new_body == "\n".join(current_str.splitlines()):
+            raise ValueError(
+                f"diff for proposal {proposal.proposal_id!r} is a no-op — the patched body is "
+                "identical to the current champion; refusing to register a fake change "
+                "(fail-closed)"
+            )
         provenance = PromptProvenance(
             source=PromptSource.SEED,
             changed=True,

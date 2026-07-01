@@ -137,6 +137,7 @@ class Harness:
     decisions: list[ApplyServiceResult] = field(default_factory=list)
     status_calls: list[tuple[str, str, ProposalStatus]] = field(default_factory=list)
     decision_writer_boom: Exception | None = None
+    status_writer_boom: Exception | None = None
 
     def warehouse(self, sql: str) -> None:
         self.warehouse_sql.append(sql)
@@ -154,6 +155,8 @@ class Harness:
         self.decisions.append(result)
 
     def status_writer(self, *, agent_name: str, proposal_id: str, status: ProposalStatus) -> None:
+        if self.status_writer_boom is not None:
+            raise self.status_writer_boom
         self.status_calls.append((agent_name, proposal_id, status))
 
     @property
@@ -337,12 +340,41 @@ def test_applied_but_lineage_record_failure_surfaces_applied_unrecorded() -> Non
     assert len(h.decisions) == 1
 
 
-def test_decision_audit_failure_is_nonfatal_and_surfaced() -> None:
+def test_live_apply_with_audit_write_failure_surfaces_applied_unrecorded() -> None:
+    # BLOCKING-1 regression: a LIVE apply whose decision-audit append then fails must
+    # surface as APPLIED_UNRECORDED (needs-reconcile), never a clean `applied`.
     h = Harness(decision_writer_boom=RuntimeError("decisions table write failed"))
     proposal = _metric_view_proposal()
     result = _decide(proposal, _approve(proposal), h=h)
-    # the change applied; the audit write failed — surfaced, not faked as not-applied
-    assert result.outcome is ApplyServiceOutcome.APPLIED
+    assert h.warehouse_sql == [METRIC_VIEW_SQL]  # the change IS live
+    assert result.outcome is ApplyServiceOutcome.APPLIED_UNRECORDED
+    assert result.outcome is not ApplyServiceOutcome.APPLIED  # must not read as clean success
+    assert result.decision_recorded is False
+    assert "decision audit not recorded" in (result.error or "")
+
+
+def test_live_apply_with_status_write_failure_surfaces_applied_unrecorded() -> None:
+    # BLOCKING-1 regression: the two persistence writes are independent — a LIVE apply
+    # whose STATUS advancement fails is also applied-but-unrecorded (the queue would
+    # not drop it; the operator must reconcile).
+    h = Harness(status_writer_boom=RuntimeError("proposals status UPDATE failed"))
+    proposal = _metric_view_proposal()
+    result = _decide(proposal, _approve(proposal), h=h)
+    assert h.warehouse_sql == [METRIC_VIEW_SQL]  # the change IS live
+    assert result.outcome is ApplyServiceOutcome.APPLIED_UNRECORDED
+    assert "status not advanced" in (result.error or "")
+    # the decision audit itself still landed (only the status write failed)
+    assert result.decision_recorded is True
+    assert len(h.decisions) == 1
+
+
+def test_reject_audit_failure_stays_rejected_not_unrecorded() -> None:
+    # A REJECTED outcome has NO live change, so a failed audit is NOT applied-unrecorded
+    # — it stays rejected (only annotated). Guards against over-downgrading.
+    h = Harness(decision_writer_boom=RuntimeError("decisions table write failed"))
+    proposal = _metric_view_proposal()
+    result = _decide(proposal, _reject(proposal, reason="not useful"), h=h)
+    assert result.outcome is ApplyServiceOutcome.REJECTED
     assert result.decision_recorded is False
     assert "decision audit not recorded" in (result.error or "")
 
@@ -377,6 +409,28 @@ def test_body_resolver_fails_closed_on_stale_diff() -> None:
     resolver = build_body_resolver(registry_client=registry)
     proposal = _skill_update_proposal(diff="@@ -1,1 +1,2 @@\n line one\n+inserted\n")
     with pytest.raises(ValueError, match="does not match the source"):
+        resolver(proposal)
+
+
+def test_body_resolver_refuses_a_no_op_diff_equal_body() -> None:
+    # BLOCKING-2 regression: a no-op patch (only context lines) yields a body identical
+    # to the champion — it must be refused (fail-closed), never registered as a fake
+    # new version. Nothing is registered.
+    registry = FakeRegistryClient(champion_body="line one\nline two\n")
+    resolver = build_body_resolver(registry_client=registry)
+    proposal = _skill_update_proposal(diff="@@ -1,2 +1,2 @@\n line one\n line two\n")
+    with pytest.raises(ValueError, match="no-op"):
+        resolver(proposal)
+    assert registry.register_calls == []  # nothing registered
+
+
+def test_body_resolver_refuses_diff_that_nets_to_current() -> None:
+    # A diff that removes a line then re-adds the identical line nets to the champion
+    # body — also a fake change; refuse it.
+    registry = FakeRegistryClient(champion_body="alpha\nbeta\n")
+    resolver = build_body_resolver(registry_client=registry)
+    proposal = _skill_update_proposal(diff="@@ -1,2 +1,2 @@\n alpha\n-beta\n+beta\n")
+    with pytest.raises(ValueError, match="no-op"):
         resolver(proposal)
 
 
