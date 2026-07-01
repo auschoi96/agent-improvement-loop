@@ -17,6 +17,7 @@ import { VersionComparison } from './components/VersionComparison';
 import { LineageTimeline } from './components/LineageTimeline';
 import { ApprovalQueue } from './components/ApprovalQueue';
 import { OnboardingWizard } from './components/OnboardingWizard';
+import { TutorialGuide } from './components/TutorialGuide';
 
 const BRAND_BLUE = '#40d1f5';
 
@@ -35,6 +36,9 @@ function Section({ title, description, children }: { title: string; description?
 export default function App() {
   const [agent, setAgent] = useState<AgentRow | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
+  // The read-only "How it works" tutorial panel. Mutually exclusive with the wizard:
+  // opening one closes the other so the header buttons stay unambiguous.
+  const [tutorialOpen, setTutorialOpen] = useState(false);
   // Bumped when the onboarding wizard registers a new agent, remounting the
   // AgentSwitcher so it refetches the registry and the new agent appears.
   const [registryKey, setRegistryKey] = useState(0);
@@ -59,8 +63,23 @@ export default function App() {
         </p>
         <div className="max-w-7xl mx-auto mt-3 flex flex-wrap items-end gap-3">
           <AgentSwitcher key={registryKey} value={agent?.agent_name ?? null} onChange={setAgent} />
-          <Button variant="outline" onClick={() => setWizardOpen((open) => !open)}>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setWizardOpen((open) => !open);
+              setTutorialOpen(false);
+            }}
+          >
             {wizardOpen ? 'Hide wizard' : 'Add an agent'}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setTutorialOpen((open) => !open);
+              setWizardOpen(false);
+            }}
+          >
+            {tutorialOpen ? 'Hide guide' : 'How it works'}
           </Button>
         </div>
       </header>
@@ -68,6 +87,10 @@ export default function App() {
       {wizardOpen ? (
         <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
           <OnboardingWizard onRegistered={() => setRegistryKey((k) => k + 1)} onClose={() => setWizardOpen(false)} />
+        </main>
+      ) : tutorialOpen ? (
+        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
+          <TutorialGuide onClose={() => setTutorialOpen(false)} />
         </main>
       ) : !agent ? (
         <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
