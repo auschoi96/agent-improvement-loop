@@ -14,6 +14,7 @@ import { CorpusKpis } from './components/CorpusKpis';
 import { AgentSwitcher, type AgentRow } from './components/AgentSwitcher';
 import { VersionComparison } from './components/VersionComparison';
 import { LineageTimeline } from './components/LineageTimeline';
+import { ApprovalQueue } from './components/ApprovalQueue';
 
 const BRAND_BLUE = '#40d1f5';
 
@@ -61,6 +62,13 @@ export default function App() {
         </main>
       ) : (
         <main className="max-w-7xl mx-auto px-4 md:px-8 py-6 space-y-10">
+          <Section
+            title="Approval queue"
+            description="The human control plane (Phase C lane 3b): the controller autonomously detected, proved, and gated a change; you review the why + the evidence and approve the live apply. Approve triggers the framework's gated apply behind a fail-closed wall (the engine re-checks the proof + gate); reject records the reason. This is the app's only write-path."
+          >
+            <ApprovalQueue agentName={agent.agent_name} />
+          </Section>
+
           <Section
             title="Baseline vs new version"
             description="Within this agent's experiment, a baseline agent_version vs a newer one — L0 deltas, with readiness honestly gating the trust verdict (never a green improvement the readiness wall has not cleared)."

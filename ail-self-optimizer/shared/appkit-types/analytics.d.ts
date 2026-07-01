@@ -191,6 +191,77 @@ declare module "@databricks/appkit-ui/react" {
           registered_at: string;
         }>;
       };
+    proposed_actions: {
+        name: "proposed_actions";
+        parameters: {
+          /** STRING - use sql.string() */
+          agent_name: SQLStringMarker;
+        };
+        result: Array<{
+          /** @sqlType STRING */
+          proposal_id: string;
+          /** @sqlType STRING */
+          agent_name: string;
+          /** @sqlType STRING */
+          status: string;
+          /** @sqlType STRING */
+          action_kind: string;
+          /** @sqlType STRING */
+          risk_class: string;
+          /** @sqlType STRING */
+          objective_metric: string;
+          /** @sqlType STRING */
+          created_at: string;
+          /** @sqlType STRING */
+          trigger_kind: string;
+          /** @sqlType STRING */
+          trigger_summary: string;
+          /** @sqlType STRING */
+          trigger_metric: string;
+          /** @sqlType DOUBLE */
+          trigger_observed_value: number;
+          /** @sqlType DOUBLE */
+          trigger_threshold: number;
+          /** @sqlType INT */
+          trigger_n_traces: number;
+          /** @sqlType STRING */
+          trigger_judge_name: string;
+          /** @sqlType STRING */
+          change_kind: string;
+          /** @sqlType STRING */
+          change_summary: string;
+          /** @sqlType STRING */
+          change_sql: string;
+          /** @sqlType STRING */
+          change_diff: string;
+          /** @sqlType STRING */
+          change_evolved_body_ref: string;
+          /** @sqlType STRING */
+          change_revert_target: string;
+          /** @sqlType BOOLEAN */
+          proof_proved_improvement: boolean;
+          /** @sqlType BOOLEAN */
+          proof_correctness_held: boolean;
+          /** @sqlType DOUBLE */
+          proof_realized_savings_pct: number;
+          /** @sqlType INT */
+          proof_n_promote: number;
+          /** @sqlType INT */
+          proof_n_block: number;
+          /** @sqlType STRING */
+          proof_suite_version: string;
+          /** @sqlType STRING */
+          gate_readiness_tier: string;
+          /** @sqlType BOOLEAN */
+          gate_gated: boolean;
+          /** @sqlType DOUBLE */
+          gate_judge_agreement: number;
+          /** @sqlType DOUBLE */
+          gate_scored_coverage: number;
+          /** @sqlType INT */
+          gate_n_distrusted_judges: number;
+        }>;
+      };
     session_token_bars: {
         name: "session_token_bars";
         parameters: {
