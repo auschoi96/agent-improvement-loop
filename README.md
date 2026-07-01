@@ -6,6 +6,24 @@ The design's load-bearing principle: **the optimizer is never allowed to train a
 
 > **New here? Start with [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md)** — the hands-on first-time-user guide: connect your traces, state a goal, and walk the six stages from the irrefutable L0 baseline to GEPA optimization and helper-asset generation.
 
+## How it works (at a glance)
+
+```mermaid
+flowchart LR
+    A["Your agent"] -->|"traces (autolog / OTEL)"| E["MLflow experiment"]
+    E --> M["L0 metrics · L2 judges · L3 RLM"]
+    M --> C["Controller<br/>detect → PROVE → gate → propose"]
+    C -->|"WHY + PROOF"| H["You approve in the app"]
+    H -->|"apply (fail-closed)"| A
+    H -.->|"revert if it didn't help"| A
+```
+
+Everything up to the human is autonomous; **nothing reaches your live agent
+unless it was proven on a frozen test set, passed the trust gates, *and* you
+approved it** — and every applied change is recorded and revertible. The full
+walkthrough (with more diagrams) is in
+[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md).
+
 ## Status
 
 Greenfield. The trace-ingestion seam — `src/ail/ingest/` (the `TraceSource` /
