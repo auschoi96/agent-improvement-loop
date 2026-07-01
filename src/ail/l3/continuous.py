@@ -234,13 +234,10 @@ def run_continuous_rlm(
                 # firings. If even the marker attach fails, degrade to the prior
                 # behavior (it may be retried next run) rather than killing the run.
                 try:
-                    _mark_review_failed(
-                        selection.trace_id, error=error, judge_model=judge_model
-                    )
+                    _mark_review_failed(selection.trace_id, error=error, judge_model=judge_model)
                 except Exception as mark_exc:  # noqa: BLE001
                     marker_note = (
-                        f" (failure-marker attach failed: "
-                        f"{type(mark_exc).__name__}: {mark_exc})"
+                        f" (failure-marker attach failed: {type(mark_exc).__name__}: {mark_exc})"
                     )
             outcomes.append(
                 TraceReviewOutcome(
