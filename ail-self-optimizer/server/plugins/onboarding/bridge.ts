@@ -74,6 +74,16 @@ export function spawnPythonOnboardingBridge(options: SpawnBridgeOptions = {}): O
         reject(new Error(`onboarding-service timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
+      // Handle stdin stream errors: a child that exits WITHOUT reading its stdin
+      // (a fast-failing engine, or a stub that ignores input) makes the write below
+      // emit EPIPE on this stream. Without a handler that EPIPE surfaces as an
+      // UNHANDLED exception AFTER the tests finish — vitest catches it as an uncaught
+      // error and fails the AppKit gate even though every test passed (a timing race
+      // that passes locally, fails in CI). The child's exit code + stdout are the
+      // real signal (via the 'close'/'error' handlers), so a broken input pipe is
+      // safely swallowed here. The approvals subprocess bridge never needed this
+      // because its tests exercise only the job transport, not spawnPython*.
+      child.stdin.on('error', () => {});
       child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
       child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
       child.on('error', (err) => {
@@ -93,8 +103,15 @@ export function spawnPythonOnboardingBridge(options: SpawnBridgeOptions = {}): O
         }
       });
 
-      child.stdin.write(JSON.stringify(input));
-      child.stdin.end();
+      // Guard the write itself: if the pipe is already torn down the synchronous
+      // call can throw. Swallow it — the 'close'/'error' handlers above settle the
+      // promise from the child's real exit code / output, never a write-after-close.
+      try {
+        child.stdin.write(JSON.stringify(input));
+        child.stdin.end();
+      } catch {
+        // stdin already closed; the outcome comes from the child's exit + stdout.
+      }
     });
 }
 
