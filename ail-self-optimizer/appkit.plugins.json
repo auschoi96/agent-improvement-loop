@@ -320,6 +320,17 @@
         "optional": []
       },
       "stability": "beta"
+    },
+    "onboarding": {
+      "name": "onboarding",
+      "displayName": "Onboarding Wizard",
+      "description": "Authenticated write-path for the 'Add an agent' onboarding wizard (slice 1). Validates/creates a fresh MLflow experiment, surfaces the fixed goal→scorer mapping + real readiness gates, and registers the agent by reusing ail.publish_versions. Records the authenticated actor; the client identity is never trusted.",
+      "package": "./server/plugins/onboarding",
+      "resources": {
+        "required": [],
+        "optional": []
+      },
+      "stability": "beta"
     }
   },
   "scaffolding": {
