@@ -4,6 +4,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@databricks/appkit-ui/
 
 interface Props {
   children: ReactNode;
+  // Optional compact fallback. When provided, it is rendered instead of the full-screen
+  // error card — used by PanelBoundary to isolate a single panel's failure inline so one
+  // panel crashing never blanks the whole app.
+  renderFallback?: (error: Error | null, errorInfo: React.ErrorInfo | null) => ReactNode;
 }
 
 interface State {
@@ -37,6 +41,9 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
+      if (this.props.renderFallback) {
+        return this.props.renderFallback(this.state.error, this.state.errorInfo);
+      }
       return (
         <div className="min-h-screen bg-background p-4">
           <Card className="max-w-2xl mx-auto mt-8">
