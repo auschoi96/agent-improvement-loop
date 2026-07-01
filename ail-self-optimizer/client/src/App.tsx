@@ -7,6 +7,7 @@ import {
   CardHeader,
   CardTitle,
   Badge,
+  Button,
 } from '@databricks/appkit-ui/react';
 import { sql } from '@databricks/appkit-ui/js';
 import { useMemo, useState, type ReactNode } from 'react';
@@ -15,6 +16,7 @@ import { AgentSwitcher, type AgentRow } from './components/AgentSwitcher';
 import { VersionComparison } from './components/VersionComparison';
 import { LineageTimeline } from './components/LineageTimeline';
 import { ApprovalQueue } from './components/ApprovalQueue';
+import { OnboardingWizard } from './components/OnboardingWizard';
 
 const BRAND_BLUE = '#40d1f5';
 
@@ -32,6 +34,10 @@ function Section({ title, description, children }: { title: string; description?
 
 export default function App() {
   const [agent, setAgent] = useState<AgentRow | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  // Bumped when the onboarding wizard registers a new agent, remounting the
+  // AgentSwitcher so it refetches the registry and the new agent appears.
+  const [registryKey, setRegistryKey] = useState(0);
   const experimentId = agent?.experiment_id ?? '';
 
   // Memoize the shared :experiment_id binding so the per-agent queries don't
@@ -51,14 +57,21 @@ export default function App() {
           Every metric is mechanically derived from trace metadata (tokens, timestamps, tool spans) — no model in the
           loop. Dollar figures are <strong>estimates</strong>. One MLflow experiment per agent.
         </p>
-        <div className="max-w-7xl mx-auto mt-3">
-          <AgentSwitcher value={agent?.agent_name ?? null} onChange={setAgent} />
+        <div className="max-w-7xl mx-auto mt-3 flex flex-wrap items-end gap-3">
+          <AgentSwitcher key={registryKey} value={agent?.agent_name ?? null} onChange={setAgent} />
+          <Button variant="outline" onClick={() => setWizardOpen((open) => !open)}>
+            {wizardOpen ? 'Hide wizard' : 'Add an agent'}
+          </Button>
         </div>
       </header>
 
-      {!agent ? (
+      {wizardOpen ? (
         <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
-          <p className="text-muted-foreground">Select an agent to view its metrics.</p>
+          <OnboardingWizard onRegistered={() => setRegistryKey((k) => k + 1)} onClose={() => setWizardOpen(false)} />
+        </main>
+      ) : !agent ? (
+        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
+          <p className="text-muted-foreground">Select an agent to view its metrics, or add a new agent.</p>
         </main>
       ) : (
         <main className="max-w-7xl mx-auto px-4 md:px-8 py-6 space-y-10">
