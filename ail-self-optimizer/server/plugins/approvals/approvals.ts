@@ -1,6 +1,6 @@
 import { Plugin, toPlugin, type IAppRouter, type PluginManifest } from '@databricks/appkit';
 import manifest from './manifest.json';
-import { spawnPythonApplyBridge, type ApplyBridge, type DecisionInput } from './bridge';
+import { selectApplyBridge, type ApplyBridge, type DecisionInput } from './bridge';
 
 // The minimal HTTP shapes the handler needs — Express's Request/Response satisfy
 // these structurally, so the same handler is used by injectRoutes and driven by a
@@ -100,7 +100,10 @@ export async function handleDecision(
 export class ApprovalsPlugin extends Plugin {
   static manifest = manifest as PluginManifest<'approvals'>;
 
-  private readonly bridge: ApplyBridge = spawnPythonApplyBridge();
+  // Transport chosen by environment (bridge.ts): the Databricks Job trigger on the
+  // deployed Node-only image (AIL_APPLY_TRANSPORT=job or AIL_APPLY_JOB_ID set), else
+  // the local subprocess. The route stays bridge-injectable and unchanged.
+  private readonly bridge: ApplyBridge = selectApplyBridge();
 
   injectRoutes(router: IAppRouter): void {
     this.route(router, {
