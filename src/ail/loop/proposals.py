@@ -114,12 +114,22 @@ class TriggerKind(StrEnum):
     """Which feedback signal a proposal fired on — the head of the "why" payload.
 
     Mirrors the illustrative decision rules of ``docs/LOOP_CONTROLLER.md``.
+
+    The deterministic **Lane A** rules (:mod:`ail.loop.decision_rules`) each set the
+    specific signal kind they fired on. :attr:`AGENT_PLANNER` is the distinct source
+    marker for a **Lane B** decision — one proposed by the LLM-agent planner
+    (:mod:`ail.loop.planner`) rather than a deterministic rule — so a proposal's
+    origin (A vs B) is attributable straight off ``trigger.kind``. A B decision
+    still carries the target detail (``judge_name`` / ``metric`` / ``asset_type``)
+    on its :class:`TriggerSignal`, so the controller's proof + certifying-judge
+    gates apply to it identically; only the *source* differs.
     """
 
     RLM_RECOMMENDED_ASSET = "rlm_recommended_asset"
     REDUNDANT_READ_PATTERN = "redundant_read_pattern"
     JUDGE_DIMENSION_BELOW_THRESHOLD = "judge_dimension_below_threshold"
     POST_APPLY_REGRESSION = "post_apply_regression"
+    AGENT_PLANNER = "agent_planner"
 
 
 class ChangeKind(StrEnum):

@@ -50,10 +50,18 @@ ail-readiness = "ail.jobs.readiness_preflight:main"
 # champion alias to a prior version. Fail-closed, dry-run by default (--yes to write);
 # prints the WAS->BECOMES audit. Re-run the lineage publish after (see docs).
 ail-revert = "ail.jobs.revert_champion:main"
-# Arrival-triggered L3/RLM reviewer: Databricks Job fires on MLflow trace-table
-# updates, then this bounded runner idempotently attaches rlm_* feedback only to
-# sampled traces that do not already have RLM assessments.
+# Manually-runnable + in-cycle-reused L3/RLM reviewer: a bounded runner that
+# idempotently attaches rlm_* feedback only to sampled traces without RLM
+# assessments. The standalone trace-table-update trigger Job was retired (the
+# trace store is a VIEW, not a Delta table, so table_update is infeasible); this
+# reviewer now runs INSIDE the scheduled optimization cycle (ail-optimization-cycle)
+# and remains available to run by hand.
 ail-continuous-rlm = "ail.jobs.continuous_rlm:main"
+# Unified, scheduled optimization cycle: one cadence over one sampled trace set —
+# in-cycle RLM review, then the layered A+B loop controller (deterministic rules +
+# the LLM-agent planner), then PENDING-proposal publish. Propose-only; applies
+# nothing (a human approves the apply in the app, lane 3).
+ail-optimization-cycle = "ail.jobs.optimization_cycle:main"
 
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
