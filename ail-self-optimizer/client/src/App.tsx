@@ -1,244 +1,48 @@
-import {
-  BarChart,
-  DataTable,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-  Badge,
-  Button,
-} from '@databricks/appkit-ui/react';
-import { sql } from '@databricks/appkit-ui/js';
-import { useMemo, useState, type ReactNode } from 'react';
-import { CorpusKpis } from './components/CorpusKpis';
-import { AgentSwitcher, type AgentRow } from './components/AgentSwitcher';
-import { VersionComparison } from './components/VersionComparison';
-import { LineageTimeline } from './components/LineageTimeline';
-import { ApprovalQueue } from './components/ApprovalQueue';
-import { OnboardingWizard } from './components/OnboardingWizard';
-import { TutorialGuide } from './components/TutorialGuide';
-import { ActivityJobs } from './components/ActivityJobs';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { SidebarInset, SidebarProvider } from '@databricks/appkit-ui/react';
+import { AgentProvider } from './context/AgentContext';
+import { AppSidebar } from './shell/AppSidebar';
+import { TopBar } from './shell/TopBar';
+import { OverviewPage } from './pages/OverviewPage';
+import { ComparePage } from './pages/ComparePage';
+import { ApprovalsPage } from './pages/ApprovalsPage';
+import { ActivityPage } from './pages/ActivityPage';
+import { LineagePage } from './pages/LineagePage';
+import { AddAgentPage } from './pages/AddAgentPage';
+import { HowItWorksPage } from './pages/HowItWorksPage';
+import { DEFAULT_PATH } from './lib/navigation';
 
-const BRAND_BLUE = '#40d1f5';
-
-function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
-  return (
-    <section className="space-y-3">
-      <div>
-        <h2 className="text-xl font-semibold text-foreground">{title}</h2>
-        {description && <p className="text-sm text-muted-foreground">{description}</p>}
-      </div>
-      {children}
-    </section>
-  );
-}
-
+// The app shell: a left Sidebar (primary IA, active state from the route), a persistent
+// top bar (agent/experiment "project switcher" + global actions + honesty note), and a
+// routed content area (breadcrumb + page title + the page). Client routing (react-
+// router; AppKit ships no router) makes every section URL-addressable and deep-linkable;
+// the selected agent rides along in ?agent= so refresh/share restores the full view.
+// AppKit's server serves index.html for non-API routes, so BrowserRouter deep links work
+// without any server change.
 export default function App() {
-  const [agent, setAgent] = useState<AgentRow | null>(null);
-  const [wizardOpen, setWizardOpen] = useState(false);
-  // The read-only "How it works" tutorial panel. Mutually exclusive with the wizard:
-  // opening one closes the other so the header buttons stay unambiguous.
-  const [tutorialOpen, setTutorialOpen] = useState(false);
-  // The read-only Activity / jobs-progress panel — also mutually exclusive with the
-  // wizard and the tutorial (one full-width panel at a time).
-  const [activityOpen, setActivityOpen] = useState(false);
-  // Bumped when the onboarding wizard registers a new agent, remounting the
-  // AgentSwitcher so it refetches the registry and the new agent appears.
-  const [registryKey, setRegistryKey] = useState(0);
-  const experimentId = agent?.experiment_id ?? '';
-
-  // Memoize the shared :experiment_id binding so the per-agent queries don't
-  // refetch on every render (AppKit parameter guidance).
-  const expParams = useMemo(() => ({ experiment_id: sql.string(experimentId) }), [experimentId]);
-
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b px-4 md:px-8 py-4">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="text-2xl font-bold text-foreground">Agent Self-Optimization</h1>
-          <span className="text-sm text-muted-foreground">
-            Multi-agent observability · L0 deterministic leaderboard + version comparison
-          </span>
-        </div>
-        <p className="max-w-7xl mx-auto mt-1 text-xs text-muted-foreground">
-          Every metric is mechanically derived from trace metadata (tokens, timestamps, tool spans) — no model in the
-          loop. Dollar figures are <strong>estimates</strong>. One MLflow experiment per agent.
-        </p>
-        <div className="max-w-7xl mx-auto mt-3 flex flex-wrap items-end gap-3">
-          <AgentSwitcher key={registryKey} value={agent?.agent_name ?? null} onChange={setAgent} />
-          <Button
-            variant="outline"
-            onClick={() => {
-              setWizardOpen((open) => !open);
-              setTutorialOpen(false);
-              setActivityOpen(false);
-            }}
-          >
-            {wizardOpen ? 'Hide wizard' : 'Add an agent'}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => {
-              setTutorialOpen((open) => !open);
-              setWizardOpen(false);
-              setActivityOpen(false);
-            }}
-          >
-            {tutorialOpen ? 'Hide guide' : 'How it works'}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => {
-              setActivityOpen((open) => !open);
-              setWizardOpen(false);
-              setTutorialOpen(false);
-            }}
-          >
-            {activityOpen ? 'Hide activity' : 'Activity'}
-          </Button>
-        </div>
-      </header>
-
-      {wizardOpen ? (
-        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
-          <OnboardingWizard onRegistered={() => setRegistryKey((k) => k + 1)} onClose={() => setWizardOpen(false)} />
-        </main>
-      ) : tutorialOpen ? (
-        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
-          <TutorialGuide onClose={() => setTutorialOpen(false)} />
-        </main>
-      ) : activityOpen ? (
-        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
-          <ActivityJobs onClose={() => setActivityOpen(false)} />
-        </main>
-      ) : !agent ? (
-        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6">
-          <p className="text-muted-foreground">Select an agent to view its metrics, or add a new agent.</p>
-        </main>
-      ) : (
-        <main className="max-w-7xl mx-auto px-4 md:px-8 py-6 space-y-10">
-          <Section
-            title="Approval queue"
-            description="The human control plane (Phase C lane 3b): the controller autonomously detected, proved, and gated a change; you review the why + the evidence and approve the live apply. Approve triggers the framework's gated apply behind a fail-closed wall (the engine re-checks the proof + gate); reject records the reason. This is the app's only write-path."
-          >
-            <ApprovalQueue agentName={agent.agent_name} />
-          </Section>
-
-          <Section
-            title="Baseline vs new version"
-            description="Within this agent's experiment, a baseline agent_version vs a newer one — L0 deltas, with readiness honestly gating the trust verdict (never a green improvement the readiness wall has not cleared)."
-          >
-            <VersionComparison agentName={agent.agent_name} />
-          </Section>
-
-          <Section
-            title="Lineage & audit timeline"
-            description="Every registered prompt version newest-first, sourced from the prompt registry: what changed → with what proven held-out delta → which version is the CHAMPION. A forced / non-improving version is flagged and never styled as a win — the audit trail that lets a change be reverted (ail-revert)."
-          >
-            <LineageTimeline agentName={agent.agent_name} />
-          </Section>
-
-          <Section title="Corpus summary" description="Headline L0 metrics across every session in the experiment.">
-            <CorpusKpis experimentId={experimentId} />
-          </Section>
-
-          <Section
-            title="Token heavy tail"
-            description="A low median with a long tail — a few enormous sessions hold most of the spend."
-          >
-            <Card className="shadow-sm">
-              <CardHeader>
-                <CardTitle>Top sessions by total tokens</CardTitle>
-                <CardDescription>Largest 15 sessions; the tail is where token spend lives.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <BarChart
-                  queryKey="session_token_bars"
-                  parameters={expParams}
-                  xKey="trace"
-                  yKey="total_tokens"
-                  colors={[BRAND_BLUE]}
-                  height={320}
-                />
-              </CardContent>
-            </Card>
-
-            <Card className="shadow-sm">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  High-token sessions
-                  <Badge variant="outline">cost = ESTIMATE</Badge>
-                </CardTitle>
-                <CardDescription>
-                  Per-session tokens, tool calls, duration, estimated cost, and strict redundancy rate.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <DataTable
-                  queryKey="high_token_sessions"
-                  parameters={expParams}
-                  filterColumn="model"
-                  filterPlaceholder="Filter by model…"
-                  pageSize={10}
-                />
-              </CardContent>
-            </Card>
-          </Section>
-
-          <Section
-            title="Breakdown"
-            description="Tokens, estimated cost, and tool calls rolled up by model and by producer."
-          >
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <Card className="shadow-sm">
-                <CardHeader>
-                  <CardTitle>By model</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <DataTable queryKey="by_model" parameters={expParams} />
-                </CardContent>
-              </Card>
-              <Card className="shadow-sm">
-                <CardHeader>
-                  <CardTitle>By producer</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <DataTable queryKey="by_producer" parameters={expParams} />
-                </CardContent>
-              </Card>
+    <BrowserRouter>
+      <AgentProvider>
+        <SidebarProvider>
+          <AppSidebar />
+          <SidebarInset>
+            <TopBar />
+            <div className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8">
+              <Routes>
+                <Route path="/" element={<Navigate to={DEFAULT_PATH} replace />} />
+                <Route path="/overview" element={<OverviewPage />} />
+                <Route path="/compare" element={<ComparePage />} />
+                <Route path="/approvals" element={<ApprovalsPage />} />
+                <Route path="/activity" element={<ActivityPage />} />
+                <Route path="/lineage" element={<LineagePage />} />
+                <Route path="/add-agent" element={<AddAgentPage />} />
+                <Route path="/how-it-works" element={<HowItWorksPage />} />
+                <Route path="*" element={<Navigate to={DEFAULT_PATH} replace />} />
+              </Routes>
             </div>
-          </Section>
-
-          <Section
-            title="Tool-waste diagnosis"
-            description="Repeated tool work within a session: re-run shell-setup boilerplate and re-targeted files."
-          >
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <Card className="shadow-sm">
-                <CardHeader>
-                  <CardTitle>Boilerplate re-runs</CardTitle>
-                  <CardDescription>
-                    Same normalized shell prologue (cd / env setup) repeated within a trace.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <DataTable queryKey="tool_waste_shell" parameters={expParams} pageSize={10} />
-                </CardContent>
-              </Card>
-              <Card className="shadow-sm">
-                <CardHeader>
-                  <CardTitle>Repeated file access</CardTitle>
-                  <CardDescription>Same file path read or edited repeatedly within a trace.</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <DataTable queryKey="tool_waste_files" parameters={expParams} pageSize={10} />
-                </CardContent>
-              </Card>
-            </div>
-          </Section>
-        </main>
-      )}
-    </div>
+          </SidebarInset>
+        </SidebarProvider>
+      </AgentProvider>
+    </BrowserRouter>
   );
 }
