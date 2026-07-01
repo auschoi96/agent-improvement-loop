@@ -152,7 +152,7 @@ class Harness:
     def decision_writer(self, result: ApplyServiceResult) -> None:
         if self.decision_writer_boom is not None:
             raise self.decision_writer_boom
-        self.decisions.append(result)
+        self.decisions.append(result.model_copy(deep=True))
 
     def status_writer(self, *, agent_name: str, proposal_id: str, status: ProposalStatus) -> None:
         if self.status_writer_boom is not None:
@@ -366,6 +366,23 @@ def test_live_apply_with_status_write_failure_surfaces_applied_unrecorded() -> N
     # the decision audit itself still landed (only the status write failed)
     assert result.decision_recorded is True
     assert len(h.decisions) == 1
+    assert h.decisions[0].outcome is ApplyServiceOutcome.APPLIED_UNRECORDED
+
+    apply_h = Harness()
+    apply_proposal = _metric_view_proposal(proposal_id="prop-apply")
+    apply_result = _decide(apply_proposal, _approve(apply_proposal), h=apply_h)
+
+    assert apply_result.outcome is ApplyServiceOutcome.APPLIED
+    assert apply_h.decisions[0].outcome is ApplyServiceOutcome.APPLIED
+
+    reject_h = Harness()
+    reject_proposal = _metric_view_proposal(proposal_id="prop-reject")
+    reject_result = _decide(
+        reject_proposal, _reject(reject_proposal, reason="not useful"), h=reject_h
+    )
+
+    assert reject_result.outcome is ApplyServiceOutcome.REJECTED
+    assert reject_h.decisions[0].outcome is ApplyServiceOutcome.REJECTED
 
 
 def test_reject_audit_failure_stays_rejected_not_unrecorded() -> None:

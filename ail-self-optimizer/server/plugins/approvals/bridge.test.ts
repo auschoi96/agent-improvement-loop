@@ -172,6 +172,46 @@ describe('jobTriggerApplyBridge — fail-closed (never a fabricated apply)', () 
     }
   });
 
+  it('rejects blank/invalid apply job ids without triggering and accepts a valid env id', async () => {
+    const prev = process.env.AIL_APPLY_JOB_ID;
+    try {
+      process.env.AIL_APPLY_JOB_ID = '   ';
+      const blank = fakeClient({ runs: [SUCCESS] });
+      const blankBridge = jobTriggerApplyBridge({
+        warehouseId: 'wh-1',
+        clientFactory: () => blank.client,
+      });
+      await expect(blankBridge(INPUT)).rejects.toThrow(/AIL_APPLY_JOB_ID is not set/);
+      expect(blank.calls.runNow).toHaveLength(0);
+
+      process.env.AIL_APPLY_JOB_ID = 'not-a-job';
+      const invalid = fakeClient({ runs: [SUCCESS] });
+      const invalidBridge = jobTriggerApplyBridge({
+        warehouseId: 'wh-1',
+        clientFactory: () => invalid.client,
+      });
+      await expect(invalidBridge(INPUT)).rejects.toThrow(/AIL_APPLY_JOB_ID is invalid/);
+      expect(invalid.calls.runNow).toHaveLength(0);
+
+      process.env.AIL_APPLY_JOB_ID = '4242';
+      const valid = fakeClient({
+        runs: [SUCCESS],
+        statement: { status: { state: 'SUCCEEDED' }, result: { data_array: [[JSON.stringify(REAL_APPLIED)]] } },
+      });
+      const validBridge = jobTriggerApplyBridge({
+        warehouseId: 'wh-1',
+        catalog: 'cat',
+        schema: 'sch',
+        clientFactory: () => valid.client,
+      });
+      await expect(validBridge(INPUT)).resolves.toEqual(REAL_APPLIED);
+      expect(valid.calls.runNow[0].job_id).toBe(4242);
+    } finally {
+      if (prev === undefined) delete process.env.AIL_APPLY_JOB_ID;
+      else process.env.AIL_APPLY_JOB_ID = prev;
+    }
+  });
+
   it('rejects when the warehouse for the result read is not configured', async () => {
     const prev = process.env.DATABRICKS_WAREHOUSE_ID;
     delete process.env.DATABRICKS_WAREHOUSE_ID;
