@@ -53,11 +53,32 @@ variables:
   objective_metric:
     description: The optimization cycle's objective metric (the goal's target metric).
     default: total_tokens
+  goal_direction:
+    description: >-
+      Optimization direction for the objective metric: 'minimize' (default) or
+      'maximize'.
+    default: minimize
   goal_target:
     description: >-
       The goal's target movement (relative fraction by default; e.g. -0.30 = a 30%
       reduction for a minimize objective).
     default: '-0.30'
+  goal_target_kind:
+    description: >-
+      How goal_target is read: 'relative' (a fractional movement vs the baseline,
+      the default) or 'absolute' (a target metric value).
+    default: relative
+  objective_baseline:
+    description: >-
+      Baseline value a relative objective target is measured against. Empty (the
+      default) => the cycle treats the objective as not-yet-met rather than
+      fabricating a baseline.
+    default: ''
+  guardrail_judge:
+    description: >-
+      Optional judge guardrail as 'name:threshold' (e.g. 'modularity:4.0'). Empty
+      (the default) => no judge guardrail; a blank value is ignored by the cycle.
+    default: ''
   goal_confirmed:
     description: >-
       'true' marks the operator-configured goal human-confirmed so the cycle runs;

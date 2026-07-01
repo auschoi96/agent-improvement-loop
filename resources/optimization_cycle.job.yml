@@ -67,7 +67,15 @@ resources:
               # anything else to keep the goal unconfirmed (the cycle fails loud
               # rather than optimizing an unreviewed goal).
               objective-metric: ${var.objective_metric}
+              goal-direction: ${var.goal_direction}
               goal-target: ${var.goal_target}
+              goal-target-kind: ${var.goal_target_kind}
+              # Baseline a relative target is measured against; empty => not-yet-met
+              # (no fabricated baseline). Optional guardrail judge as 'name:threshold';
+              # empty => no guardrail. Both keep the reusability property (no workspace
+              # ids), so non-default goals no longer silently fall back to CLI defaults.
+              objective-baseline: ${var.objective_baseline}
+              guardrail-judge: ${var.guardrail_judge}
               goal-confirmed: ${var.goal_confirmed}
               planner-model: ${var.rlm_judge_model}
               # Empty by default -> the entrypoint mints a short-lived bearer from

@@ -579,9 +579,14 @@ def combined_decisions(
     Lane B is ``planner`` (defaults to :func:`agent_planner`). The union lists Lane A
     first, then each Lane-B decision whose :func:`_dedup_key` was not already
     contributed by A — so on a collision A (the evidence-grounded, deterministic
-    lane) wins and B never displaces it. A :class:`PlanParseError` from Lane B is
-    **caught** and recorded in :attr:`CombinedDecisions.planner_error` (fail-closed:
-    Lane A is unaffected and no fabricated B decision is added).
+    lane) wins and B never displaces it. **Any** Lane-B failure — a
+    :class:`PlanParseError` *or* a failure of the planner's underlying LLM call
+    (network timeout, auth, an ``mlflow`` deploy-client error) — is **caught** and
+    recorded in :attr:`CombinedDecisions.planner_error` (fail-closed: Lane B
+    contributes **zero** decisions, never a fabricated one, and Lane A is
+    unaffected). The catch is scoped to the planner invocation **only**: Lane A's
+    :func:`decide` above and the union/de-dup below stay outside it, so a bug there
+    still fails loud.
     """
     a_decisions = decide(feedback, goal, thresholds=thresholds)
 
@@ -591,6 +596,9 @@ def combined_decisions(
         b_decisions = planner(feedback, goal, agent)
     except PlanParseError as exc:
         planner_error = str(exc)
+    except Exception as exc:  # noqa: BLE001 - Lane B fails soft: any planner-side error => 0 B
+        planner_error = f"planner LLM call failed: {exc}"
+        b_decisions = []
 
     seen: set[tuple[str, str, str, str]] = {_dedup_key(d) for d in a_decisions}
     union: list[Decision] = list(a_decisions)

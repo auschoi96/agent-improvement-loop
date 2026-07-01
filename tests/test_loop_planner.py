@@ -359,6 +359,29 @@ def test_combined_records_planner_error_and_keeps_lane_a() -> None:
     assert [d.action_kind for d in combined.decisions] == [ActionKind.METRIC_VIEW]
 
 
+def test_combined_survives_planner_llm_call_failure_and_keeps_lane_a() -> None:
+    # Resilience: a planner whose underlying LLM CALL fails for a NON-parse reason
+    # (a network timeout, auth error, or MlflowException — simulated here as a
+    # generic RuntimeError) must NOT crash the cycle. Lane A's already-computed
+    # decisions are preserved unchanged, the error is recorded, ZERO Lane-B
+    # decisions are added (never a fabricated one), and no exception propagates.
+    feedback = _feedback_metric_view()
+
+    def _exploding_planner(f: FeedbackBundle, g: CompiledGoal, a: Agent) -> list[Decision]:
+        raise RuntimeError("simulated MlflowException: serving endpoint unreachable")
+
+    combined = combined_decisions(feedback, _goal(), _agent(), planner=_exploding_planner)
+
+    assert combined.n_from_a == 1
+    assert combined.n_from_b == 0
+    assert combined.n_deduped == 0
+    assert combined.planner_error is not None
+    assert "serving endpoint unreachable" in combined.planner_error
+    # Lane A's metric_view decision survived verbatim, provenance intact.
+    assert [d.action_kind for d in combined.decisions] == [ActionKind.METRIC_VIEW]
+    assert combined.decisions[0].trigger.kind is TriggerKind.RLM_RECOMMENDED_ASSET
+
+
 # ==========================================================================
 # B never applies: it flows through the SAME pipeline, comes out pending
 # ==========================================================================

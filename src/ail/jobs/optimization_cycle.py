@@ -454,6 +454,18 @@ def _default_publish(agent: Agent, args: argparse.Namespace) -> PublishFn:
 # ---------------------------------------------------------------------------
 
 
+def _opt_float(value: str) -> float | None:
+    """Parse an optional float CLI arg; an empty string yields ``None``.
+
+    The bundle wires this from a DAB variable whose default is empty (so the goal
+    keeps its fail-closed "no baseline ⇒ objective treated as not-yet-met" default
+    rather than a fabricated one). ``type=float`` would raise on the empty string a
+    named-parameter substitution passes, so this maps blank ⇒ ``None`` and defers to
+    ``float`` otherwise.
+    """
+    return float(value) if value.strip() else None
+
+
 def _build_goal(args: argparse.Namespace) -> CompiledGoal:
     """Build the operator-configured goal; require an explicit confirmation flag.
 
@@ -465,6 +477,8 @@ def _build_goal(args: argparse.Namespace) -> CompiledGoal:
     """
     guardrails: list[Guardrail] = []
     for spec in args.guardrail_judge or []:
+        if not spec.strip():
+            continue  # blank spec (e.g. the empty DAB var default) => no guardrail
         name, _, threshold = spec.partition(":")
         guardrails.append(
             Guardrail(
@@ -520,9 +534,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--objective-baseline",
-        type=float,
+        type=_opt_float,
         default=None,
-        help="Baseline value a relative objective target is measured against.",
+        help="Baseline value a relative objective target is measured against "
+        "(empty => treated as not-yet-met, no fabricated baseline).",
     )
     parser.add_argument(
         "--goal-confirmed",
