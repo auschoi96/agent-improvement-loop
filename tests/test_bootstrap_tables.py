@@ -257,6 +257,12 @@ def test_drift_guard_ignores_qualified_ref_with_alias() -> None:
         "TRUNCATE TABLE `cat`.`sch`.agent_registry",
         "CREATE OR REPLACE TABLE `cat`.`sch`.agent_registry (a STRING) USING DELTA",
         "CREATE TABLE `cat`.`sch`.agent_registry (a STRING) USING DELTA",  # no IF NOT EXISTS
+        # compound: leading valid create, then an appended destructive statement.
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.agent_registry (a STRING) USING DELTA; "
+        "DROP TABLE `cat`.`sch`.agent_registry",
+        # single-string variant: valid prefix + trailing ';' + second statement.
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) USING DELTA;"
+        "TRUNCATE TABLE `cat`.`sch`.t",
     ],
 )
 def test_ensure_app_tables_rejects_non_idempotent_and_executes_nothing(
@@ -291,3 +297,37 @@ def test_table_ensure_statements_names_offending_producer(
         table_ensure_statements("cat", "sch")
     # The error names the producer so a drift is traceable to its writer module.
     assert "_drifted_ddl" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE SCHEMA IF NOT EXISTS `cat`.`sch` COMMENT 'x'",
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) USING DELTA",
+        "create table if not exists `cat`.`sch`.t (a string) using delta",  # case
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) USING DELTA;",  # lone trailing ;
+        # forbidden words appear ONLY inside a COMMENT literal -> must be accepted.
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) "
+        "COMMENT 'we never drop or replace this'",
+    ],
+)
+def test_is_idempotent_create_accepts(statement: str) -> None:
+    assert bootstrap_tables._is_idempotent_create(statement) is True
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DROP TABLE `cat`.`sch`.t",
+        "ALTER TABLE `cat`.`sch`.t ADD COLUMN x STRING",
+        "TRUNCATE TABLE `cat`.`sch`.t",
+        "CREATE OR REPLACE TABLE `cat`.`sch`.t (a STRING) USING DELTA",
+        "CREATE TABLE `cat`.`sch`.t (a STRING) USING DELTA",  # missing IF NOT EXISTS
+        # compound / appended second statement — prefix matches but body is not clean.
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) USING DELTA; DROP TABLE `cat`.`sch`.t",
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) USING DELTA;"
+        "INSERT INTO `cat`.`sch`.t VALUES (1)",
+    ],
+)
+def test_is_idempotent_create_rejects(statement: str) -> None:
+    assert bootstrap_tables._is_idempotent_create(statement) is False

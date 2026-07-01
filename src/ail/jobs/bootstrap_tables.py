@@ -40,6 +40,7 @@ steps already carry (see :mod:`ail.jobs.bootstrap_grants`).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -108,14 +109,55 @@ _ALLOWED_PREFIXES: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS ",
 )
 
+#: Destructive/mutating verbs that must never appear in a bootstrap statement's
+#: body. ``CREATE OR REPLACE`` is already caught by the prefix check; `` REPLACE ``
+#: is kept here for defense-in-depth.
+_FORBIDDEN_VERBS: tuple[str, ...] = (
+    " DROP ",
+    " ALTER ",
+    " TRUNCATE ",
+    " DELETE ",
+    " INSERT ",
+    " MERGE ",
+    " UPDATE ",
+    " REPLACE ",
+)
+
 
 def _is_idempotent_create(statement: str) -> bool:
-    """True iff ``statement`` (case/whitespace-normalized) begins with an allowed
-    ``CREATE SCHEMA/TABLE IF NOT EXISTS`` prefix — and nothing destructive or
-    replacing. ``CREATE OR REPLACE ...`` and ``CREATE TABLE`` without ``IF NOT
-    EXISTS`` both fail, because neither leading run matches a prefix exactly."""
+    """True iff ``statement`` is a SINGLE idempotent create with no destructive body.
+
+    A real allowlist, not a prefix sniff. After case/whitespace normalization the
+    statement must satisfy ALL of:
+
+    * **prefix** — begin with ``CREATE SCHEMA IF NOT EXISTS`` or ``CREATE TABLE IF
+      NOT EXISTS`` (so ``CREATE OR REPLACE ...`` and a bare ``CREATE TABLE``
+      without ``IF NOT EXISTS`` are rejected);
+    * **single statement** — one optional trailing ``;`` is allowed, but any other
+      ``;`` (a second, possibly destructive, appended statement) is rejected; and
+    * **clean body** — no verb in :data:`_FORBIDDEN_VERBS`, after ``COMMENT '...'``
+      string literals are stripped so a legitimate column/table comment mentioning
+      e.g. "drop" or "replace" in prose is not false-rejected.
+    """
     normalized = " ".join(statement.split()).upper()
-    return normalized.startswith(_ALLOWED_PREFIXES)
+
+    if not normalized.startswith(_ALLOWED_PREFIXES):
+        return False
+
+    # Strip COMMENT '...' string literals FIRST, so prose (which legitimately may
+    # contain ';', 'drop', 'replace', ... — e.g. "...PROMOTE traces; cost
+    # ESTIMATE.") can't trip the single-statement or forbidden-verb checks below.
+    stripped = re.sub(r"COMMENT '[^']*'", "", normalized)
+
+    # Single statement only: drop one optional trailing ';'; any other ';'
+    # introduces a second (possibly destructive) statement -> reject.
+    single = stripped[:-1].rstrip() if stripped.endswith(";") else stripped
+    if ";" in single:
+        return False
+
+    # No destructive/mutating verb in the (comment-stripped) body.
+    body = f" {single} "
+    return not any(verb in body for verb in _FORBIDDEN_VERBS)
 
 
 def _producer_statements(catalog: str, schema: str) -> list[tuple[str, str]]:
