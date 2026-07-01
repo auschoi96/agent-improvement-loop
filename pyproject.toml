@@ -50,6 +50,10 @@ ail-readiness = "ail.jobs.readiness_preflight:main"
 # champion alias to a prior version. Fail-closed, dry-run by default (--yes to write);
 # prints the WAS->BECOMES audit. Re-run the lineage publish after (see docs).
 ail-revert = "ail.jobs.revert_champion:main"
+# Arrival-triggered L3/RLM reviewer: Databricks Job fires on MLflow trace-table
+# updates, then this bounded runner idempotently attaches rlm_* feedback only to
+# sampled traces that do not already have RLM assessments.
+ail-continuous-rlm = "ail.jobs.continuous_rlm:main"
 
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
