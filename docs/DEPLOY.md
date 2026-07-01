@@ -35,9 +35,12 @@ from the Databricks CLI profile at deploy time (nothing hardcoded):
 | `ail-scheduled-publish` | repo root `databricks.yml` + `resources/*.yml` | the scheduled L0 publish job **and** the on-demand `ail-apply-service` job (§7) | bundle-level `run_as` (§2) |
 | `ail-self-optimizer` | `ail-self-optimizer/databricks.yml` | the L0 leaderboard App (incl. the approve/reject write-path) | the App's auto-provisioned SP (fixed by the platform) |
 
-The **one-time bootstrap** (`ail-bootstrap-grants`, §1/§3/§4) is a CLI an admin
-runs once after deploy — it is the conditional glue the bundles cannot express
-declaratively (see [§6 Capability gaps](#6-dab--apps-capability-gaps-found)).
+The **bootstrap** (`ail-bootstrap-grants`, §1/§3/§4) is a CLI an admin runs as part
+of deploy — it provisions/resolves the warehouse, **ensures the app's tables exist
+(empty)**, grants `CAN_USE`, and tags the experiment. It is the conditional glue the
+bundles cannot express declaratively (see
+[§6 Capability gaps](#6-dab--apps-capability-gaps-found)), and its table-ensure step
+must run **before** the app bundle is deployed (§3 callout, §4).
 
 ---
 
@@ -122,9 +125,11 @@ The cleanest single-SP setup reuses the **App's** auto-provisioned SP as
 `framework_sp_id`, because the App's SP cannot be reassigned and a job cannot
 reference it until it exists. So the turnkey order is:
 
-1. Deploy the **app** bundle first. This creates the app, its SP, and (because
-   the warehouse is declared with `permission: CAN_USE`) **auto-grants** `CAN_USE`
-   on the warehouse to that SP.
+1. Run the **pre-app bootstrap** (§4 step 2) to provision/resolve the warehouse and
+   ensure the app's tables, then deploy the **app** bundle. This creates the app,
+   its SP, and (because the warehouse is declared with `permission: CAN_USE`)
+   **auto-grants** `CAN_USE` on the warehouse to that SP. (The table-ensure must
+   precede the app deploy so the build's typegen resolves — §3 callout.)
 2. Read the App SP's application id:
    ```bash
    databricks apps get ail-self-optimizer -o json --profile dais-demo \
@@ -140,59 +145,102 @@ keeps its auto-grant; both have `CAN_USE`).
 
 ---
 
-## 3. The grant, and the monitoring tag (bootstrap)
+## 3. Warehouse tables, the grant, and the monitoring tag (bootstrap)
 
 `ail-bootstrap-grants` (module `ail.jobs.bootstrap_grants`) is **idempotent** and
-does three things in one run:
+does four things in one run:
 
 1. **Resolve the warehouse** — use `--warehouse-id`, else find-or-create (§1).
-2. **Grant `CAN_USE`** on it to `--framework-sp-id` via the warehouse permissions
-   API (`update_permissions`, a merge — it does not clobber the App SP's
-   auto-grant). Skipped if no SP is given.
-3. **Tag the experiment** with `mlflow.monitoring.sqlWarehouseId = <warehouse>`
+2. **Ensure the app's tables exist (empty)** — create every UC table the deployed
+   app's SQL queries read, using each writer module's **own** authoritative
+   `_ddl()` `CREATE SCHEMA/TABLE IF NOT EXISTS` (module `ail.jobs.bootstrap_tables`;
+   no schema is authored in the bootstrap). This is **load-bearing for the app
+   build** — see the ordering callout below. `CREATE ... IF NOT EXISTS` only, so a
+   re-run never drops, alters, or repopulates an existing table.
+3. **Grant `CAN_USE`** on the warehouse to `--framework-sp-id` via the warehouse
+   permissions API (`update_permissions`, a merge — it does not clobber the App
+   SP's auto-grant). Skipped if no SP is given.
+4. **Tag the experiment** with `mlflow.monitoring.sqlWarehouseId = <warehouse>`
    (reusing `ail.compare.monitoring.configure_monitoring_warehouse`) so MLflow's
    monitoring job fetches the v4 Unity Catalog traces the scheduled scorers score.
 
 ```bash
-# Run once, as a workspace admin, after deploy:
+# Run once, as a workspace admin, BEFORE deploying the app (see ordering below):
 ail-bootstrap-grants \
   --experiment <EXPERIMENT_ID> \
   --warehouse-id <WAREHOUSE_ID> \
   --framework-sp-id <FRAMEWORK_SP_ID> --profile dais-demo
-# Omit --warehouse-id to auto-provision; omit --framework-sp-id to skip the grant.
+# Omit --warehouse-id to auto-provision; omit --framework-sp-id to skip the grant
+# (e.g. on the pre-app run, before the App SP exists — see §4). --catalog/--schema
+# default to the framework catalog.schema the app reads.
 ```
 
 The App's own `CAN_USE` is **not** done here — it is granted natively by the Apps
 platform from the `permission: CAN_USE` declaration in
 `ail-self-optimizer/databricks.yml`.
 
+> [!IMPORTANT]
+> **The table-ensure must run before the app is deployed/started.** The app's
+> build runs AppKit typegen (`appkit generate-types`), which performs a **live**
+> `DESCRIBE QUERY` against the warehouse for **every** query in
+> `ail-self-optimizer/config/queries/*.sql`. Several of those tables are created
+> lazily on first write (e.g. `agent_proposed_actions`, `agent_prompt_lineage`,
+> the `agent_version_*` tables), so on a **clean** workspace they do not exist yet.
+> If typegen `DESCRIBE`s a missing table it fails with `TABLE_OR_VIEW_NOT_FOUND`,
+> the app **build** fails, `bundle run app` fails, and any previously-running app
+> goes **UNAVAILABLE**. Ensuring the empty tables first (step 2) makes typegen —
+> and every runtime `SELECT` — resolve. This ordering is why the bootstrap is the
+> **first** post-warehouse step in the sequence (§4), not a follow-up. The set of
+> tables the bootstrap covers is drift-guarded in `tests/test_bootstrap_tables.py`
+> against the actual `.sql` query files, so it cannot silently fall behind.
+
 ---
 
 ## 4. End-to-end turnkey sequence
 
+**Ordering is load-bearing:** the bootstrap's warehouse + **table-ensure** + tag
+(step 2) must run **before** the app is deployed/started (step 3), because the app
+build's typegen `DESCRIBE`s every query's table live and fails hard on a missing
+one (§3 callout). The bootstrap is idempotent, so it is run twice — once **before**
+the app for the tables (no SP grant yet, since the App SP does not exist), and once
+**after** to add the grant for the single framework SP.
+
 ```bash
-# 1. (verification) deploy the job bundle as yourself — proves config is sound
+# 1. (verification) deploy the job bundle as yourself — proves config is sound,
+#    and creates the apply job whose id the app needs (§7 step 1).
 databricks bundle validate -t dais_demo --profile dais-demo
 databricks bundle deploy   -t dais_demo --profile dais-demo
 
-# 2. deploy the app (creates its SP + auto-grants CAN_USE on the warehouse).
-#    Point it at the apply job with --var apply_job_id=<id> (from §7 step 1) so it
-#    also auto-grants CAN_MANAGE_RUN on that job + injects AIL_APPLY_JOB_ID; see §7.
+# 2. BOOTSTRAP FIRST [ADMIN]: (provide-or-create wh) + ensure the app's tables
+#    (empty) + tag experiment. No --framework-sp-id yet (the App SP is created in
+#    step 3). This is what lets step 3's app build typegen resolve on a clean
+#    workspace — with ZERO manual DDL.
+ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
+  --warehouse-id <WAREHOUSE_ID> --profile dais-demo
+
+# 3. deploy the app (creates its SP + auto-grants CAN_USE on the warehouse). Its
+#    build typegen now DESCRIBEs tables that EXIST (step 2). Point it at the apply
+#    job with --var apply_job_id=<id> (from step 1 / §7) so it also auto-grants
+#    CAN_MANAGE_RUN on that job + injects AIL_APPLY_JOB_ID; see §7.
 cd ail-self-optimizer && databricks bundle deploy --profile dais-demo \
   --var apply_job_id=<APPLY_JOB_ID> && cd ..
 databricks bundle run app -t default --profile dais-demo   # start the app
 
-# 3. capture the App SP -> the single framework SP
+# 4. capture the App SP -> the single framework SP
 SP=$(databricks apps get ail-self-optimizer -o json --profile dais-demo \
        | python3 -c "import sys,json;print(json.load(sys.stdin)['service_principal_client_id'])")
 
-# 4. bootstrap: (provide-or-create wh) + grant CAN_USE to SP + tag experiment  [ADMIN]
+# 5. bootstrap AGAIN (idempotent) to grant CAN_USE to that SP (wh reused, tables
+#    no-op, tag no-op), then re-deploy the jobs to run as that SP.
 ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
   --warehouse-id <WAREHOUSE_ID> --framework-sp-id "$SP" --profile dais-demo
-
-# 5. re-deploy the jobs to run as that SP
 databricks bundle deploy -t dais_demo_sp --var framework_sp_id="$SP" --profile dais-demo
 ```
+
+> If you use a **standalone** framework SP (created once by an admin) instead of
+> reusing the App SP, pass `--framework-sp-id <SP>` in step 2 and drop step 5's
+> bootstrap re-run — the single pre-app bootstrap then does the warehouse, tables,
+> grant, and tag in one shot.
 
 ---
 
@@ -215,8 +263,13 @@ permissions error. That is by design. Two ways to stay turnkey:
 
 ### Fallback: the exact one-time admin commands
 
-If you would rather not run the bootstrap CLI, an admin can do the same three
-things with the Databricks CLI:
+If you would rather not run the bootstrap CLI, an admin can do the warehouse,
+grant, and tag with the Databricks CLI below. **There is deliberately no hand-CLI
+fallback for the table-ensure** (§3 step 2): hand-authoring `CREATE TABLE`
+statements would duplicate — and inevitably drift from — the writer modules'
+authoritative `_ddl()`. Run `ail-bootstrap-grants` for that step so the empty
+tables always match the schema the writers populate (that is the whole point of
+"no guessed schema"). The three hand-CLI steps:
 
 ```bash
 # (a) create a small serverless warehouse (only if you are auto-provisioning)

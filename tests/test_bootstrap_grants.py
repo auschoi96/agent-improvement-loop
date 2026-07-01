@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 from databricks.sdk.service.sql import (
     CreateWarehouseRequestWarehouseType,
+    StatementState,
     WarehousePermissionLevel,
 )
 
@@ -75,9 +76,42 @@ class _FakeWarehousesAPI:
         return object()
 
 
+class _FakeStatementStatus:
+    def __init__(self, state: StatementState) -> None:
+        self.state = state
+        self.error = None
+
+
+class _FakeStatementResponse:
+    def __init__(self, statement_id: str, state: StatementState) -> None:
+        self.statement_id = statement_id
+        self.status = _FakeStatementStatus(state)
+
+
+class _FakeStatementExecutionAPI:
+    """Records executed statements and always succeeds immediately."""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute_statement(
+        self, *, warehouse_id: str, statement: str, wait_timeout: str = "50s"
+    ) -> _FakeStatementResponse:
+        self.statements.append(statement)
+        return _FakeStatementResponse("stmt-1", StatementState.SUCCEEDED)
+
+    def get_statement(self, statement_id: str) -> _FakeStatementResponse:
+        return _FakeStatementResponse(statement_id, StatementState.SUCCEEDED)
+
+
 class _FakeClient:
-    def __init__(self, warehouses: _FakeWarehousesAPI) -> None:
+    def __init__(
+        self,
+        warehouses: _FakeWarehousesAPI,
+        statement_execution: _FakeStatementExecutionAPI | None = None,
+    ) -> None:
         self.warehouses = warehouses
+        self.statement_execution = statement_execution or _FakeStatementExecutionAPI()
 
 
 class _FakeMlflowClient:
@@ -148,19 +182,24 @@ def test_grant_uses_merge_update_with_can_use() -> None:
 def test_bootstrap_creates_grants_and_tags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(TRACING_WAREHOUSE_ENV, raising=False)
     api = _FakeWarehousesAPI(listing=[], new_id="fresh-wh")
+    stmts = _FakeStatementExecutionAPI()
     mlflow = _FakeMlflowClient()
 
     result = bootstrap(
         experiment_id="EXP-9",
         warehouse_id=None,
         framework_sp_id="sp-9",
-        client=_FakeClient(api),
+        client=_FakeClient(api, statement_execution=stmts),
         mlflow_client=mlflow,
     )
 
     assert result.warehouse_id == "fresh-wh"
     assert result.warehouse_created is True
     assert result.granted_sp_id == "sp-9"
+    # table-ensure ran against the resolved warehouse, only CREATE ... IF NOT EXISTS
+    assert stmts.statements, "bootstrap must issue the table-ensure DDL"
+    assert all("IF NOT EXISTS" in s for s in stmts.statements)
+    assert result.tables_ensured  # the app-read table set was covered
     # grant landed on the freshly-created warehouse
     assert api.update_perm_calls[0][0] == "fresh-wh"
     # monitoring tag set on the experiment with the resolved warehouse
@@ -214,7 +253,11 @@ def test_main_collapses_empty_strings_to_none(monkeypatch: pytest.MonkeyPatch) -
     def fake_bootstrap(**kwargs: object) -> bootstrap_grants.BootstrapResult:
         calls.update(kwargs)
         return bootstrap_grants.BootstrapResult(
-            warehouse_id="wh", warehouse_created=False, granted_sp_id=None, monitoring=None
+            warehouse_id="wh",
+            warehouse_created=False,
+            granted_sp_id=None,
+            tables_ensured=[],
+            monitoring=None,
         )
 
     monkeypatch.setattr(bootstrap_grants, "bootstrap", fake_bootstrap)
@@ -240,7 +283,11 @@ def test_main_passes_through_provided_values(monkeypatch: pytest.MonkeyPatch) ->
     def fake_bootstrap(**kwargs: object) -> bootstrap_grants.BootstrapResult:
         calls.update(kwargs)
         return bootstrap_grants.BootstrapResult(
-            warehouse_id="wh-1", warehouse_created=True, granted_sp_id="sp-1", monitoring=None
+            warehouse_id="wh-1",
+            warehouse_created=True,
+            granted_sp_id="sp-1",
+            tables_ensured=[],
+            monitoring=None,
         )
 
     monkeypatch.setattr(bootstrap_grants, "bootstrap", fake_bootstrap)
