@@ -1,0 +1,12 @@
+{
+  "$schema": "https://databricks.github.io/appkit/schemas/plugin-manifest.schema.json",
+  "name": "jobactivity",
+  "displayName": "Job Activity",
+  "description": "Read-only data source for the Activity page: lists recent runs of the framework's registered Databricks jobs (ail-apply-service, ail-l0-publish-scheduled), discovered by name via the SDK. Named 'jobactivity' (not 'jobs') to avoid colliding with the built-in AppKit jobs plugin during `appkit plugin sync`. Fail-closed — never fabricates a run, status, or duration; renders the SDK run state verbatim. The app SP needs job-run VIEW permission on those jobs, else each section fails closed with an honest 'no access' state.",
+  "version": "0.1.0",
+  "stability": "beta",
+  "resources": {
+    "required": [],
+    "optional": []
+  }
+}
