@@ -98,6 +98,36 @@ APP_QUERY_TABLES: frozenset[str] = frozenset(
 )
 
 
+#: The ONLY statement shapes the bootstrap is ever allowed to execute against a
+#: live (admin-authority) workspace. The guarantee is enforced at runtime, not
+#: just in tests: a writer ``_ddl()`` that ever drifts to anything else — a
+#: ``DROP``/``ALTER``/``TRUNCATE``, a ``CREATE OR REPLACE``, or a bare ``CREATE
+#: TABLE`` without ``IF NOT EXISTS`` — is rejected before any statement runs.
+_ALLOWED_PREFIXES: tuple[str, ...] = (
+    "CREATE SCHEMA IF NOT EXISTS ",
+    "CREATE TABLE IF NOT EXISTS ",
+)
+
+
+def _is_idempotent_create(statement: str) -> bool:
+    """True iff ``statement`` (case/whitespace-normalized) begins with an allowed
+    ``CREATE SCHEMA/TABLE IF NOT EXISTS`` prefix — and nothing destructive or
+    replacing. ``CREATE OR REPLACE ...`` and ``CREATE TABLE`` without ``IF NOT
+    EXISTS`` both fail, because neither leading run matches a prefix exactly."""
+    normalized = " ".join(statement.split()).upper()
+    return normalized.startswith(_ALLOWED_PREFIXES)
+
+
+def _producer_statements(catalog: str, schema: str) -> list[tuple[str, str]]:
+    """``(producer_dotted_name, statement)`` pairs from every ``_ddl()`` producer."""
+    pairs: list[tuple[str, str]] = []
+    for produce in _DDL_PRODUCERS:
+        producer = f"{produce.__module__}.{produce.__qualname__}"
+        for stmt in produce(catalog, schema):
+            pairs.append((producer, stmt))
+    return pairs
+
+
 def table_ensure_statements(
     catalog: str = DEFAULT_CATALOG, schema: str = DEFAULT_SCHEMA
 ) -> list[str]:
@@ -107,14 +137,30 @@ def table_ensure_statements(
     :data:`_DDL_PRODUCERS` order, dropping the identical ``CREATE SCHEMA``
     statement the producers share (each ``_ddl()`` emits it first). No statement
     is authored here — every one comes verbatim from a writer module.
+
+    Fail-closed: the FULL producer output is validated against the runtime
+    allowlist (:func:`_is_idempotent_create`) **before** anything is returned. If
+    any producer emitted a non-idempotent-``CREATE`` statement, this raises
+    :class:`ValueError` naming every offending statement and its producer — so a
+    caller (:func:`ensure_app_tables`) executes **nothing**, never a partial or
+    destructive apply.
     """
+    pairs = _producer_statements(catalog, schema)
+
+    violations = [(producer, stmt) for producer, stmt in pairs if not _is_idempotent_create(stmt)]
+    if violations:
+        detail = "; ".join(f"{producer}: {stmt.strip()[:100]!r}" for producer, stmt in violations)
+        raise ValueError(
+            "refusing to run non-idempotent-CREATE bootstrap statement(s) — only "
+            f"'CREATE SCHEMA/TABLE IF NOT EXISTS' is allowed: {detail}"
+        )
+
     statements: list[str] = []
     seen: set[str] = set()
-    for produce in _DDL_PRODUCERS:
-        for stmt in produce(catalog, schema):
-            if stmt not in seen:
-                seen.add(stmt)
-                statements.append(stmt)
+    for _producer, stmt in pairs:
+        if stmt not in seen:
+            seen.add(stmt)
+            statements.append(stmt)
     return statements
 
 
@@ -133,8 +179,13 @@ def ensure_app_tables(
     ``CREATE ... IF NOT EXISTS`` (never ``DROP``/``ALTER``), so a re-run on a
     populated workspace is a no-op and never disturbs existing data.
 
-    Returns the sorted app-read table names covered (:data:`APP_QUERY_TABLES`).
+    ``table_ensure_statements`` validates the **full** statement list against the
+    runtime allowlist before returning, so if any writer ``_ddl()`` drifted to a
+    destructive/replacing statement this raises **before** the execution loop —
+    nothing is applied. Returns the sorted app-read table names covered
+    (:data:`APP_QUERY_TABLES`).
     """
-    for statement in table_ensure_statements(catalog, schema):
+    statements = table_ensure_statements(catalog, schema)
+    for statement in statements:
         _execute(client, warehouse_id, statement)
     return sorted(APP_QUERY_TABLES)

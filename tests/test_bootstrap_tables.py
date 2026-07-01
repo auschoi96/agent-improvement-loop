@@ -17,8 +17,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from databricks.sdk.service.sql import StatementState
 
+from ail.jobs import bootstrap_tables
 from ail.jobs.bootstrap_tables import (
     APP_QUERY_TABLES,
     ensure_app_tables,
@@ -81,16 +83,58 @@ def _created_tables(statements: list[str]) -> set[str]:
     return tables
 
 
-def _tables_referenced(sql_text: str) -> set[str]:
-    """Schema-qualified tables read by a query (comments stripped, aliases/CTEs ignored)."""
+# Tokens that may follow a table ref but are NOT an alias (clause keywords).
+_NON_ALIAS_TOKENS = frozenset(
+    {
+        "ON", "WHERE", "GROUP", "ORDER", "LIMIT", "HAVING", "QUALIFY", "WINDOW",
+        "UNION", "EXCEPT", "INTERSECT", "JOIN", "INNER", "LEFT", "RIGHT", "FULL",
+        "CROSS", "USING", "AS", "WITH", "SELECT", "FROM", "CLUSTER", "DISTRIBUTE",
+        "SORT", "LATERAL", "PIVOT", "UNPIVOT", "TABLESAMPLE",
+    }
+)  # fmt: skip
+
+
+def _cte_names(sql: str) -> set[str]:
+    """CTE names from ``WITH name AS (...)`` (incl. chained ``, name2 AS (...)``)."""
+    return {name.lower() for name in re.findall(r"(\w+)\s+AS\s*\(", sql, re.IGNORECASE)}
+
+
+def _alias_names(sql: str) -> set[str]:
+    """Table aliases: the identifier after a QUALIFIED FROM/JOIN ref (optional ``AS``)."""
+    aliases: set[str] = set()
+    for m in re.finditer(
+        r'(?:\bFROM\b|\bJOIN\b)\s+[`"\w]+\.[`"\w.]+\s+(?:AS\s+)?(\w+)',
+        sql,
+        re.IGNORECASE,
+    ):
+        token = m.group(1)
+        if token.upper() not in _NON_ALIAS_TOKENS:
+            aliases.add(token.lower())
+    return aliases
+
+
+def _referenced_tables(sql_text: str) -> tuple[set[str], set[str]]:
+    """``(qualified tables read, unqualified FROM/JOIN refs that are NOT a CTE/alias)``.
+
+    The second set is the drift guard's blind-spot detector: an unqualified real
+    table (e.g. ``FROM agent_action_decisions``) is **not** silently dropped — it
+    is surfaced so the drift test fails loudly until it is qualified or classified
+    (as a CTE/alias). Qualified ``catalog.schema.table`` refs work as before.
+    """
     no_comments = re.sub(r"--[^\n]*", "", sql_text)
+    ctes = _cte_names(no_comments)
+    aliases = _alias_names(no_comments)
     tables: set[str] = set()
+    unclassified: set[str] = set()
     for ref in re.findall(r'(?:\bFROM\b|\bJOIN\b)\s+([`"\w.]+)', no_comments, re.IGNORECASE):
-        # Only qualified (catalog.schema.table) refs are real tables; an
-        # unqualified name is a CTE/alias, not a table the app must ensure.
         if "." in ref:
             tables.add(ref.split(".")[-1].strip('`"'))
-    return tables
+            continue
+        name = ref.strip('`"')
+        if name.lower() in ctes or name.lower() in aliases:
+            continue
+        unclassified.add(name)
+    return tables, unclassified
 
 
 # -- DDL: full set, idempotent, no guessed/destructive schema --------------
@@ -153,8 +197,18 @@ def test_covered_set_matches_app_query_files() -> None:
     assert sql_files, f"no app SQL query files found under {_QUERY_DIR}"
 
     queried: set[str] = set()
+    unclassified: set[str] = set()
     for sql_file in sql_files:
-        queried |= _tables_referenced(sql_file.read_text())
+        tables, unknown = _referenced_tables(sql_file.read_text())
+        queried |= tables
+        unclassified |= unknown
+
+    # Blind-spot guard: no unqualified FROM/JOIN ref may be silently ignored.
+    assert not unclassified, (
+        "unqualified FROM/JOIN reference(s) the drift guard can't classify as a "
+        f"CTE/alias: {sorted(unclassified)}. Qualify them as catalog.schema.table "
+        "(or add the CTE/alias) so bootstrap coverage stays enforceable."
+    )
 
     covered = set(APP_QUERY_TABLES)
     assert queried == covered, (
@@ -162,3 +216,78 @@ def test_covered_set_matches_app_query_files() -> None:
         f"  only in queries (add its writer _ddl to bootstrap_tables): {queried - covered}\n"
         f"  only in bootstrap (no query reads it): {covered - queried}"
     )
+
+
+def test_drift_guard_flags_unqualified_non_cte_table() -> None:
+    # A future query that reads an UNQUALIFIED real table must not slip through as
+    # if it were a CTE/alias — the guard surfaces it so the drift test fails loudly.
+    tables, unclassified = _referenced_tables("SELECT * FROM agent_action_decisions WHERE x = 1")
+    assert tables == set()
+    assert unclassified == {"agent_action_decisions"}
+
+
+def test_drift_guard_classifies_cte_and_captures_its_real_table() -> None:
+    sql = (
+        "WITH recent AS (SELECT * FROM cat.sch.real_table), "
+        "extra AS (SELECT 1 AS id) "
+        "SELECT * FROM recent JOIN extra ON recent.id = extra.id"
+    )
+    tables, unclassified = _referenced_tables(sql)
+    # `recent`/`extra` are CTEs (not missing tables); the CTE body's real table is captured.
+    assert tables == {"real_table"}
+    assert unclassified == set()
+
+
+def test_drift_guard_ignores_qualified_ref_with_alias() -> None:
+    tables, unclassified = _referenced_tables(
+        "SELECT t.a FROM cat.sch.real_table AS t WHERE t.a > 0"
+    )
+    assert tables == {"real_table"}
+    assert unclassified == set()
+
+
+# -- runtime allowlist: fail-closed at execution, not only in tests --------
+
+
+@pytest.mark.parametrize(
+    "bad_statement",
+    [
+        "DROP TABLE `cat`.`sch`.agent_registry",
+        "ALTER TABLE `cat`.`sch`.agent_registry ADD COLUMN x STRING",
+        "TRUNCATE TABLE `cat`.`sch`.agent_registry",
+        "CREATE OR REPLACE TABLE `cat`.`sch`.agent_registry (a STRING) USING DELTA",
+        "CREATE TABLE `cat`.`sch`.agent_registry (a STRING) USING DELTA",  # no IF NOT EXISTS
+    ],
+)
+def test_ensure_app_tables_rejects_non_idempotent_and_executes_nothing(
+    monkeypatch: pytest.MonkeyPatch, bad_statement: str
+) -> None:
+    def _drifted_ddl(catalog: str, schema: str) -> list[str]:
+        return [
+            f"CREATE SCHEMA IF NOT EXISTS `{catalog}`.`{schema}`",
+            bad_statement,
+        ]
+
+    monkeypatch.setattr(bootstrap_tables, "_DDL_PRODUCERS", (_drifted_ddl,))
+    client = _RecordingClient()
+
+    with pytest.raises(ValueError, match="non-idempotent-CREATE"):
+        ensure_app_tables(client, "wh-1", catalog="cat", schema="sch")
+
+    # Fail-closed: the FULL list is validated before any execution, so NOTHING ran
+    # (not even the leading, valid CREATE SCHEMA) — no partial/destructive apply.
+    assert client.statement_execution.statements == []
+
+
+def test_table_ensure_statements_names_offending_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _drifted_ddl(catalog: str, schema: str) -> list[str]:
+        return [f"DROP TABLE `{catalog}`.`{schema}`.agent_registry"]
+
+    monkeypatch.setattr(bootstrap_tables, "_DDL_PRODUCERS", (_drifted_ddl,))
+
+    with pytest.raises(ValueError) as excinfo:
+        table_ensure_statements("cat", "sch")
+    # The error names the producer so a drift is traceable to its writer module.
+    assert "_drifted_ddl" in str(excinfo.value)
