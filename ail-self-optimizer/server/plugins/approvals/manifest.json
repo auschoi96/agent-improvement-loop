@@ -1,0 +1,12 @@
+{
+  "$schema": "https://databricks.github.io/appkit/schemas/plugin-manifest.schema.json",
+  "name": "approvals",
+  "displayName": "Approval Queue",
+  "description": "Authenticated approve/reject write-path for human-gated proposed actions (Phase C lane 3b). Records the authenticated approver and triggers the framework's gated apply engine server-side.",
+  "version": "0.1.0",
+  "stability": "beta",
+  "resources": {
+    "required": [],
+    "optional": []
+  }
+}

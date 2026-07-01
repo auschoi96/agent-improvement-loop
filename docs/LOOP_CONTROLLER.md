@@ -29,10 +29,23 @@ seams (`ail.loop.controller`), and the agent-scoped publish to the unified
 controller **detects, decides, proves, gates, and proposes only** — it applies
 nothing and sets no champion alias.
 
-What does **not** exist yet is the **in-app approval queue + the authenticated
-approve/reject + the apply-on-approval** (lane 3). Until that is built, a pending
-proposal is reviewed and applied manually. This document remains the
-design-of-record for lane 3; lanes 1–2 below describe built behavior.
+**Lane 3a — the apply-on-approval engine — is built and tested**
+(`ail.loop.apply.apply_approved_proposal`): the single, fail-closed place an
+approved proposal becomes a live change, driven through injectable seams (registry
+/ warehouse / lineage / gate-recheck / body-resolver).
+
+**Lane 3b — the in-app approval queue + the authenticated approve/reject
+write-path — is now built and tested**, closing the loop end-to-end. The
+observability app gains its first write-path: a **custom, authenticated AppKit
+server route** (`ail-self-optimizer/server/plugins/approvals`) that records the
+**authenticated** app user as the approver and calls the lane-3a engine
+**server-side** with real seams wired to the MLflow prompt registry, the framework
+SQL warehouse, `ail.publish_lineage`, and `ail.readiness` (`ail.loop.apply_service`).
+The read side is a two-tier SELECT-only `proposed_actions` query rendered by
+`ApprovalQueue.tsx`. The loop is now self-triggering up to the human gate: the
+framework detects → proves → gates → proposes; the human reviews the why + proof in
+the app and clicks Approve; the engine re-checks the proof + gate and applies; the
+change is recorded.
 
 ## The autonomy boundary (Option A)
 
@@ -119,8 +132,38 @@ will be built with care:
   single-SP + grants from `docs/DEPLOY.md`), behind the same fail-closed gates — the
   button does not bypass the proof/readiness wall.
 - Reads stay two-tier (SELECT-only); only the explicit approval/apply actions write.
-- The exact AppKit server-action mechanism for an authenticated write must be
-  validated against the AppKit SDK at build time (do not assume; confirm).
+
+#### AppKit write-path — validated against the installed SDK (`@databricks/appkit` 0.38.1)
+
+The write mechanism was **confirmed against the installed SDK** (not assumed).
+AppKit's `server()` plugin **does** support a custom, authenticated server-side
+route:
+
+- A **custom plugin** subclasses `Plugin` and implements `injectRoutes(router)`
+  (routes mount under `/api/<pluginName>/…`) — the app registers it in
+  `createApp({ plugins: [analytics(), server(), approvals()] })`. This is the
+  documented extension point for "custom API routes / background logic".
+- The **calling user's identity** is available server-side from the platform's
+  forwarded headers (`x-forwarded-email` / `x-forwarded-user`; the SDK's
+  `getExecutionContext()` / `asUser(req)` read the same). Lane 3b records that
+  authenticated identity as the approver and **ignores** any approver in the request
+  body (never client-trusted). An unauthenticated request is refused (401).
+
+So the full authenticated write-path is buildable in-app and was built.
+
+**One honest deployment caveat (transport, not capability).** The lane-3a engine is
+**Python**; the app server is **Node**. Lane 3b bridges them by invoking
+`python -m ail.loop.apply_service` as a subprocess (synchronous, so `ApplyRefused`
+/ `ApplyRecordError` / success surface cleanly; fully unit-testable via an injected
+bridge). This works in **local dev / a self-hosted image** where the `ail` package
+is importable. The **deployed Databricks App image is Node-only** — the framework's
+Python ships as a wheel installed into **serverless Jobs** (`docs/DEPLOY.md`) — so
+to run in that image the bridge's **single seam** (`ApplyBridge` in
+`server/plugins/approvals/bridge.ts`) should be swapped from a subprocess to a
+**Databricks Job trigger** (the AppKit `jobs` plugin) that runs the *same*
+`ail.loop.apply_service` entry under the framework service principal. The engine,
+the seam wiring, the authenticated route, and the queue are all unchanged by that
+swap — only the transport differs.
 
 ## Build sequence
 
@@ -133,10 +176,18 @@ will be built with care:
    gated candidates become proposals; a crashed/non-improving candidate or an
    ungated state yields no proposal. Unit-tested end-to-end with injected fakes
    (no live MLflow/agent runs).
-3. **App approval queue + authenticated approve/reject + apply-on-approval**
-   (pending — lane 3) — the human control plane; reads the proposals table
-   SELECT-only, and on approval triggers the gated apply and the lineage record;
-   reject archives with reason.
+3. ✅ **App approval queue + authenticated approve/reject + apply-on-approval —
+   built** (lane 3). Lane 3a (`ail.loop.apply`) is the fail-closed engine; lane 3b
+   is the human control plane: a two-tier SELECT-only `proposed_actions` query +
+   `ApprovalQueue.tsx` for the review surface (why + proof + gate), and an
+   authenticated custom AppKit route (`server/plugins/approvals`) →
+   `ail.loop.apply_service` that records the authenticated approver and triggers the
+   gated apply server-side. On approve the engine re-checks proof + gate and applies
+   (registering a version + champion alias, `CREATE`-ing a view, or reverting) and
+   records to the lineage timeline; the decision (approve *and* reject, with reason)
+   is recorded to the append-only `agent_action_decisions` audit. Reject applies
+   nothing. Fail-closed: unauthenticated → refused; non-pending → refused (the engine
+   enforces this). Unit-tested with fakes on both sides (no live write).
 
 After these, the loop is genuinely self-triggering up to the human approval gate:
 the framework notices a problem, builds and proves the fix, and presents it with
