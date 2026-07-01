@@ -331,6 +331,9 @@ def _persist(
         except Exception as exc:  # noqa: BLE001 - a status-write failure must not fake a rollback
             errors.append(f"status not advanced ({type(exc).__name__}: {exc})")
 
+    if errors and live_apply:
+        service.outcome = ApplyServiceOutcome.APPLIED_UNRECORDED
+
     try:
         decision_writer(service)
         service.decision_recorded = True
