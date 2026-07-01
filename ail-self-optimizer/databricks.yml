@@ -9,6 +9,17 @@ variables:
       single CAN_USE grant covers the whole framework. Override with
       --var sql_warehouse_id=... or BUNDLE_VAR_sql_warehouse_id.
     default: 7d1d3dbb3ba65f2a
+  apply_job_id:
+    description: >-
+      Numeric job id of the pre-deployed `ail-apply-service` job (created by the
+      ROOT `ail-scheduled-publish` bundle) that the deployed app triggers for the
+      approve/reject write-path (Phase C lane 3b, docs/DEPLOY.md §7). WORKSPACE-
+      SPECIFIC — left empty in `main` so this bundle stays workspace-agnostic.
+      Set it per deploy with `--var apply_job_id=<id>` (or
+      BUNDLE_VAR_apply_job_id, or a target `variables:` override). It flows into
+      the `apply-job` app resource below, and from there into the app's
+      AIL_APPLY_JOB_ID env var via app.yaml's `valueFrom: apply-job`.
+    default: ''
 
 resources:
   apps:
@@ -33,6 +44,17 @@ resources:
           sql_warehouse:
             id: ${var.sql_warehouse_id}
             permission: CAN_USE
+        # The `ail-apply-service` job the app triggers on approve/reject (§7).
+        # Declaring it as a resource with CAN_MANAGE_RUN makes the Apps platform
+        # AUTO-GRANT that permission to the app SP at deploy (same mechanism as
+        # sql-warehouse CAN_USE above) AND injects the job's numeric id into the
+        # app env via app.yaml's `valueFrom: apply-job` (-> AIL_APPLY_JOB_ID).
+        # id is the deploy-time `apply_job_id` var (empty in main) — never a
+        # hardcoded, workspace-specific literal.
+        - name: apply-job
+          job:
+            id: ${var.apply_job_id}
+            permission: CAN_MANAGE_RUN
 
 targets:
   default:

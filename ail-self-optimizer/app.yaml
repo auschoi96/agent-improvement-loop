@@ -2,3 +2,14 @@ command: ['npm', 'run', 'start']
 env:
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
+  # Select the Job-trigger apply transport (Phase C lane 3b). Generic literal,
+  # correct for every deployment — subprocess is the default otherwise, but the
+  # Node-only deployed image can't spawn the Python engine, so it must be `job`.
+  - name: AIL_APPLY_TRANSPORT
+    value: job
+  # Numeric id of the pre-deployed `ail-apply-service` job to trigger. Injected
+  # from the `apply-job` app resource (databricks.yml), whose id is the
+  # deploy-time bundle variable `apply_job_id` — NOT hardcoded here, so the app
+  # stays workspace-agnostic. Mirrors DATABRICKS_WAREHOUSE_ID <- sql-warehouse.
+  - name: AIL_APPLY_JOB_ID
+    valueFrom: apply-job

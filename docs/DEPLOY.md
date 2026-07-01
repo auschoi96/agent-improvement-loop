@@ -175,8 +175,11 @@ platform from the `permission: CAN_USE` declaration in
 databricks bundle validate -t dais_demo --profile dais-demo
 databricks bundle deploy   -t dais_demo --profile dais-demo
 
-# 2. deploy the app (creates its SP + auto-grants CAN_USE on the warehouse)
-cd ail-self-optimizer && databricks bundle deploy --profile dais-demo && cd ..
+# 2. deploy the app (creates its SP + auto-grants CAN_USE on the warehouse).
+#    Point it at the apply job with --var apply_job_id=<id> (from §7 step 1) so it
+#    also auto-grants CAN_MANAGE_RUN on that job + injects AIL_APPLY_JOB_ID; see §7.
+cd ail-self-optimizer && databricks bundle deploy --profile dais-demo \
+  --var apply_job_id=<APPLY_JOB_ID> && cd ..
 databricks bundle run app -t default --profile dais-demo   # start the app
 
 # 3. capture the App SP -> the single framework SP
@@ -299,9 +302,15 @@ superseded) is **refused**, so a duplicated/retried trigger never double-applies
    databricks jobs list --profile dais-demo -o json \
      | python3 -c "import sys,json;print(next(j['job_id'] for j in json.load(sys.stdin) if j['settings']['name']=='ail-apply-service'))"
    ```
-2. **Grant the app SP `CAN_MANAGE_RUN` (or `CAN_RUN`) on the job** so the app can
-   trigger it. `CAN_MANAGE_RUN` is the least privilege that also lets the app read
-   run status; `CAN_RUN` suffices if you only need trigger + status:
+2. **Grant the app SP `CAN_MANAGE_RUN` on the job** so the app can trigger it and
+   read run status. This is **handled automatically by step 3**: the app bundle
+   declares the job as an `apply-job` app resource with `permission: CAN_MANAGE_RUN`
+   (`ail-self-optimizer/databricks.yml`), so the Apps platform AUTO-GRANTS
+   `CAN_MANAGE_RUN` to the app's service principal at deploy — the same mechanism
+   that auto-grants `CAN_USE` on the `sql-warehouse` resource. No manual grant is
+   needed. (When the app and jobs share one SP per §2, that SP already owns the job,
+   so the grant is a no-op either way.) As a fallback — e.g. the deploying identity
+   lacks manage rights on the job — set it explicitly:
    ```bash
    databricks jobs update-permissions <APPLY_JOB_ID> --profile dais-demo --json '{
      "access_control_list": [
@@ -309,15 +318,23 @@ superseded) is **refused**, so a duplicated/retried trigger never double-applies
      ]
    }'
    ```
-   (When the app and jobs share one SP per §2, that SP is already the job owner and
-   this grant is a no-op; set it explicitly if the app SP differs from the job
-   run-as.) The app SP also needs `SELECT` on `agent_apply_results` — covered by the
-   same framework schema access it already uses for its two-tier reads.
-3. **Point the deployed app at the job** via env on the `ail-self-optimizer` app:
-   | Env var | Value | Effect |
-   |---------|-------|--------|
-   | `AIL_APPLY_TRANSPORT` | `job` | select the Job-trigger transport (subprocess is the default otherwise) |
-   | `AIL_APPLY_JOB_ID` | `<APPLY_JOB_ID>` | the job to trigger (setting this alone also selects the Job transport) |
+   The app SP also needs `SELECT` on `agent_apply_results` — covered by the same
+   framework schema access it already uses for its two-tier reads.
+3. **Deploy the app with the job id as a bundle variable.** The transport is already
+   wired in `ail-self-optimizer/app.yaml`: `AIL_APPLY_TRANSPORT: job` is a committed
+   literal, and `AIL_APPLY_JOB_ID` is injected from the `apply-job` app resource via
+   `valueFrom: apply-job` (mirroring `DATABRICKS_WAREHOUSE_ID` <- `sql-warehouse`).
+   That resource's `id` is the deploy-time bundle variable `apply_job_id`, empty in
+   `main` so the bundle stays workspace-agnostic. Supply the workspace's numeric job
+   id (from step 1) at deploy:
+   ```bash
+   # from ail-self-optimizer/
+   databricks bundle deploy --profile dais-demo --var apply_job_id=<APPLY_JOB_ID>
+   databricks bundle run app --profile dais-demo   # start/refresh the app
+   ```
+   Equivalently set `BUNDLE_VAR_apply_job_id=<APPLY_JOB_ID>` in the environment, or
+   pin it in a target's `variables:` block. Do **not** hardcode the id in `app.yaml`
+   or `databricks.yml` — that would tie `main` to one workspace.
 
    `DATABRICKS_WAREHOUSE_ID` (already injected from the app's `sql-warehouse`
    resource) is reused to read the result row back. Optional overrides:
@@ -328,4 +345,7 @@ superseded) is **refused**, so a duplicated/retried trigger never double-applies
 
 Without `AIL_APPLY_TRANSPORT=job` / `AIL_APPLY_JOB_ID`, the app falls back to the
 subprocess bridge — correct for local dev, but on the Node-only deployed image that
-bridge cannot run, so **both env vars must be set on the deployed app**.
+bridge cannot run. `AIL_APPLY_TRANSPORT: job` is committed in `app.yaml`, so the
+only per-workspace step is supplying `apply_job_id` at deploy (a missing/empty id
+leaves the deployed app selecting the Job transport but with no job to trigger — it
+fails closed rather than silently applying via a bridge it can't run).
