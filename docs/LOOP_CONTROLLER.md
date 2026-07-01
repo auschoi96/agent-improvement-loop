@@ -151,19 +151,36 @@ route:
 
 So the full authenticated write-path is buildable in-app and was built.
 
-**One honest deployment caveat (transport, not capability).** The lane-3a engine is
-**Python**; the app server is **Node**. Lane 3b bridges them by invoking
-`python -m ail.loop.apply_service` as a subprocess (synchronous, so `ApplyRefused`
-/ `ApplyRecordError` / success surface cleanly; fully unit-testable via an injected
-bridge). This works in **local dev / a self-hosted image** where the `ail` package
-is importable. The **deployed Databricks App image is Node-only** — the framework's
-Python ships as a wheel installed into **serverless Jobs** (`docs/DEPLOY.md`) — so
-to run in that image the bridge's **single seam** (`ApplyBridge` in
-`server/plugins/approvals/bridge.ts`) should be swapped from a subprocess to a
-**Databricks Job trigger** (the AppKit `jobs` plugin) that runs the *same*
-`ail.loop.apply_service` entry under the framework service principal. The engine,
-the seam wiring, the authenticated route, and the queue are all unchanged by that
-swap — only the transport differs.
+**Transport, not capability — and now BOTH transports are built.** The lane-3a
+engine is **Python**; the app server is **Node**. Lane 3b bridges them behind a
+**single seam** — the `ApplyBridge` type in `server/plugins/approvals/bridge.ts` —
+and there are now **two implementations of that seam**, selected by environment:
+
+- `spawnPythonApplyBridge` (default) invokes `python -m ail.loop.apply_service` as a
+  subprocess (synchronous, so `ApplyRefused` / `ApplyRecordError` / success surface
+  cleanly). This is the **local-dev / self-hosted** transport, where the `ail`
+  package is importable.
+- `jobTriggerApplyBridge` is the **deployed (Node-only) image** transport. The
+  deployed Databricks App image is Node-only — the framework's Python ships as a
+  wheel installed into **serverless Jobs** (`docs/DEPLOY.md`) — so this bridge
+  **triggers a pre-deployed Databricks Job** (`ail-apply-job`,
+  `resources/apply_service.job.yml`) that runs the *same*
+  `ail.loop.apply_service.run_decision` engine under the framework service
+  principal, polls the run to a terminal state, and returns the engine's **real**
+  result. Because a serverless `python_wheel_task` does not stream stdout back to
+  the trigger, the job writes its `ApplyServiceResult` (full JSON) to a small UC
+  Delta result table (`agent_apply_results`, keyed by `(proposal_id, decided_at)`)
+  and the bridge reads that row back **after** a terminal SUCCESS. Fail-closed: a
+  failed run, a run still non-terminal at the timeout, a non-SUCCESS terminal state,
+  or a missing/unparseable result row all surface an honest `outcome:"error"` —
+  never a fabricated apply.
+
+`ApprovalsPlugin` picks the transport by env: `AIL_APPLY_TRANSPORT=job` (or
+`AIL_APPLY_JOB_ID` being set) selects the Job trigger; otherwise the subprocess is
+used (`docs/DEPLOY.md` documents the deployed-app env contract). It was built with
+`@databricks/sdk-experimental` (already a dep). The engine, the seam wiring, the
+authenticated route, and the queue are **unchanged** across both transports — only
+the transport differs.
 
 ## Build sequence
 

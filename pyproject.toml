@@ -33,6 +33,11 @@ dependencies = [
 [project.scripts]
 # Wheel-task entrypoint for the scheduled Tier A publish Job (see databricks.yml).
 ail-publish-job = "ail.jobs.publish_job:main"
+# Wheel-task entrypoint for the app's Approve/Reject write-path on the deployed
+# (Node-only) image: triggered as a Job (resources/apply_service.job.yml), reads the
+# decision from job named parameters, runs the SAME ail.loop.apply_service engine,
+# and writes the real result to agent_apply_results for the app bridge to read back.
+ail-apply-job = "ail.jobs.apply_job:main"
 # One-time, idempotent post-deploy bootstrap: provide-or-create the framework SQL
 # warehouse, grant CAN_USE to the single framework SP, and tag the experiment with
 # the monitoring warehouse. Run as a workspace admin (see docs/DEPLOY.md).

@@ -1,0 +1,89 @@
+resources:
+  jobs:
+    apply_service:
+      name: ail-apply-service
+      description: >-
+        Lane 3b — the DEPLOYED (Node-only image) transport for the app's
+        authenticated Approve/Reject write-path. The app triggers this job on
+        approve/reject; it runs the SAME ail.loop.apply_service.run_decision
+        engine (re-checking proof + gate, fail-closed) from the decision passed as
+        job parameters, and writes the real ApplyServiceResult to the
+        agent_apply_results table for the app bridge to read back. On-demand only
+        (no schedule) — every run corresponds to one human decision. Reuses the
+        engine; no business logic in the wheel-task adapter.
+      tags:
+        project: agent-improvement-loop
+        tier: C
+        managed_by: dab
+
+      # run_as is inherited from the bundle level (databricks.yml -> `run_as:
+      # ${var.job_run_as}`), so this job runs as the SAME single framework identity
+      # as the publish job and the app SP — one warehouse grant covers everything.
+      # Do NOT set a per-job run_as here; that would fork the framework onto a
+      # second principal. (docs/DEPLOY.md §2.)
+
+      # On-demand only: triggered by the app on each approve/reject. NO schedule.
+
+      # One human decision per run; never overlap. A duplicated/retried trigger of an
+      # already-applied proposal is refused by the engine (non-pending -> REFUSED),
+      # and the app bridge sends a stable idempotency_token, so a double-click never
+      # double-applies.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      # The decision is provided by the TRIGGER, not hardcoded here. Job-level
+      # parameters declare the decision fields with empty defaults so the app can
+      # override them per run via run-now job_parameters; the wheel task reads them
+      # via {{job.parameters.*}}. The framework wiring (warehouse/catalog/schema/
+      # token secret) comes from bundle vars, mirroring the publish job.
+      parameters:
+        - name: proposal_id
+          default: ''
+        - name: agent_name
+          default: ''
+        - name: decision
+          default: ''
+        - name: approver
+          default: ''
+        - name: reason
+          default: ''
+        - name: decided_at
+          default: ''
+
+      tasks:
+        - task_key: apply_decision
+          environment_key: serverless
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-apply-job
+            named_parameters:
+              # Decision fields — resolved at run time from the job parameters the
+              # app overrides on trigger (empty until then; never hardcoded).
+              proposal-id: '{{job.parameters.proposal_id}}'
+              agent-name: '{{job.parameters.agent_name}}'
+              decision: '{{job.parameters.decision}}'
+              approver: '{{job.parameters.approver}}'
+              reason: '{{job.parameters.reason}}'
+              decided-at: '{{job.parameters.decided_at}}'
+              # Framework wiring — from bundle vars (same warehouse/catalog/schema as
+              # the publish job so one grant covers everything).
+              warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              # Empty by default -> the entrypoint mints a short-lived bearer from
+              # the run-as identity. Set both to read a stored token from a secret
+              # scope (production-hardened service-principal path).
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+
+      # Serverless compute. The `ail` wheel (+ its deps: mlflow, databricks-sdk,
+      # pydantic) is installed into the run environment from the locally-built
+      # artifact declared in databricks.yml.
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
+              - ../dist/*.whl

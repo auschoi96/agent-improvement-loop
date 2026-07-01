@@ -32,8 +32,8 @@ from the Databricks CLI profile at deploy time (nothing hardcoded):
 
 | Bundle | Path | Contains | run-as |
 |--------|------|----------|--------|
-| `ail-scheduled-publish` | repo root `databricks.yml` + `resources/*.yml` | the scheduled L0 publish job (and future framework jobs) | bundle-level `run_as` (§2) |
-| `ail-self-optimizer` | `ail-self-optimizer/databricks.yml` | the L0 leaderboard App | the App's auto-provisioned SP (fixed by the platform) |
+| `ail-scheduled-publish` | repo root `databricks.yml` + `resources/*.yml` | the scheduled L0 publish job **and** the on-demand `ail-apply-service` job (§7) | bundle-level `run_as` (§2) |
+| `ail-self-optimizer` | `ail-self-optimizer/databricks.yml` | the L0 leaderboard App (incl. the approve/reject write-path) | the App's auto-provisioned SP (fixed by the platform) |
 
 The **one-time bootstrap** (`ail-bootstrap-grants`, §1/§3/§4) is a CLI an admin
 runs once after deploy — it is the conditional glue the bundles cannot express
@@ -267,3 +267,65 @@ the design is honest about what is declarative and what is not:
 - **App warehouse grant: native.** Declaring the warehouse on the app with
   `permission: CAN_USE` auto-grants `CAN_USE` to the app SP on deploy — no
   bootstrap needed for the app itself.
+
+---
+
+## 7. The apply job (`ail-apply-service`) — deployed approve/reject transport
+
+The app's authenticated Approve/Reject write-path (lane 3b,
+`docs/LOOP_CONTROLLER.md`) runs the framework's **Python** apply engine. In local
+dev / a self-hosted image the Node app spawns `python -m ail.loop.apply_service`
+directly. The **deployed Databricks App image is Node-only** (the `ail` wheel is not
+importable there), so the app instead **triggers a Databricks Job** that runs the
+same engine. That job is `ail-apply-service` (`resources/apply_service.job.yml`),
+deployed by the **root** `ail-scheduled-publish` bundle alongside the publish job.
+
+It is a serverless `python_wheel_task` (entry point `ail-apply-job`), **on-demand
+only** (no schedule — one run per human decision), `max_concurrent_runs: 1` with
+`queue.enabled: true`, and it inherits the bundle-level `run_as` (§2) — so it runs
+as the **same** single framework SP as the publish job and the app. The decision is
+passed as **job parameters** at trigger time (never hardcoded in the bundle); the
+job runs `run_decision` (re-checking proof + gate, fail-closed) and writes the real
+`ApplyServiceResult` to the `agent_apply_results` UC Delta table
+(`${var.catalog}.${var.schema}`), keyed by `(proposal_id, decided_at)`, which the
+app reads back to render the outcome. A non-pending proposal (already applied /
+superseded) is **refused**, so a duplicated/retried trigger never double-applies.
+
+### What the operator must set
+
+1. **Deploy the root bundle** (§4) — this creates `ail-apply-service`. Capture its
+   numeric job id:
+   ```bash
+   databricks jobs list --profile dais-demo -o json \
+     | python3 -c "import sys,json;print(next(j['job_id'] for j in json.load(sys.stdin) if j['settings']['name']=='ail-apply-service'))"
+   ```
+2. **Grant the app SP `CAN_MANAGE_RUN` (or `CAN_RUN`) on the job** so the app can
+   trigger it. `CAN_MANAGE_RUN` is the least privilege that also lets the app read
+   run status; `CAN_RUN` suffices if you only need trigger + status:
+   ```bash
+   databricks jobs update-permissions <APPLY_JOB_ID> --profile dais-demo --json '{
+     "access_control_list": [
+       {"service_principal_name": "<APP_SP_ID>", "permission_level": "CAN_MANAGE_RUN"}
+     ]
+   }'
+   ```
+   (When the app and jobs share one SP per §2, that SP is already the job owner and
+   this grant is a no-op; set it explicitly if the app SP differs from the job
+   run-as.) The app SP also needs `SELECT` on `agent_apply_results` — covered by the
+   same framework schema access it already uses for its two-tier reads.
+3. **Point the deployed app at the job** via env on the `ail-self-optimizer` app:
+   | Env var | Value | Effect |
+   |---------|-------|--------|
+   | `AIL_APPLY_TRANSPORT` | `job` | select the Job-trigger transport (subprocess is the default otherwise) |
+   | `AIL_APPLY_JOB_ID` | `<APPLY_JOB_ID>` | the job to trigger (setting this alone also selects the Job transport) |
+
+   `DATABRICKS_WAREHOUSE_ID` (already injected from the app's `sql-warehouse`
+   resource) is reused to read the result row back. Optional overrides:
+   `AIL_APPLY_CATALOG` / `AIL_APPLY_SCHEMA` (default the framework
+   `austin_choi_omni_agent_catalog.agent_improvement_loop`),
+   `AIL_APPLY_JOB_TIMEOUT_MS` (default 300000), `AIL_APPLY_JOB_POLL_MS` (default
+   3000).
+
+Without `AIL_APPLY_TRANSPORT=job` / `AIL_APPLY_JOB_ID`, the app falls back to the
+subprocess bridge — correct for local dev, but on the Node-only deployed image that
+bridge cannot run, so **both env vars must be set on the deployed app**.
