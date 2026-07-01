@@ -28,6 +28,7 @@ import pytest
 from ail.loop.apply import (
     CHAMPION_ALIAS,
     ApplyOutcome,
+    ApplyRecordError,
     ApplyRefused,
     ApprovalDecision,
     DecisionKind,
@@ -578,3 +579,111 @@ def test_decision_requires_non_empty_approver() -> None:
             approver="   ",
             decided_at="2026-06-30T12:00:00+00:00",
         )
+
+
+# ---------------------------------------------------------------------------
+# BLOCKING 1 — a lineage-record failure AFTER a successful apply must fail LOUD:
+# the change is live (APPLIED), the record must be reconciled, and it is neither a
+# clean success nor a not-applied refusal.
+# ---------------------------------------------------------------------------
+
+
+def test_lineage_record_failure_after_apply_raises_apply_record_error() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal()
+    boom = RuntimeError("lineage table write failed")
+
+    def failing_lineage(record: Any) -> None:
+        raise boom
+
+    with pytest.raises(ApplyRecordError) as excinfo:
+        apply_approved_proposal(
+            proposal,
+            _approve(proposal),
+            registry_client=seams.registry,
+            warehouse_executor=seams.warehouse,
+            lineage_recorder=failing_lineage,
+            gate_recheck=seams.gate,
+        )
+    err = excinfo.value
+    # the capability DID apply — the CREATE ran and is now live (not rolled back)
+    assert seams.warehouse_sql == [METRIC_VIEW_SQL]
+    # reported applied-but-unrecorded: APPLIED result, status advanced, not recorded
+    assert err.result.outcome is ApplyOutcome.APPLIED
+    assert err.result.proposal.status is ProposalStatus.APPLIED
+    assert err.result.lineage_recorded is False
+    assert err.record.proposal_id == proposal.proposal_id
+    assert err.cause is boom
+    # DISTINCT from a fail-closed refusal — must never read as not-applied
+    assert not isinstance(err, ApplyRefused)
+
+
+# ---------------------------------------------------------------------------
+# BLOCKING 2 — decided_at must be a real timestamp (non-empty / non-whitespace)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("decided_at", ["", "   ", "\t\n"])
+def test_decision_requires_non_empty_decided_at(decided_at: str) -> None:
+    proposal = _metric_view_proposal()
+    with pytest.raises(ValueError, match="decided_at"):
+        ApprovalDecision(
+            proposal_id=proposal.proposal_id,
+            decision=DecisionKind.APPROVE,
+            approver="austin@databricks.com",
+            decided_at=decided_at,
+        )
+
+
+# ---------------------------------------------------------------------------
+# FOLD IN — defensive resolver-body guards (never register an empty/diff-as body)
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_returning_empty_body_is_refused() -> None:
+    seams = Seams()
+    proposal = _skill_update_proposal()
+
+    def empty_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(body="   ", provenance=PromptProvenance(source=PromptSource.SEED))
+
+    with pytest.raises(ApplyRefused, match="empty prompt body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=empty_resolver)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+def test_resolver_returning_diff_as_body_is_refused() -> None:
+    seams = Seams()
+    proposal = _skill_update_proposal()
+    assert proposal.change.diff is not None  # precondition: a skill_update carries a diff
+    diff_text: str = proposal.change.diff
+
+    def diff_as_body(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body=diff_text, provenance=PromptProvenance(source=PromptSource.SEED)
+        )
+
+    with pytest.raises(ApplyRefused, match="diff as a body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=diff_as_body)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# FOLD IN — routing boundary refuses a change_kind / action_kind mismatch
+# ---------------------------------------------------------------------------
+
+
+def test_routing_refuses_change_kind_action_kind_mismatch() -> None:
+    seams = Seams()
+    # A METRIC_VIEW proposal carrying a SKILL_DIFF change. model_copy does NOT re-run
+    # the ProposedAction cross-field validator, so this simulates a proposal that
+    # reached the engine with validation bypassed — it must fail closed at routing.
+    malformed = _metric_view_proposal().model_copy(
+        update={"change": ProposedChange(kind=ChangeKind.SKILL_DIFF, summary="x", diff="d")}
+    )
+    with pytest.raises(ApplyRefused, match="requires change kind"):
+        _run(malformed, _approve(malformed), seams=seams)
+    assert not seams.any_capability_called
+    assert seams.lineage_records == []

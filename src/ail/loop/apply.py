@@ -51,7 +51,13 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from ail.jobs.revert_champion import revert_champion
-from ail.loop.proposals import ActionKind, ProposalStatus, ProposedAction, RiskClass
+from ail.loop.proposals import (
+    ActionKind,
+    ChangeKind,
+    ProposalStatus,
+    ProposedAction,
+    RiskClass,
+)
 from ail.optimize.prompt_registry import (
     CHAMPION_ALIASES,
     DEFAULT_CATALOG,
@@ -75,6 +81,7 @@ __all__ = [
     "GateRecheckResult",
     "RegisterableBody",
     "ApplyRefused",
+    "ApplyRecordError",
     "ApplyRegistryClient",
     "WarehouseExecutor",
     "LineageRecorder",
@@ -139,6 +146,10 @@ class ApprovalDecision(_Model):
             raise ValueError("a reject decision must carry a non-empty reason (fail-closed)")
         if not self.approver.strip():
             raise ValueError("a decision must carry a non-empty approver identity")
+        if not self.decided_at.strip():
+            # The audit trail records *when* a change was decided; an empty/whitespace
+            # timestamp is not a real decision time — refuse it at construction.
+            raise ValueError("a decision must carry a non-empty decided_at timestamp")
         return self
 
 
@@ -248,6 +259,41 @@ class ApplyRefused(RuntimeError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class ApplyRecordError(RuntimeError):
+    """The change WAS applied (live) but recording it to the lineage failed.
+
+    Cross-system atomicity between the capability apply and the audit write is
+    impossible, so the invariant is **fail-loud, never silently inconsistent**: once
+    the capability apply *succeeds* the change **is applied**. If the subsequent
+    ``lineage_recorder`` then fails, this distinct error is raised — it is neither a
+    clean success nor a not-applied refusal. It carries:
+
+    * :attr:`result` — the APPLIED :class:`ApplyResult` (the proposal's status is
+      already advanced to ``applied``; :attr:`ApplyResult.lineage_recorded` is
+      ``False``), so the caller/UI surfaces *applied-but-unrecorded, reconcile* rather
+      than rolling a live change back into a fake not-applied state;
+    * :attr:`record` — the :class:`AppliedChangeRecord` that failed to land, so the
+      audit entry can be reconciled;
+    * :attr:`cause` — the underlying recorder exception.
+    """
+
+    def __init__(
+        self,
+        *,
+        result: ApplyResult,
+        record: AppliedChangeRecord,
+        cause: BaseException,
+    ) -> None:
+        self.result = result
+        self.record = record
+        self.cause = cause
+        super().__init__(
+            f"proposal {result.proposal_id!r} was APPLIED ({result.summary}) but recording it to "
+            f"the lineage failed ({type(cause).__name__}: {cause}) — the change is LIVE and the "
+            "audit record must be reconciled (applied-but-unrecorded)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +466,8 @@ def apply_approved_proposal(
         )
 
     # --- apply by action kind (reusing existing capabilities) -----------------
+    # If this raises (a capability failure or a routing/precondition guard) NOTHING
+    # was applied — correct fail-closed: the refusal propagates, status unchanged.
     applied = _apply_change(
         proposal,
         registry_client=registry_client,
@@ -428,6 +476,31 @@ def apply_approved_proposal(
         prompt_name=prompt_name,
         catalog=catalog,
         schema=schema,
+    )
+
+    # The capability has now made a LIVE change (the CREATE ran / the champion alias
+    # moved). From here the change IS applied: advance the status and build the
+    # APPLIED result BEFORE recording, so a lineage-record failure below is reported
+    # fail-loud as applied-but-unrecorded (:class:`ApplyRecordError`) — never as a
+    # clean success and never rolled back into a fake not-applied refusal.
+    applied_proposal = proposal.model_copy(update={"status": ProposalStatus.APPLIED})
+    result = ApplyResult(
+        proposal_id=proposal.proposal_id,
+        agent_name=proposal.agent_name,
+        action_kind=proposal.action_kind,
+        outcome=ApplyOutcome.APPLIED,
+        proposal=applied_proposal,
+        approver=decision.approver,
+        decided_at=decision.decided_at,
+        reason=decision.reason,
+        summary=applied.summary,
+        prompt_name=applied.prompt_name,
+        new_version=applied.new_version,
+        new_uri=applied.new_uri,
+        created_view=applied.created_view,
+        champion_alias=applied.champion_alias,
+        reverted_to_version=applied.reverted_to_version,
+        lineage_recorded=False,
     )
 
     # --- record the applied change to the lineage / audit timeline ------------
@@ -451,27 +524,15 @@ def apply_approved_proposal(
         decided_at=decision.decided_at,
         approval_reason=decision.reason,
     )
-    lineage_recorder(record)
+    try:
+        lineage_recorder(record)
+    except Exception as exc:
+        # Fail loud, do not swallow: the change is live but its audit record did not
+        # land. Surface applied-but-unrecorded (carrying the APPLIED result) so the
+        # caller reconciles the record — not a not-applied refusal.
+        raise ApplyRecordError(result=result, record=record, cause=exc) from exc
 
-    applied_proposal = proposal.model_copy(update={"status": ProposalStatus.APPLIED})
-    return ApplyResult(
-        proposal_id=proposal.proposal_id,
-        agent_name=proposal.agent_name,
-        action_kind=proposal.action_kind,
-        outcome=ApplyOutcome.APPLIED,
-        proposal=applied_proposal,
-        approver=decision.approver,
-        decided_at=decision.decided_at,
-        reason=decision.reason,
-        summary=applied.summary,
-        prompt_name=applied.prompt_name,
-        new_version=applied.new_version,
-        new_uri=applied.new_uri,
-        created_view=applied.created_view,
-        champion_alias=applied.champion_alias,
-        reverted_to_version=applied.reverted_to_version,
-        lineage_recorded=True,
-    )
+    return result.model_copy(update={"lineage_recorded": True})
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +553,20 @@ class _Applied:
     reverted_to_version: int | None = None
 
 
+#: Defense-in-depth: the change form each action kind must carry.
+#: :class:`~ail.loop.proposals.ProposedAction` already enforces this at construction;
+#: re-checking it at the routing boundary makes a proposal that was somehow built
+#: malformed (e.g. via ``model_construct``, bypassing validation) fail closed here
+#: rather than deeper inside a capability against the wrong payload field.
+_EXPECTED_CHANGE_KIND: dict[ActionKind, ChangeKind] = {
+    ActionKind.METRIC_VIEW: ChangeKind.METRIC_VIEW_SQL,
+    ActionKind.SKILL_UPDATE: ChangeKind.SKILL_DIFF,
+    ActionKind.INSTRUCTION_UPDATE: ChangeKind.INSTRUCTION_DIFF,
+    ActionKind.GEPA_PROMPT: ChangeKind.EVOLVED_BODY_REF,
+    ActionKind.REVERT: ChangeKind.REVERT_REF,
+}
+
+
 def _apply_change(
     proposal: ProposedAction,
     *,
@@ -503,6 +578,13 @@ def _apply_change(
     schema: str,
 ) -> _Applied:
     kind = proposal.action_kind
+    expected = _EXPECTED_CHANGE_KIND.get(kind)
+    if expected is not None and proposal.change.kind is not expected:
+        raise ApplyRefused(
+            f"proposal {proposal.proposal_id!r} action_kind {kind.value!r} requires change kind "
+            f"{expected.value!r} but carries {proposal.change.kind.value!r} — refusing a "
+            "malformed proposal at the routing boundary (fail-closed)"
+        )
     if kind is ActionKind.METRIC_VIEW:
         return _apply_metric_view(proposal, warehouse_executor)
     if kind in (ActionKind.SKILL_UPDATE, ActionKind.INSTRUCTION_UPDATE):
@@ -576,6 +658,19 @@ def _apply_prompt_body(
             "diff); none provided — refusing to register a diff as a body (fail-closed)"
         )
     resolved = body_resolver(proposal)
+    # Defensively guard the resolved body: refuse an empty one, and refuse one that is
+    # exactly the proposal's diff — that would be a resolver wiring bug registering a
+    # diff as the skill body (the very thing this seam exists to prevent). Fail-closed.
+    if not resolved.body or not resolved.body.strip():
+        raise ApplyRefused(
+            f"body_resolver returned an empty body for proposal {proposal.proposal_id!r} — "
+            "refusing to register an empty prompt body (fail-closed)"
+        )
+    if proposal.change.diff is not None and resolved.body == proposal.change.diff:
+        raise ApplyRefused(
+            f"body_resolver returned the proposal's diff as the body for "
+            f"{proposal.proposal_id!r} — refusing to register a diff as a body (fail-closed)"
+        )
     registered = register_prompt_body(
         body=resolved.body,
         provenance=resolved.provenance,
