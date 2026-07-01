@@ -23,9 +23,11 @@ variables:
   trace_store_table:
     description: >-
       UC Delta table where MLflow traces land for experiment_id. Continuous RLM
-      uses a Databricks Jobs table_update trigger on this table; set to the
-      workspace's trace-store table, e.g. catalog.mlflow_traces.cc_<experiment>.
-    default: austin_choi_omni_agent_catalog.mlflow_traces.cc_660599403165942
+      uses a Databricks Jobs table_update trigger on this table. Workspace-specific
+      with no safe default, so it is intentionally empty: a deploy MUST set it (e.g.
+      --var trace_store_table=catalog.mlflow_traces.cc_<experiment>) and fails loud
+      otherwise, rather than silently triggering on some other workspace's table.
+    default: ''
   catalog:
     description: Unity Catalog catalog that holds the L0 tables.
     default: austin_choi_omni_agent_catalog

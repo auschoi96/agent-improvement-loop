@@ -93,6 +93,14 @@ class TestContinuousSelection:
         )
         assert not cr.has_rlm_assessment(_trace("t3", 1, assessments=[_assessment("correctness")]))
 
+    def test_has_rlm_assessment_treats_failure_marker_as_handled(self) -> None:
+        # A trace that only failed review (no verdict, just the honest marker) must
+        # read as already-handled so it is never re-reviewed.
+        assert cr.REVIEW_FAILED_FEEDBACK_NAME == "rlm_review_failed"
+        assert cr.has_rlm_assessment(
+            _trace("t4", 1, assessments=[_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME)])
+        )
+
     def test_select_skips_reviewed_reviewer_traces_and_ranks_by_tokens(self) -> None:
         traces = [
             _trace("already", 900, assessments=[_assessment("rlm_review")]),
@@ -187,7 +195,13 @@ class TestContinuousRun:
         def fail_review_trace(trace_id: str, **_: Any) -> HaloReviewVerdict:
             raise RuntimeError("degenerate HALO output")
 
+        marked: list[dict[str, Any]] = []
+
+        def fake_mark_failed(trace_id: str, *, error: str, judge_model: str) -> None:
+            marked.append({"trace_id": trace_id, "error": error, "judge_model": judge_model})
+
         monkeypatch.setattr(cr, "review_trace", fail_review_trace)
+        monkeypatch.setattr(cr, "_mark_review_failed", fake_mark_failed)
         report = cr.run_continuous_rlm(
             "exp-1",
             judge_model="judge",
@@ -202,7 +216,68 @@ class TestContinuousRun:
         outcome = report.outcomes[0]
         assert outcome.status == "review_failed"
         assert outcome.token_waste_score is None
+        # The verdict fields stay empty (fail-closed: no fabricated score) and the
+        # error text is unchanged — the honest failure marker was attached out of band.
         assert "RuntimeError: degenerate HALO output" == outcome.error
+        assert marked == [
+            {
+                "trace_id": "bad",
+                "error": "RuntimeError: degenerate HALO output",
+                "judge_model": "judge",
+            }
+        ]
+
+    def test_failed_trace_is_not_reviewed_again_on_next_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A review that failed once must never be re-selected (cost runaway guard).
+
+        Proves fail-without / pass-with: run 1 selects and fails the trace; the
+        honest ``rlm_review_failed`` marker lands on it; run 2 skips it as
+        already-handled instead of burning another HALO review.
+        """
+        failing = _trace("bad", 1_000)
+        source = _FakeSource([failing])
+
+        reviewed: list[str] = []
+
+        def fail_review_trace(trace_id: str, **_: Any) -> HaloReviewVerdict:
+            reviewed.append(trace_id)
+            raise RuntimeError("degenerate HALO output")
+
+        def fake_mark_failed(trace_id: str, *, error: str, judge_model: str) -> None:
+            # Simulate the real attach landing on the subject trace's assessments so
+            # the next read sees it exactly as MLflow would surface it.
+            failing.raw.info.assessments.append(_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME))
+
+        monkeypatch.setattr(cr, "review_trace", fail_review_trace)
+        monkeypatch.setattr(cr, "_mark_review_failed", fake_mark_failed)
+
+        run1 = cr.run_continuous_rlm(
+            "exp-1",
+            judge_model="judge",
+            source=source,
+            max_reviews=1,
+            sample_rate=1.0,
+            min_tokens=0,
+        )
+        assert reviewed == ["bad"]
+        assert run1.n_failed == 1
+        assert cr.has_rlm_assessment(failing)  # marker now present
+
+        run2 = cr.run_continuous_rlm(
+            "exp-1",
+            judge_model="judge",
+            source=source,
+            max_reviews=1,
+            sample_rate=1.0,
+            min_tokens=0,
+        )
+        assert reviewed == ["bad"]  # NOT reviewed a second time
+        assert run2.n_reviewed == 0
+        assert run2.n_failed == 0
+        assert run2.n_selected == 0
+        assert run2.n_already_reviewed == 1
 
     def test_sets_trace_store_warehouse_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         source = _FakeSource([])

@@ -31,11 +31,21 @@ from ail.l3.selection import TraceSelection, select_traces_to_review
 
 __all__ = [
     "ContinuousRlmRunReport",
+    "REVIEW_FAILED_FEEDBACK_NAME",
     "has_rlm_assessment",
     "sample_trace_id",
     "select_unreviewed_traces",
     "run_continuous_rlm",
 ]
+
+#: Honest, distinct marker attached to a SUBJECT trace when a HALO review raised
+#: (fail-closed: no verdict, no score written). It records ONLY that a review was
+#: *attempted here and did not complete* — it is not a fabricated verdict and
+#: carries no quality score. The idempotency guard treats it as "already handled"
+#: so a permanently-failing trace is not re-sampled and re-reviewed on every
+#: table_update firing (which would burn HALO cost until it aged out of the scan
+#: window). Shares the ``rlm_`` prefix so it also reads as RLM-owned feedback.
+REVIEW_FAILED_FEEDBACK_NAME = "rlm_review_failed"
 
 
 @dataclass(slots=True)
@@ -217,12 +227,27 @@ def run_continuous_rlm(
                 **extra,  # type: ignore[arg-type]
             )
         except Exception as exc:  # noqa: BLE001 - one trace must not kill the run
+            error = f"{type(exc).__name__}: {exc}"
+            marker_note = ""
+            if attach:
+                # Attach the honest failure marker so this trace is skipped on later
+                # firings. If even the marker attach fails, degrade to the prior
+                # behavior (it may be retried next run) rather than killing the run.
+                try:
+                    _mark_review_failed(
+                        selection.trace_id, error=error, judge_model=judge_model
+                    )
+                except Exception as mark_exc:  # noqa: BLE001
+                    marker_note = (
+                        f" (failure-marker attach failed: "
+                        f"{type(mark_exc).__name__}: {mark_exc})"
+                    )
             outcomes.append(
                 TraceReviewOutcome(
                     trace_id=selection.trace_id,
                     status="review_failed",
                     total_tokens=selection.total_tokens,
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=f"{error}{marker_note}",
                 )
             )
             continue
@@ -257,8 +282,41 @@ def run_continuous_rlm(
 
 
 def _is_rlm_assessment_name(name: str) -> bool:
-    return name in {OVERALL_FEEDBACK_NAME, ASSETS_FEEDBACK_NAME} or name.startswith(
-        GUIDELINE_FEEDBACK_PREFIX
+    # REVIEW_FAILED_FEEDBACK_NAME is listed explicitly (belt-and-suspenders) even
+    # though it already matches the GUIDELINE_FEEDBACK_PREFIX check, so the
+    # failed-review skip survives a future change to that prefix.
+    return name in {
+        OVERALL_FEEDBACK_NAME,
+        ASSETS_FEEDBACK_NAME,
+        REVIEW_FAILED_FEEDBACK_NAME,
+    } or name.startswith(GUIDELINE_FEEDBACK_PREFIX)
+
+
+def _mark_review_failed(trace_id: str, *, error: str, judge_model: str) -> None:
+    """Attach the honest "review attempted and failed" marker to a subject trace.
+
+    Mirrors the reviewer's ``mlflow.log_feedback`` attach seam, but writes a
+    ``CODE``-sourced boolean (``rlm_review_failed = True``) with the error text as
+    the rationale — deliberately *not* an ``LLM_JUDGE`` verdict and with no quality
+    score. Its only job is to make :func:`has_rlm_assessment` skip this trace on
+    later firings so a failing review is not retried unboundedly.
+    """
+    import mlflow
+    from mlflow.entities import AssessmentSource, AssessmentSourceType
+
+    mlflow.log_feedback(
+        trace_id=trace_id,
+        name=REVIEW_FAILED_FEEDBACK_NAME,
+        value=True,
+        source=AssessmentSource(
+            source_type=AssessmentSourceType.CODE,
+            source_id="ail.l3.continuous",
+        ),
+        rationale=error,
+        metadata={
+            "ail.l3.marker": "review_failed",
+            "ail.l3.judge_model": judge_model,
+        },
     )
 
 
