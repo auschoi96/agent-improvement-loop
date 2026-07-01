@@ -178,6 +178,23 @@ export interface JobTriggerBridgeOptions {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+function parseApplyJobId(raw: string | undefined): { jobId?: number; error?: string } {
+  if (raw === undefined) {
+    return {};
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return {};
+  }
+  const jobId = Number(trimmed);
+  if (!Number.isFinite(jobId)) {
+    return {
+      error: `AIL_APPLY_JOB_ID is invalid — expected a numeric job id, got ${JSON.stringify(raw)}`,
+    };
+  }
+  return { jobId };
+}
+
 // Render a value as a safe SQL string literal (double single-quotes). proposal_id /
 // decided_at are server-controlled, but the read must not be injectable regardless.
 function sqlLit(value: string): string {
@@ -236,7 +253,8 @@ async function readResultJson(
 }
 
 export function jobTriggerApplyBridge(options: JobTriggerBridgeOptions = {}): ApplyBridge {
-  const jobId = options.jobId ?? (process.env.AIL_APPLY_JOB_ID ? Number(process.env.AIL_APPLY_JOB_ID) : undefined);
+  const parsedJobId = parseApplyJobId(process.env.AIL_APPLY_JOB_ID);
+  const jobId = options.jobId ?? parsedJobId.jobId;
   const warehouseId = options.warehouseId ?? process.env.DATABRICKS_WAREHOUSE_ID;
   const catalog = options.catalog ?? process.env.AIL_APPLY_CATALOG ?? DEFAULT_APPLY_CATALOG;
   const schema = options.schema ?? process.env.AIL_APPLY_SCHEMA ?? DEFAULT_APPLY_SCHEMA;
@@ -247,6 +265,9 @@ export function jobTriggerApplyBridge(options: JobTriggerBridgeOptions = {}): Ap
   const clientFactory = options.clientFactory ?? (() => adaptWorkspaceClient(new WorkspaceClient({})));
 
   return async (input: DecisionInput): Promise<BridgeResult> => {
+    if (options.jobId === undefined && parsedJobId.error) {
+      throw new Error(parsedJobId.error);
+    }
     if (jobId === undefined || Number.isNaN(jobId)) {
       throw new Error('AIL_APPLY_JOB_ID is not set — cannot trigger the apply job (deployed transport)');
     }
