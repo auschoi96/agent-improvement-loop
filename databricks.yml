@@ -20,6 +20,14 @@ variables:
   warehouse_id:
     description: SQL warehouse id used to create + (atomically) populate the L0 UC Delta tables.
     default: 7d1d3dbb3ba65f2a
+  trace_store_table:
+    description: >-
+      UC Delta table where MLflow traces land for experiment_id. Continuous RLM
+      uses a Databricks Jobs table_update trigger on this table. Workspace-specific
+      with no safe default, so it is intentionally empty: a deploy MUST set it (e.g.
+      --var trace_store_table=catalog.mlflow_traces.cc_<experiment>) and fails loud
+      otherwise, rather than silently triggering on some other workspace's table.
+    default: ''
   catalog:
     description: Unity Catalog catalog that holds the L0 tables.
     default: austin_choi_omni_agent_catalog
@@ -37,6 +45,27 @@ variables:
   schedule_pause_status:
     description: UNPAUSED (schedule is live — the living-dashboard default) or PAUSED.
     default: UNPAUSED
+  rlm_trigger_pause_status:
+    description: UNPAUSED (continuous RLM trace-arrival trigger is live) or PAUSED.
+    default: UNPAUSED
+  rlm_judge_model:
+    description: Databricks FMAPI serving endpoint used by HALO for continuous RLM reviews.
+    default: databricks-claude-sonnet-4-6
+  rlm_sample_rate:
+    description: Deterministic trace-id sample rate for continuous RLM review.
+    default: '0.10'
+  rlm_max_reviews_per_run:
+    description: Hard cap on HALO reviews performed by one trigger firing.
+    default: '2'
+  rlm_min_tokens:
+    description: Token floor for continuous RLM candidates; set 0 to allow small traces.
+    default: '50000'
+  rlm_max_results:
+    description: Max recent traces scanned per trigger firing before idempotency/sampling.
+    default: '100'
+  rlm_max_turns:
+    description: HALO max turns per agent arm for continuous RLM reviews.
+    default: '40'
   token_secret_scope:
     description: >-
       Optional Databricks secret scope holding the run-as bearer token for the
