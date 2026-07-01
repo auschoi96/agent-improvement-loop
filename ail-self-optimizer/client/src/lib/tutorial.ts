@@ -226,23 +226,35 @@ export interface ReadinessGateLine {
   loaded: boolean;
 }
 
+// Render a fraction as a percentage WITHOUT changing its magnitude: scale by 100 (the
+// intrinsic fraction→percent factor) and strip only floating-point representation
+// noise + trailing zeros. 0.6 → "60", 0.425 → "42.5" — never rounded to a value the
+// engine did not supply. The fixed decimal count below only cleans float artifacts
+// (e.g. 0.333*100 = 33.300000000000004), it does not touch a real threshold digit.
+function formatPercent(value: number): string {
+  return (value * 100).toFixed(10).replace(/\.?0+$/, '');
+}
+
 // Format a Python-sourced threshold value into the requirement phrase. The NUMBER is
 // the Python value rendered verbatim; the surrounding words ("≥", the unit noun, the
-// "%" for a fraction) are explanatory scaffold. The percentage is a display-only
-// transform of the fraction (matching the Python `_gate_phrase` presentation) — the
-// value is not branched-on by magnitude, only formatted.
+// "%" for a fraction) are explanatory scaffold. The percentage is a magnitude-
+// preserving display transform of the fraction (matching the Python `_gate_phrase`
+// presentation) — the value is not rounded or branched-on by magnitude, only formatted.
 function formatRequirement(gate: ReadinessGate, value: number): string {
-  if (gate.asPercent) return `≥ ${Math.round(value * 100)}%`;
+  if (gate.asPercent) return `≥ ${formatPercent(value)}%`;
   return `≥ ${value}${gate.unit ? ` ${gate.unit}` : ''}`;
 }
 
-// Build the readiness-gate rows for the tutorial. When `thresholds` is null (not yet
-// loaded, or the fetch failed) every row shows the neutral placeholder — never an
-// invented number. This is the ONLY place the tutorial surfaces a threshold number,
-// and it reads each one from the Python `thresholds` object by field name.
+// Build the readiness-gate rows for the tutorial. This is the ONLY place the tutorial
+// surfaces a threshold number, and it reads each one from the Python `thresholds`
+// object by field name. Fail-closed PER GATE: if `thresholds` is absent, or a
+// specific gate's field is missing / not a finite number (a partial or malformed
+// engine response), that gate shows the neutral placeholder — never NaN, undefined,
+// or an invented number — while any well-formed gates still render their real value.
 export function readinessGateLines(thresholds: Thresholds | null): ReadinessGateLine[] {
   return READINESS_GATES.map((gate) => {
-    if (!thresholds) {
+    const value = thresholds ? thresholds[gate.field] : undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
       return {
         key: gate.key,
         title: gate.title,
@@ -255,7 +267,7 @@ export function readinessGateLines(thresholds: Thresholds | null): ReadinessGate
       key: gate.key,
       title: gate.title,
       unlocks: gate.unlocks,
-      requirement: formatRequirement(gate, thresholds[gate.field]),
+      requirement: formatRequirement(gate, value),
       loaded: true,
     };
   });

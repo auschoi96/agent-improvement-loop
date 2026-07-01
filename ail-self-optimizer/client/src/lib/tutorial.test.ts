@@ -14,10 +14,11 @@ import {
 } from './tutorial';
 import type { RequirementsResponse, Thresholds } from './onboarding';
 
-// DISTINCTIVE SENTINEL thresholds — deliberately NONE of the real code-enforced
-// defaults (baseline 10 / prove 50 / labels 20 / coverage 0.5). If any gate number
-// were hardcoded in TypeScript instead of read from this input, these sentinels
-// could not appear in the output (and the "no default leaked" assertion would fail).
+// DISTINCTIVE SENTINEL thresholds — arbitrary values chosen not to coincide with the
+// engine's real floors. The equality assertions below prove each rendered requirement
+// is EXACTLY the supplied Python value (two-tier: no threshold magnitude is authored
+// in TS), so any hardcoded number would make them fail. We intentionally do not
+// restate the real defaults anywhere in this file.
 const SENTINEL: Thresholds = {
   baseline_min_traces: 7,
   prove_min_traces: 33,
@@ -86,15 +87,31 @@ describe('readinessGateLines — TWO-TIER: every threshold is the Python value, 
     expect(lines.every((l) => l.loaded)).toBe(true);
   });
 
-  it('never leaks a hardcoded default — only the supplied sentinels appear', () => {
-    const rendered = readinessGateLines(SENTINEL)
-      .map((l) => l.requirement)
-      .join(' | ');
-    // The real defaults (10 / 20 / 50) must NOT appear when sentinels are supplied;
-    // their presence would prove a number was authored in TS rather than read from Python.
-    expect(rendered).not.toMatch(/\b10\b/);
-    expect(rendered).not.toMatch(/\b20\b/);
-    expect(rendered).not.toMatch(/\b50\b/);
+  it('renders the coverage floor verbatim as a percentage — never rounding to an unsupplied value', () => {
+    // A clean round fraction strips its trailing ".0" (0.6 → 60%, not "60.0%").
+    const round = readinessGateLines({ ...SENTINEL, scored_coverage_floor: 0.6 });
+    expect(round.find((l) => l.key === 'coverage')?.requirement).toBe('≥ 60%');
+    // A NON-round floor must keep its exact magnitude: 0.425 → 42.5%, NOT rounded to 43%.
+    const nonRound = readinessGateLines({ ...SENTINEL, scored_coverage_floor: 0.425 });
+    expect(nonRound.find((l) => l.key === 'coverage')?.requirement).toBe('≥ 42.5%');
+  });
+
+  it('falls closed PER GATE when a threshold field is missing or non-finite — others still render', () => {
+    // A partial/malformed thresholds object: one field missing, one NaN.
+    const partial = {
+      ...SENTINEL,
+      prove_min_traces: undefined as unknown as number,
+      scored_coverage_floor: NaN,
+    };
+    const by = Object.fromEntries(readinessGateLines(partial).map((l) => [l.key, l]));
+    // The bad gates show the neutral placeholder, never "undefined"/"NaN%".
+    expect(by.prove.requirement).toBe(THRESHOLD_PLACEHOLDER);
+    expect(by.prove.loaded).toBe(false);
+    expect(by.coverage.requirement).toBe(THRESHOLD_PLACEHOLDER);
+    expect(by.coverage.loaded).toBe(false);
+    // The well-formed gates still render their real (sentinel) values.
+    expect(by.baseline.requirement).toBe('≥ 7 traces');
+    expect(by.labels.requirement).toBe('≥ 88 human labels');
   });
 
   it('falls closed to a neutral placeholder when thresholds are not loaded — never a number', () => {
