@@ -1,6 +1,13 @@
 @import '@databricks/appkit-ui/styles.css';
 
 :root {
+  /* Brand accent — the product's signature cyan. Single source of truth for the
+     accent used by charts (mirrored as BRAND_ACCENT in lib/theme.ts for Recharts,
+     which needs a concrete color) and by shell chrome via var(--brand). Everything
+     else (background/foreground/sidebar/primary/…) comes from AppKit's OKLCH tokens
+     in @databricks/appkit-ui/styles.css, so light/dark theming stays consistent. */
+  --brand: #40d1f5;
+
   /* --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
