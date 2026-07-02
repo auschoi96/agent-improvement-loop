@@ -83,6 +83,7 @@ __all__ = [
     "SnapshotWriteError",
     "RestoreError",
     "RestoreRollbackError",
+    "RestoreCleanupError",
     "FileSnapshot",
     "SnapshotRef",
     "VolumeClient",
@@ -151,6 +152,17 @@ class RestoreRollbackError(RestoreError):
     automatic rollback of already-swapped files then failed too. The message names
     exactly which files hold restored (new) / rolled-back / original content, so the
     inconsistency is never silent and a human/audit can reconcile the exact state.
+    """
+
+
+class RestoreCleanupError(RestoreError):
+    """A pre-swap failure's own cleanup could **not** fully undo itself — artifacts remain.
+
+    Raised when staging (or the pre-swap capture / a fully-rolled-back swap) failed and
+    the subsequent cleanup could not remove a temp file or a directory this restore
+    created, so the local tree is **not** byte-for-byte unchanged. The message names the
+    exact leaked temp files / lingering directories, so the framework never claims
+    "nothing written back" while something remains on disk.
     """
 
 
@@ -395,7 +407,9 @@ def _write_back(verified: list[tuple[str, bytes]]) -> None:
     * **Stage** every file to a sibling temp, tracking every temp *and* every directory
       newly created along the way. If any staging step fails, all created temps are
       unlinked and all newly-created (now-empty) directories removed, so the local tree
-      is left byte-for-byte identical to before — a staging failure writes *nothing*.
+      is left byte-for-byte identical to before — a staging failure writes *nothing*. If
+      that cleanup itself cannot remove an artifact, raise :class:`RestoreCleanupError`
+      naming what remains — never claim "nothing written back" while a temp/dir lingers.
     * **Swap.** Capture the pre-restore bytes of every target first, then ``os.replace``
       each temp into place. If a replace fails mid-loop, roll the already-swapped files
       back to the captured state (restoring prior bytes, or removing a file that did not
@@ -420,9 +434,15 @@ def _write_back(verified: list[tuple[str, bytes]]) -> None:
                 handle.write(data)
             staged.append((tmp, target_str))
     except OSError as exc:
-        for tmp in created_temps:
-            _silent_unlink(tmp)
-        _rmdir_created(created_dirs)
+        # Cleanup must be honest: if a temp or a dir we created can't be removed, an
+        # artifact REMAINS — never claim "nothing written back" while it lingers.
+        remaining_temps, remaining_dirs = _cleanup_staging(created_temps, created_dirs)
+        if remaining_temps or remaining_dirs:
+            raise RestoreCleanupError(
+                _cleanup_failure_message(
+                    cause=exc, remaining_temps=remaining_temps, remaining_dirs=remaining_dirs
+                )
+            ) from exc
         raise RestoreError(f"failed to stage restored files (nothing written back): {exc}") from exc
 
     # --- Capture pre-restore state so a mid-swap failure can roll back ---
@@ -432,9 +452,13 @@ def _write_back(verified: list[tuple[str, bytes]]) -> None:
         try:
             prior[target_str] = target.read_bytes() if target.is_file() else None
         except OSError as exc:
-            for tmp, _ in staged:
-                _silent_unlink(tmp)
-            _rmdir_created(created_dirs)
+            remaining_temps, remaining_dirs = _cleanup_staging(created_temps, created_dirs)
+            if remaining_temps or remaining_dirs:
+                raise RestoreCleanupError(
+                    _cleanup_failure_message(
+                        cause=exc, remaining_temps=remaining_temps, remaining_dirs=remaining_dirs
+                    )
+                ) from exc
             raise RestoreError(
                 f"cannot read current bytes of {target_str!r} to guarantee safe rollback; "
                 f"nothing written back: {exc}"
@@ -447,8 +471,7 @@ def _write_back(verified: list[tuple[str, bytes]]) -> None:
             os.replace(tmp, target_str)
         except OSError as exc:
             # Temps not yet swapped are orphaned; their targets are untouched originals.
-            for leftover_tmp, _ in staged[idx:]:
-                _silent_unlink(leftover_tmp)
+            leftover_temp_failures = _remove_temps([t for t, _ in staged[idx:]])
             rolled_back, still_restored = _rollback(replaced, prior)
             if still_restored:
                 raise RestoreRollbackError(
@@ -460,8 +483,18 @@ def _write_back(verified: list[tuple[str, bytes]]) -> None:
                         untouched=[t for _t, t in staged if t not in replaced],
                     )
                 ) from exc
-            # Full rollback succeeded — drop any now-empty directories we created.
-            _rmdir_created(created_dirs)
+            # Full rollback succeeded — drop any now-empty directories we created. If a
+            # created dir or a leftover temp can't be removed, an artifact remains, so
+            # the "rolled back to pre-restore state" claim would be a lie: fail loud.
+            remaining_dirs = _remove_created_dirs(created_dirs)
+            if leftover_temp_failures or remaining_dirs:
+                raise RestoreCleanupError(
+                    _cleanup_failure_message(
+                        cause=exc,
+                        remaining_temps=leftover_temp_failures,
+                        remaining_dirs=remaining_dirs,
+                    )
+                ) from exc
             raise RestoreError(
                 "restore aborted; local tree rolled back to pre-restore state "
                 f"(os.replace of {target_str!r} failed): {type(exc).__name__}: {exc}"
@@ -473,8 +506,8 @@ def _make_missing_dirs(directory: Path, created: list[Path]) -> None:
     """Create ``directory`` (and missing ancestors), appending each created dir to ``created``.
 
     Only directories that did **not** already exist are created and tracked, so a
-    caller can later remove exactly what it made (via :func:`_rmdir_created`) without
-    touching pre-existing directories. Directories are created shallowest-first and
+    caller can later remove exactly what it made (via :func:`_remove_created_dirs`)
+    without touching pre-existing directories. Directories are created shallowest-first and
     appended as they are made, so a mid-way failure still leaves the ones already
     created tracked for cleanup.
     """
@@ -490,13 +523,67 @@ def _make_missing_dirs(directory: Path, created: list[Path]) -> None:
         created.append(made)
 
 
-def _rmdir_created(created_dirs: list[Path]) -> None:
-    """Remove directories we created, deepest-first; skip any that are not empty."""
+def _remove_temps(temps: list[str]) -> list[str]:
+    """Unlink staged temp files; return the paths that could **not** be removed.
+
+    A temp already gone (``FileNotFoundError`` — e.g. consumed by ``os.replace``) is not
+    a leak and is skipped; any other ``OSError`` means the temp remains, so it is
+    reported so the caller can fail loud instead of silently swallowing it.
+    """
+    remaining: list[str] = []
+    for tmp in temps:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            remaining.append(tmp)
+    return remaining
+
+
+def _remove_created_dirs(created_dirs: list[Path]) -> list[Path]:
+    """Remove directories we created, deepest-first; return those that could **not** be removed.
+
+    A directory already gone is not a lingering artifact and is skipped; any other
+    ``OSError`` (e.g. not empty, or no permission) means it remains, so it is reported.
+    """
+    remaining: list[Path] = []
     for directory in sorted(set(created_dirs), key=lambda d: len(d.parts), reverse=True):
         try:
             directory.rmdir()
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError:
+            remaining.append(directory)
+    return remaining
+
+
+def _cleanup_staging(
+    created_temps: list[str], created_dirs: list[Path]
+) -> tuple[list[str], list[Path]]:
+    """Undo staging artifacts (temps first, then the dirs they lived in).
+
+    Returns ``(remaining_temps, remaining_dirs)`` — the artifacts that could not be
+    removed and therefore REMAIN on disk. Temps are removed first so a created dir that
+    only held staged temps becomes empty and removable.
+    """
+    remaining_temps = _remove_temps(created_temps)
+    remaining_dirs = _remove_created_dirs(created_dirs)
+    return remaining_temps, remaining_dirs
+
+
+def _cleanup_failure_message(
+    *, cause: OSError, remaining_temps: list[str], remaining_dirs: list[Path]
+) -> str:
+    """Build the loud message for a cleanup that could not fully undo itself."""
+    return (
+        "restore aborted before any swap, but its own cleanup could NOT fully undo itself "
+        "— artifacts REMAIN on disk and need manual removal; the local tree is NOT "
+        f"byte-for-byte unchanged. Triggering cause ({type(cause).__name__}: {cause}). "
+        f"Leaked temp files: {sorted(remaining_temps)}. "
+        f"Directories this restore created but could not remove: "
+        f"{sorted(str(d) for d in remaining_dirs)}."
+    )
 
 
 def _rollback(replaced: list[str], prior: dict[str, bytes | None]) -> tuple[list[str], list[str]]:

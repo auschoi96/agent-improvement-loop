@@ -78,7 +78,10 @@ complete.
   written back**; a missing or corrupt object raises `RestoreError` and the local
   tree is left untouched. The verified bytes are then **staged reversibly** (a staging
   failure removes its temps *and* any newly-created directories, leaving the tree
-  byte-for-byte unchanged), then swapped in with `os.replace`. True cross-file
+  byte-for-byte unchanged — and if that cleanup itself cannot remove an artifact, a
+  distinct, loud `RestoreCleanupError` names the leaked temp / lingering directory
+  rather than falsely claiming "nothing written back"), then swapped in with
+  `os.replace`. True cross-file
   atomicity of N renames is not physically guaranteed on POSIX, so the swap is made
   **recoverable**: the pre-restore bytes of every target are captured first, and if an
   `os.replace` fails mid-swap the already-swapped files are rolled back to that state
