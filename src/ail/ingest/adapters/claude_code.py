@@ -201,7 +201,9 @@ class ClaudeCodeAdapter(AgentAdapter):
                     "preview requested Claude SDK filesystem sandboxing for "
                     f"{filesystem_sandbox_dir!r}, but the task cwd resolves to {task_cwd!r}"
                 )
-            allowed_tools = _scope_write_tools_to_sandbox(allowed_tools or [], filesystem_sandbox_dir)
+            allowed_tools = _scope_write_tools_to_sandbox(
+                allowed_tools or [], filesystem_sandbox_dir
+            )
 
         env = _agent_env()
         if task.model:
@@ -505,9 +507,7 @@ def _required_filesystem_sandbox_dir(task: AgentTask) -> str | None:
     if raw is None:
         return None
     if not isinstance(raw, dict) or raw.get("required") is not True:
-        raise ValueError(
-            f"{_FILESYSTEM_SANDBOX_PARAM} must be a dict with required=True"
-        )
+        raise ValueError(f"{_FILESYSTEM_SANDBOX_PARAM} must be a dict with required=True")
     sandbox_dir = raw.get("sandbox_dir")
     if not isinstance(sandbox_dir, str) or not sandbox_dir.strip():
         raise ValueError(f"{_FILESYSTEM_SANDBOX_PARAM}.sandbox_dir is required")

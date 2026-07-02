@@ -649,7 +649,9 @@ def _preview_allowed_tools(allowed_tools: list[str] | None, sandbox_real: str) -
     Write-capable built-ins therefore get path-scoped rules; Bash is allowed only
     because the SDK's native command sandbox confines its filesystem effects.
     """
-    tools = list(allowed_tools) if allowed_tools is not None else list(_PREVIEW_DEFAULT_ALLOWED_TOOLS)
+    tools = (
+        list(allowed_tools) if allowed_tools is not None else list(_PREVIEW_DEFAULT_ALLOWED_TOOLS)
+    )
     scoped: list[str] = []
     for tool in tools:
         name = tool.split("(", 1)[0]
