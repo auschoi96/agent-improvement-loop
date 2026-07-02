@@ -55,6 +55,21 @@ from ail.judges.authoring import (
     normalize_judge_name,
     refine_criteria,
 )
+from ail.judges.auto_align import (
+    AUTOALIGN_TAG_PREFIX,
+    DEFAULT_LABEL_FLOOR,
+    AutoAlignConfig,
+    AutoAlignReport,
+    AutoAlignState,
+    AutoAlignStatus,
+    ExperimentTagWatermarkStore,
+    JudgeAutoAlignResult,
+    WatermarkReadError,
+    WatermarkStore,
+    auto_align_judge,
+    auto_align_scorers,
+    read_human_labels,
+)
 from ail.judges.contract import (
     SCHEMA_VERSION,
     AgreementItem,
@@ -81,6 +96,7 @@ from ail.judges.registration import (
     ScorerRegistration,
     create_aligned_scorer,
     list_registered_scorers,
+    register_prealigned_scorer,
     register_scorers,
     unregister_scorers,
 )
@@ -182,7 +198,22 @@ __all__ = [
     "ALIGNED_TAG_PREFIX",
     "ScorerRegistration",
     "create_aligned_scorer",
+    "register_prealigned_scorer",
     "register_scorers",
     "list_registered_scorers",
     "unregister_scorers",
+    # auto-align trigger (floor + watermark gating, agreement guard, rollback)
+    "DEFAULT_LABEL_FLOOR",
+    "AUTOALIGN_TAG_PREFIX",
+    "AutoAlignConfig",
+    "AutoAlignState",
+    "AutoAlignStatus",
+    "JudgeAutoAlignResult",
+    "AutoAlignReport",
+    "WatermarkStore",
+    "WatermarkReadError",
+    "ExperimentTagWatermarkStore",
+    "read_human_labels",
+    "auto_align_judge",
+    "auto_align_scorers",
 ]

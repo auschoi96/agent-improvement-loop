@@ -66,6 +66,7 @@ __all__ = [
     "ALIGNED_TAG_PREFIX",
     "ScorerRegistration",
     "create_aligned_scorer",
+    "register_prealigned_scorer",
     "register_scorers",
     "list_registered_scorers",
     "unregister_scorers",
@@ -252,6 +253,55 @@ def create_aligned_scorer(
     return ScorerRegistration(
         scorer=scorer, judge=judge_to_register, aligned=report.aligned, report=report
     )
+
+
+def register_prealigned_scorer(
+    judge: Scorer,
+    report: AlignmentReport,
+    *,
+    experiment_id: str,
+    sampling_rate: float = DEFAULT_SAMPLING_RATE,
+    filter_string: str | None = None,
+    profile: str | None = None,
+    tracking_uri: str = "databricks",
+    registry_uri: str = "databricks-uc",
+) -> ScorerRegistration:
+    """Register an **already-aligned** judge, skipping the align step.
+
+    The measure-before-register companion to :func:`create_aligned_scorer`. That
+    function aligns *and* registers in one call, so a caller cannot inspect the
+    aligned judge before it goes live. The auto-align trigger
+    (:mod:`ail.judges.auto_align`) must: align a judge, measure its held-out
+    agreement, and register **only** when it passes the floor and does not
+    regress — and it must register *that exact judge*, so the judge whose
+    agreement was measured is the judge that goes live (the honest basis for the
+    fail-closed rollback). Re-aligning through :func:`create_aligned_scorer` would
+    run MemAlign a second time and register a *different* judge than the one
+    measured, breaking that guarantee (and paying for a second reflection pass).
+
+    This reuses the same backend guard, Databricks config, register/start, and
+    alignment tag as :func:`create_aligned_scorer`; it only omits the alignment.
+    ``report`` is the :class:`~ail.judges.contract.AlignmentReport` for the judge
+    already produced by :func:`ail.judges.alignment.align_judge`, carried through
+    onto the returned registration.
+
+    Raises:
+        ValueError: If ``sampling_rate`` is not in ``(0, 1]``.
+        ImportError: If ``databricks-agents`` is not installed.
+    """
+    _require_databricks_agents()
+    if not 0.0 < sampling_rate <= 1.0:
+        raise ValueError(f"sampling_rate must be in (0, 1], got {sampling_rate!r}")
+    _configure_databricks(profile=profile, tracking_uri=tracking_uri, registry_uri=registry_uri)
+
+    scorer = _register_and_start(
+        judge,
+        experiment_id=experiment_id,
+        sampling_rate=sampling_rate,
+        filter_string=filter_string,
+    )
+    _tag_alignment(experiment_id, report.base_judge_name, report.aligned)
+    return ScorerRegistration(scorer=scorer, judge=judge, aligned=report.aligned, report=report)
 
 
 def _register_and_start(

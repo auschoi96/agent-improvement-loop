@@ -384,6 +384,20 @@ not-yet-trusted until labels exist. This is the authoritative `aligned` flag the
 loop reads (the experiment tag `ail.judge.<name>.aligned` is its best-effort,
 queryable companion).
 
+## Auto-align trigger — `ail.judges.auto_align`
+
+The pieces above are *driven* by the **auto-align trigger** — a scheduled
+Databricks job (`ail-auto-align`) that, per judged dimension, aligns the judge
+with MemAlign once enough human labels exist, re-aligns as more accrue, guards
+trust with the agreement floor, and rolls back a regression. It turns "a human
+adds labels" into "the judge becomes trusted automatically" — orchestration only,
+reusing `labeling` / `alignment` / `agreement` / `registration` unchanged. It
+registers the aligned judge with `register_prealigned_scorer` (register the exact
+judge whose held-out agreement was measured, without re-running MemAlign), so a
+rolled-back candidate is simply never promoted and the prior aligned version stays
+live. See **`docs/AUTO_ALIGN.md`** for the full decision, the per-judge watermark,
+and the bundle knobs.
+
 ## Resolved MLflow version
 
 Built and verified against **MLflow `3.14.0`** (satisfies the `mlflow>=3.14,<4`

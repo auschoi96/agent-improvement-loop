@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from ail.judges import registration as reg
+from ail.judges.contract import AlignmentReport
 from ail.judges.scorers import TOKEN_EFFICIENCY
 from ail.pools import AlignmentSet
 
@@ -230,6 +231,50 @@ class TestCreateAlignedScorer:
     def test_rejects_out_of_range_sampling_rate(self, backend: dict[str, Any]) -> None:
         with pytest.raises(ValueError, match="sampling_rate"):
             reg.create_aligned_scorer(TOKEN_EFFICIENCY, experiment_id="exp1", sampling_rate=1.5)
+
+
+class TestRegisterPrealignedScorer:
+    """Register an already-aligned judge without re-running MemAlign (auto-align path)."""
+
+    @pytest.fixture
+    def offline(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, bool]]:
+        monkeypatch.setattr(reg, "_require_databricks_agents", lambda: None)
+        monkeypatch.setattr(reg, "_configure_databricks", lambda **kw: None)
+        tags: list[tuple[str, str, bool]] = []
+        monkeypatch.setattr(
+            reg,
+            "_tag_alignment",
+            lambda experiment_id, name, aligned: (
+                tags.append((experiment_id, name, aligned)) or True
+            ),
+        )
+        return tags
+
+    def test_registers_the_given_judge_without_aligning(
+        self, offline: list[tuple[str, str, bool]]
+    ) -> None:
+        # The judge is ALREADY aligned; register must not call .align on it.
+        aligned = _FakeAlignableScorer("token_efficiency+aligned")
+        report = AlignmentReport(
+            base_judge_name="token_efficiency", n_alignment_traces=14, aligned=True
+        )
+        result = reg.register_prealigned_scorer(
+            aligned, report, experiment_id="exp1", sampling_rate=0.25
+        )
+        assert aligned.align_calls == []  # NOT re-aligned
+        # Registered then started, and the SAME measured judge is carried through.
+        assert [c[0] for c in aligned.calls] == ["register", "start"]
+        assert result.aligned is True
+        assert result.report is report
+        assert result.scorer.sample_rate == 0.25
+        assert offline[-1] == ("exp1", "token_efficiency", True)
+
+    def test_rejects_out_of_range_sampling_rate(self, offline: list[tuple[str, str, bool]]) -> None:
+        report = AlignmentReport(base_judge_name="token_efficiency", aligned=True)
+        with pytest.raises(ValueError, match="sampling_rate"):
+            reg.register_prealigned_scorer(
+                _FakeAlignableScorer("j"), report, experiment_id="exp1", sampling_rate=0.0
+            )
 
 
 class TestRequireDatabricksAgents:
