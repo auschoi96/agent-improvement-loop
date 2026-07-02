@@ -107,6 +107,40 @@ An independent cross-review found five safety issues; each is fixed and tested
    `test_mark_committed_zero_rows_fails_closed`,
    `test_commit_zero_row_status_mark_is_committed_but_unrecorded`).
 
+## Preview writes are confined by the Claude Agent SDK's native filesystem sandbox
+
+The preview agent in `produce_preview` runs with edit + Bash tools, so symlink-neutralization
+(BLOCKER 1) alone cannot stop an *absolute-path* write escaping the sandbox copy during a
+preview that must be side-effect-free. The preview therefore also runs under the Claude Agent
+SDK's **own native filesystem sandbox**: `ClaudeAgentOptions(sandbox=…)` scopes the agent's
+writes to the sandbox copy directory (write tools allowed only under `{sandbox}/**`,
+`permission_mode="dontAsk"`), so the agent cannot write outside the copy regardless of the path
+form it attempts.
+
+This is **fail-closed**: the adapter validates that the installed `claude-agent-sdk` actually
+exposes the native sandbox option, and if it does not, `produce_preview` refuses to run and
+returns an ERROR result ("refusing to run unsandboxed") rather than silently running an
+unsandboxed preview. Symlink-neutralization (BLOCKER 1) remains in place as defense-in-depth.
+Covered by `test_preview_sdk_sandbox_blocks_absolute_write_outside`.
+
+## Known residuals & trust model
+
+The preview escape above is closed; what remains below is the commit/revert path. B2/B3 close the concrete symlink-parent escape and pure-add revert bugs, but they do not
+turn the local filesystem into an adversarially safe object store. `commit_approved` and
+`revert_committed_change` validate target containment before writing/deleting; a malicious
+process on the same host with write access to the target workspace could still race that
+validation by swapping a path component between the check and the filesystem operation
+(classic filesystem TOCTOU). That residual is accepted for L7b-2 under the
+**trusted-companion-host** model: the executor runs as the deployer on a local workspace
+the deployer controls, not on an untrusted multi-tenant checkout.
+
+A future hardening pass belongs in the L6 versioning layer, where all restore/delete
+filesystem primitives can share it: open parent directories by fd, walk path components
+with no-follow semantics, and use `O_NOFOLLOW` / dir-fd operations where the platform
+supports them. Until that exists, the executor's contract is containment-checked and
+fail-closed against stale/tampered manifests and existing symlink escapes, but not
+resistant to same-host malicious races.
+
 ## Injectable seams (so everything is offline-testable)
 
 `produce_preview` / `commit_approved` take their side-effects as seams, so the module
