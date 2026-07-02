@@ -28,7 +28,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -70,6 +70,7 @@ _INTERNAL_ENV_KEYS = frozenset(
     }
 )
 _DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep")
+_FILESYSTEM_SANDBOX_PARAM = "claude_code_filesystem_sandbox"
 
 # Grace period added on top of the task's own timeout before the worker thread
 # is abandoned. The in-stream timeout (``task.timeout_seconds``) handles the
@@ -186,6 +187,21 @@ class ClaudeCodeAdapter(AgentAdapter):
         allowed_tools = task.allowed_tools
         if allowed_tools is None and not mcp_servers:
             allowed_tools = list(self.default_allowed_tools)
+        try:
+            filesystem_sandbox_dir = _required_filesystem_sandbox_dir(task)
+        except ValueError as exc:
+            return self._sdk_sandbox_unavailable_result(str(exc))
+        if filesystem_sandbox_dir is not None:
+            reason = _sdk_filesystem_sandbox_unavailable(ClaudeAgentOptions)
+            if reason is not None:
+                return self._sdk_sandbox_unavailable_result(reason)
+            task_cwd = os.path.realpath(task.cwd or os.getcwd())
+            if task_cwd != filesystem_sandbox_dir:
+                return self._sdk_sandbox_unavailable_result(
+                    "preview requested Claude SDK filesystem sandboxing for "
+                    f"{filesystem_sandbox_dir!r}, but the task cwd resolves to {task_cwd!r}"
+                )
+            allowed_tools = _scope_write_tools_to_sandbox(allowed_tools or [], filesystem_sandbox_dir)
 
         env = _agent_env()
         if task.model:
@@ -196,17 +212,22 @@ class ClaudeCodeAdapter(AgentAdapter):
         hooks = self._build_hooks(HookMatcher)
         stderr_tail: list[str] = []
 
-        options = ClaudeAgentOptions(
-            cwd=task.cwd or os.getcwd(),
-            allowed_tools=allowed_tools,
-            permission_mode="bypassPermissions",
-            mcp_servers=mcp_servers or {},
-            system_prompt=task.system_prompt or "",
-            setting_sources=[],  # no ambient project skills; context is injected explicitly
-            env=env,
-            hooks=hooks or None,
-            stderr=lambda line: _capture_stderr(stderr_tail, line),
-        )
+        options_kwargs: dict[str, Any] = {
+            "cwd": task.cwd or os.getcwd(),
+            "allowed_tools": allowed_tools,
+            "permission_mode": (
+                "dontAsk" if filesystem_sandbox_dir is not None else "bypassPermissions"
+            ),
+            "mcp_servers": mcp_servers or {},
+            "system_prompt": task.system_prompt or "",
+            "setting_sources": [],  # no ambient project skills; context is injected explicitly
+            "env": env,
+            "hooks": hooks or None,
+            "stderr": lambda line: _capture_stderr(stderr_tail, line),
+        }
+        if filesystem_sandbox_dir is not None:
+            options_kwargs["sandbox"] = _claude_sdk_sandbox_settings(filesystem_sandbox_dir)
+        options = ClaudeAgentOptions(**options_kwargs)
 
         started = time.monotonic()
         try:
@@ -316,6 +337,20 @@ class ClaudeCodeAdapter(AgentAdapter):
             error=(
                 "claude-agent-sdk is not installed. "
                 "Install it with: pip install 'claude-agent-sdk>=0.1.39'"
+            ),
+        )
+
+    def _sdk_sandbox_unavailable_result(self, reason: str) -> AgentRunResult:
+        return AgentRunResult(
+            trace=NormalizedTrace(
+                trace_id=f"error-{uuid.uuid4().hex}",
+                status=TraceStatus.ERROR,
+                producer=self.name,
+            ),
+            success=False,
+            error=(
+                "Claude Agent SDK filesystem sandboxing is required for this preview, "
+                f"but it cannot be enabled ({reason}); refusing to run unsandboxed."
             ),
         )
 
@@ -462,6 +497,57 @@ def _capture_stderr(buffer: list[str], line: str) -> None:
     stripped = line.strip()
     if stripped:
         buffer.append(stripped)
+
+
+def _required_filesystem_sandbox_dir(task: AgentTask) -> str | None:
+    """Return the required Claude SDK filesystem sandbox dir for preview tasks."""
+    raw = task.params.get(_FILESYSTEM_SANDBOX_PARAM)
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or raw.get("required") is not True:
+        raise ValueError(
+            f"{_FILESYSTEM_SANDBOX_PARAM} must be a dict with required=True"
+        )
+    sandbox_dir = raw.get("sandbox_dir")
+    if not isinstance(sandbox_dir, str) or not sandbox_dir.strip():
+        raise ValueError(f"{_FILESYSTEM_SANDBOX_PARAM}.sandbox_dir is required")
+    return os.path.realpath(sandbox_dir)
+
+
+def _sdk_filesystem_sandbox_unavailable(options_cls: Any) -> str | None:
+    """Validate that the installed SDK exposes the native sandbox option we require."""
+    if not is_dataclass(options_cls):
+        return "ClaudeAgentOptions is not a dataclass with inspectable fields"
+    option_fields = {field.name for field in fields(options_cls)}
+    missing = {"sandbox", "permission_mode", "allowed_tools", "cwd"} - option_fields
+    if missing:
+        return "ClaudeAgentOptions is missing " + ", ".join(sorted(missing))
+    return None
+
+
+def _claude_sdk_sandbox_settings(sandbox_dir: str | None) -> dict[str, Any] | None:
+    if sandbox_dir is None:
+        return None
+    return {
+        "enabled": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+    }
+
+
+def _scope_write_tools_to_sandbox(allowed_tools: list[str], sandbox_dir: str) -> list[str]:
+    scoped: list[str] = []
+    for tool in allowed_tools:
+        name = tool.split("(", 1)[0]
+        if name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
+            rule = f"{name}({sandbox_dir}/**)"
+        elif name == "Bash":
+            rule = "Bash(*)"
+        else:
+            rule = tool
+        if rule not in scoped:
+            scoped.append(rule)
+    return scoped
 
 
 # ---------------------------------------------------------------------------

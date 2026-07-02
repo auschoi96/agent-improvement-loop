@@ -732,6 +732,48 @@ def test_preview_symlink_escape_does_not_write_outside(tmp_path: Path) -> None:
     assert secret.read_bytes() == b"SECRET"
 
 
+def test_preview_sdk_sandbox_blocks_absolute_write_outside(tmp_path: Path) -> None:
+    """B1: the preview runner receives required SDK write scoping and fails closed."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET\n")
+
+    ws = tmp_path / "workspace"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "skills" / "token.md").write_text("OLD\n")
+
+    class SandboxAwareRunner:
+        def run(self, task: AgentTask) -> AgentRunResult:
+            raw = task.params.get("claude_code_filesystem_sandbox")
+            assert isinstance(raw, dict)
+            assert raw["required"] is True
+            sandbox_dir = os.path.realpath(str(raw["sandbox_dir"]))
+            assert os.path.realpath(task.cwd or "") == sandbox_dir
+            assert task.allowed_tools is not None
+            assert f"Write({sandbox_dir}/**)" in task.allowed_tools
+
+            attempted = os.path.realpath(outside)
+            if attempted != sandbox_dir and not attempted.startswith(sandbox_dir + os.sep):
+                return AgentRunResult(
+                    trace=NormalizedTrace(trace_id="t"),
+                    success=False,
+                    error="blocked by Claude SDK filesystem sandbox",
+                )
+            outside.write_text("PWNED\n")
+            return AgentRunResult(trace=NormalizedTrace(trace_id="t"), success=True)
+
+    with pytest.raises(PreviewError, match="blocked by Claude SDK filesystem sandbox"):
+        produce_preview(
+            _agent_task_proposal(),
+            _agent(ws),
+            volume_client=FakeVolumeClient(),
+            volume_root=VOLUME_ROOT,
+            preview_writer=PreviewWriterSpy(),
+            agent_runner=SandboxAwareRunner(),
+        )
+
+    assert outside.read_text() == "SECRET\n"
+
+
 def test_preview_refuses_agent_created_escaping_symlink(tmp_path: Path) -> None:
     """B1 defense: a produced file whose real path escapes the sandbox is refused."""
     outside = tmp_path / "outside"

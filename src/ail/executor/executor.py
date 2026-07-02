@@ -102,6 +102,9 @@ DEFAULT_TIMEOUT_SECONDS = 900
 _IGNORED_DIR_NAMES = frozenset(
     {".git", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", "node_modules", ".venv"}
 )
+_PREVIEW_DEFAULT_ALLOWED_TOOLS = ("Read", "Write", "Edit", "Bash", "Glob", "Grep")
+_PREVIEW_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+_CLAUDE_CODE_FILESYSTEM_SANDBOX_PARAM = "claude_code_filesystem_sandbox"
 
 
 def _is_ignored_file(name: str) -> bool:
@@ -374,15 +377,22 @@ def produce_preview(
         # than through to a live/outside file — the agent must never mutate anything outside
         # the sandbox copy's real tree during preview.
         _neutralize_escaping_symlinks(sandbox)
+        sandbox_real = str(sandbox.resolve())
 
         runner = agent_runner if agent_runner is not None else _default_agent_runner()
         task = AgentTask(
             prompt=plan,
             system_prompt=EXECUTOR_SYSTEM_PROMPT,
             model=model,
-            allowed_tools=allowed_tools,
+            allowed_tools=_preview_allowed_tools(allowed_tools, sandbox_real),
             cwd=str(sandbox),
             timeout_seconds=timeout_seconds,
+            params={
+                _CLAUDE_CODE_FILESYSTEM_SANDBOX_PARAM: {
+                    "required": True,
+                    "sandbox_dir": sandbox_real,
+                }
+            },
         )
         result = runner.run(task)
         if not result.success:
@@ -630,6 +640,28 @@ def _copy_workspace(live_root: Path, sandbox: Path) -> None:
     """Copy the live workspace into ``sandbox`` (VCS/caches excluded, no symlink follow)."""
     # dirs_exist_ok so an explicit, pre-created sandbox_root is accepted.
     shutil.copytree(live_root, sandbox, ignore=_copytree_ignore, symlinks=True, dirs_exist_ok=True)
+
+
+def _preview_allowed_tools(allowed_tools: list[str] | None, sandbox_real: str) -> list[str]:
+    """Return Claude Code permission rules scoped to the preview sandbox.
+
+    ``permission_mode='dontAsk'`` in the adapter denies anything not pre-approved.
+    Write-capable built-ins therefore get path-scoped rules; Bash is allowed only
+    because the SDK's native command sandbox confines its filesystem effects.
+    """
+    tools = list(allowed_tools) if allowed_tools is not None else list(_PREVIEW_DEFAULT_ALLOWED_TOOLS)
+    scoped: list[str] = []
+    for tool in tools:
+        name = tool.split("(", 1)[0]
+        if name in _PREVIEW_WRITE_TOOLS:
+            rule = f"{name}({sandbox_real}/**)"
+        elif name == "Bash":
+            rule = "Bash(*)"
+        else:
+            rule = tool
+        if rule not in scoped:
+            scoped.append(rule)
+    return scoped
 
 
 def _iter_relpaths(root: Path) -> set[str]:
