@@ -5,7 +5,15 @@
 // icons live in the components, not here, so this stays framework-free.
 import { isPending, type ProposedActionRow } from './approvals';
 
-export type NavKey = 'overview' | 'compare' | 'approvals' | 'activity' | 'lineage' | 'add-agent' | 'how-it-works';
+export type NavKey =
+  | 'overview'
+  | 'compare'
+  | 'approvals'
+  | 'labeling'
+  | 'activity'
+  | 'lineage'
+  | 'add-agent'
+  | 'how-it-works';
 
 export interface NavItem {
   key: NavKey;
@@ -53,6 +61,16 @@ export const PRIMARY_NAV: NavItem[] = [
     title: 'Approval queue',
     description:
       'The human control plane: review the why + the evidence behind a fail-closed wall, then approve or reject the live apply. The app’s only write-path.',
+    requiresAgent: true,
+    showTitle: true,
+  },
+  {
+    key: 'labeling',
+    label: 'Labeling',
+    path: '/labeling',
+    title: 'Labeling',
+    description:
+      'Grade traces along this agent’s registered judged dimensions. Each label is recorded as a human assessment named for the judge — the input the scheduled auto-align pairs to align it. The app’s label write-path.',
     requiresAgent: true,
     showTitle: true,
   },

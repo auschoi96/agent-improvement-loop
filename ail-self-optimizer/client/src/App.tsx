@@ -6,6 +6,7 @@ import { TopBar } from './shell/TopBar';
 import { OverviewPage } from './pages/OverviewPage';
 import { ComparePage } from './pages/ComparePage';
 import { ApprovalsPage } from './pages/ApprovalsPage';
+import { LabelingPage } from './pages/LabelingPage';
 import { ActivityPage } from './pages/ActivityPage';
 import { LineagePage } from './pages/LineagePage';
 import { AddAgentPage } from './pages/AddAgentPage';
@@ -33,6 +34,7 @@ export default function App() {
                 <Route path="/overview" element={<OverviewPage />} />
                 <Route path="/compare" element={<ComparePage />} />
                 <Route path="/approvals" element={<ApprovalsPage />} />
+                <Route path="/labeling" element={<LabelingPage />} />
                 <Route path="/activity" element={<ActivityPage />} />
                 <Route path="/lineage" element={<LineagePage />} />
                 <Route path="/add-agent" element={<AddAgentPage />} />
