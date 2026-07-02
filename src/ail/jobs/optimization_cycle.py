@@ -54,6 +54,7 @@ from ail.l3.cohort_review import aggregate_assets
 from ail.l3.continuous import ContinuousRlmRunReport, run_continuous_rlm
 from ail.l3.contract import HaloReviewVerdict, RankedAsset
 from ail.l3.reviewer import OVERALL_FEEDBACK_NAME
+from ail.loop.candidate_builders import token_efficiency_candidate_builder
 from ail.loop.controller import Candidate, CycleResult
 from ail.loop.decision_rules import (
     DecisionThresholds,
@@ -67,8 +68,8 @@ from ail.loop.planner import (
     agent_planner,
     run_cycle_with_planner,
 )
-from ail.loop.proposals import ProposedAction
-from ail.loop.publish_proposals import publish_agent_proposals
+from ail.loop.proposals import ProposalStatus, ProposedAction
+from ail.loop.publish_proposals import PROPOSALS_TABLE, publish_agent_proposals
 from ail.metrics.contract import L0MetricsReport
 from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA
 from ail.readiness import ReadinessStatus, compute_readiness
@@ -363,26 +364,58 @@ def _default_gate(args: argparse.Namespace) -> Gate:
     return _gate
 
 
-def _default_candidate_builder() -> CandidateBuilder:
-    """Real candidate builder — fail-closed where the candidate→prove path is incomplete.
+def _fetch_pending_proposal_ids(agent: Agent, args: argparse.Namespace) -> frozenset[str] | None:
+    """Read this agent's currently-PENDING proposal ids from ``agent_proposed_actions``.
 
-    Wraps :func:`ail.optimize.assets.generate_asset`. It returns ``None`` (the
-    controller's first-class fail-closed "no candidate ⇒ no proposal" outcome, not an
-    error) for every action kind whose *provable* candidate path is not yet wired
-    upstream: an additive ``metric_view`` has no frozen-suite intervention to prove
-    (an additive read-path leaves the agent's suite behaviour unchanged), the skill
-    generator is a stub, and ``gepa_prompt`` candidates come from the separate,
-    heavy GEPA run. Returning ``None`` keeps the cycle honest — it proposes nothing
-    it cannot prove and fabricates no proof — and the moment an upstream lane
-    completes a candidate→intervention mapping, that kind flows through the real
-    prover below unchanged. Deployments with a working generator inject their own
-    builder in its place.
+    The cost guard's input (:func:`ail.loop.candidate_builders.token_efficiency_candidate_builder`):
+    the builder skips (re-)building a candidate whose proposal id is already pending,
+    so an expensive frozen-suite proof runs at most once per open proposal instead of
+    every hourly firing. Reuses the same SELECT-side helpers lane 3 reads with
+    (:func:`ail.loop.apply_service._query_rows`, :func:`ail.publish._build_workspace_client` /
+    :func:`ail.publish._lit`) — no new read path.
+
+    Returns ``None`` — the fail-closed "unavailable, do not spend" sentinel — on ANY
+    read failure (auth, network, or a missing table on the very first run before
+    bootstrap/publish creates it); the builder then proposes nothing this cycle rather
+    than re-proving a known result blindly. An empty set (table present, no pending
+    rows) is distinct from ``None`` and lets the first proposal be built.
     """
+    from ail.loop.apply_service import _query_rows
+    from ail.publish import _build_workspace_client, _lit
 
-    def _build(decision: Any, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+    fqn = f"`{args.catalog}`.`{args.schema}`.{PROPOSALS_TABLE}"
+    sql = (
+        f"SELECT proposal_id FROM {fqn} WHERE agent_name = {_lit(agent.agent_name)} "
+        f"AND status = {_lit(ProposalStatus.PENDING.value)}"
+    )
+    try:
+        client = _build_workspace_client(args.profile or None)
+        rows = _query_rows(client, args.warehouse_id, sql)
+    except Exception:  # noqa: BLE001 - fail-closed toward NOT spending on any read failure
         return None
+    return frozenset(str(r["proposal_id"]) for r in rows if r.get("proposal_id"))
 
-    return _build
+
+def _default_candidate_builder(agent: Agent, args: argparse.Namespace) -> CandidateBuilder:
+    """Real candidate builder: the first provable candidate→prove path, cost-guarded.
+
+    Delegates to :func:`ail.loop.candidate_builders.token_efficiency_candidate_builder`,
+    which maps a ``SKILL_UPDATE`` decision for a token-reduction goal to a
+    :class:`~ail.loop.controller.Candidate` carrying the *proven*
+    :func:`ail.optimize.lever.token_efficiency_intervention` (flowed through
+    :func:`_default_prover` unchanged), and returns ``None`` for every other action
+    kind / goal — the controller's first-class fail-closed "no candidate ⇒ no
+    proposal" outcome (additive ``metric_view`` has no frozen-suite intervention,
+    ``gepa_prompt`` bodies come from the separate heavy GEPA run, ``instruction_update``
+    / ``revert`` are unwired). Returning ``None`` keeps the cycle honest — it proposes
+    nothing it cannot prove and fabricates no proof.
+
+    Fetches this agent's pending proposals **once** here and closes over them so the
+    expensive real-agent frozen-suite proof runs at most once per open proposal (and
+    not at all if the pending check could not run — fail-closed toward not spending).
+    """
+    pending = _fetch_pending_proposal_ids(agent, args)
+    return token_efficiency_candidate_builder(pending_proposal_ids=pending)
 
 
 def _default_prover(args: argparse.Namespace) -> Prover:
@@ -590,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
         goal,
         rlm_step=_default_rlm_step(args),
         feedback_source=_default_feedback_source(agent, args),
-        candidate_builder=_default_candidate_builder(),
+        candidate_builder=_default_candidate_builder(agent, args),
         prover=_default_prover(args),
         gate=_default_gate(args),
         planner=planner,
