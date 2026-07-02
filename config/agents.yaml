@@ -7,10 +7,17 @@
 # agent switcher reads.
 #
 # Each agent: a friendly unique `agent_name`, its dedicated `experiment_id`, an
-# optional `description`, an optional `judge_config` (per-agent L2 judges), and an
+# optional `description`, an optional `judge_config` (per-agent L2 judges), an
 # optional `tag_filter` (within-experiment sub-selection; omit for the whole
-# experiment).
+# experiment), and an optional `target_workspace`.
+#
+# `target_workspace` is the path / repo the open-ended executor (a LATER lane, L7b-2)
+# edits and snapshots — the target agent's own source. Optional here (omit = "not
+# configured yet"), but REQUIRED before that agent's AGENT_TASK proposals can be
+# executed. Set it to the deployer's own checkout, e.g.:
+#     target_workspace: /path/to/your/agent/repo
 agents:
   - agent_name: claude_code
     experiment_id: "660599403165942"
     description: Claude Code CLI sessions (the reference agent).
+    # target_workspace: not configured yet (executor lane L7b-2 not wired)

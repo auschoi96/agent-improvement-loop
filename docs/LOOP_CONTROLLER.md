@@ -91,7 +91,13 @@ Each rule names the *evidence* it fired on, so the proposal carries a defensible
 Every proposal the human reviews carries:
 
 - **What** — the concrete change: the skill/prompt diff, the metric-view SQL, or the
-  GEPA-evolved body.
+  GEPA-evolved body. For an **open-ended** `AGENT_TASK` (the L7b-2 executor's change),
+  the "what" is a `plan` (the NL intended change + why) **plus** a `preview_diff` — the
+  concrete produced change the human reviews *before* approving — and a
+  `produced_change_ref` (an L6 snapshot / UC Volume ref) to commit on approval. The
+  executor fills the preview + ref in a sandbox pre-approval; apply is fail-closed until
+  that lane exists, and an `AGENT_TASK` never applies via the deterministic evidence-only
+  path. See `docs/PRODUCT_ARCHITECTURE.md` §7.
 - **Why** — the triggering feedback: the RLM recommendation / judge score / L0 waste
   signal, with trace references.
 - **Proof** — the frozen-suite WITH/WITHOUT result (delta on the goal metric **with

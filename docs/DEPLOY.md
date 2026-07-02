@@ -206,6 +206,22 @@ platform from the `permission: CAN_USE` declaration in
 > tables the bootstrap covers is drift-guarded in `tests/test_bootstrap_tables.py`
 > against the actual `.sql` query files, so it cannot silently fall behind.
 
+> **Migration note — existing deployments, `agent_proposed_actions` (L7b-1).** The
+> `AGENT_TASK` representation adds three **nullable** columns to
+> `agent_proposed_actions` — `change_plan`, `change_preview_diff`,
+> `change_produced_change_ref`. The table DDL is `CREATE TABLE IF NOT EXISTS`, so the
+> new columns land automatically on a **fresh** table but an **already-created** table
+> is **not** ALTERed (the same known pattern as the earlier `proof_*` columns). Before
+> the executor lane (L7b-2) publishes an `AGENT_TASK` proposal, an operator with a
+> pre-existing table must add the three columns once:
+> ```sql
+> ALTER TABLE `<catalog>`.`<schema>`.agent_proposed_actions
+>   ADD COLUMNS (change_plan STRING, change_preview_diff STRING, change_produced_change_ref STRING);
+> ```
+> No auto-migration is performed. Reads stay compatible in the meantime: the app's
+> `SELECT`ed column set is unchanged, and a non-`AGENT_TASK` proposal never populates
+> these columns.
+
 ---
 
 ## 4. End-to-end turnkey sequence

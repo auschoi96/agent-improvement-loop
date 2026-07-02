@@ -81,6 +81,12 @@ PROPOSAL_COLUMNS: list[str] = [
     "change_diff",
     "change_evolved_body_ref",
     "change_revert_target",
+    # what — AGENT_TASK payload (additive, nullable): the NL plan, plus the executor-
+    # filled (L7b-2) concrete-change preview + produced change-set ref. All NULL for a
+    # non-AGENT_TASK proposal, and for an AGENT_TASK the preview/ref are NULL until L7b-2.
+    "change_plan",
+    "change_preview_diff",
+    "change_produced_change_ref",
     # proof
     "proof_objective_metric",
     "proof_proved_improvement",
@@ -166,6 +172,9 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
         c.diff,
         c.evolved_body_ref,
         c.revert_target,
+        c.plan,
+        c.preview_diff,
+        c.produced_change_ref,
         *proof_cols,
         g.readiness_tier,
         g.can_prove_improvement,
@@ -180,6 +189,16 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
 
 
 def _ddl(catalog: str, schema: str) -> list[str]:
+    # MIGRATION NOTE (existing deployments): this is CREATE TABLE IF NOT EXISTS, so the
+    # AGENT_TASK columns (change_plan / change_preview_diff / change_produced_change_ref)
+    # land only on a FRESH table — an ALREADY-created ``agent_proposed_actions`` is not
+    # ALTERed (same known pattern as the proof_* columns). Before L7b-2 publishes an
+    # AGENT_TASK, an operator with a pre-existing table must add those three columns
+    # (nullable STRING) once, e.g.:
+    #   ALTER TABLE `<catalog>`.`<schema>`.agent_proposed_actions
+    #     ADD COLUMNS (change_plan STRING, change_preview_diff STRING,
+    #                  change_produced_change_ref STRING);
+    # No auto-ALTER is done here (out of scope). See docs/DEPLOY.md.
     fqn = f"`{catalog}`.`{schema}`"
     return [
         f"CREATE SCHEMA IF NOT EXISTS {fqn} "
@@ -209,6 +228,9 @@ def _ddl(catalog: str, schema: str) -> list[str]:
             change_diff STRING,
             change_evolved_body_ref STRING,
             change_revert_target STRING,
+            change_plan STRING,
+            change_preview_diff STRING,
+            change_produced_change_ref STRING,
             proof_objective_metric STRING,
             proof_proved_improvement BOOLEAN,
             proof_correctness_held BOOLEAN,

@@ -107,6 +107,38 @@ token metric is never polluted.)
 - **Prover (opt-in, Tier 2)** — runs the candidate vs. baseline on the **user's frozen suite** for
   a measured delta when the human wants verification before deciding.
 
+### The `AGENT_TASK` proposal — representing an open-ended change (L7b-1)
+
+The pre-specified action kinds (`METRIC_VIEW` / `SKILL_UPDATE` / `INSTRUCTION_UPDATE` /
+`GEPA_PROMPT` / `REVERT`) can only express changes whose *form* is known in advance. The
+open-ended executor needs one more: **`ActionKind.AGENT_TASK`** (default `RiskClass.AGENT_CHANGE`
+— it is, by definition, a change to the agent), carrying a `ChangeKind.AGENT_TASK_PLAN` change with
+three fields (`ail.loop.proposals.ProposedChange`):
+
+- **`plan`** (required) — the **NL intended change + why**, drawn from the evidence. This is what
+  the planner emits and what a reviewer first reads.
+- **`preview_diff`** — the **concrete produced-change preview** (a diff / change-set) the human
+  reviews. `None` until the executor produces it.
+- **`produced_change_ref`** — an **L6 snapshot / UC Volume ref** to the produced change-set, used
+  to commit on approval. `None` until the executor produces it.
+
+**Preview-before-approve (the design constraint):** the human must review the **concrete change**,
+not just the NL plan. So the flow is: planner proposes the `plan` → the **executor produces the
+real change in a sandbox / snapshot *before* approval**, filling `preview_diff` +
+`produced_change_ref` → the human **reviews the real diff in the app** → on **approve**, the
+produced change-set is **committed live** from its L6 snapshot (revertible) → post-hoc
+before/after measurement. L7b-1 defines only this representation and the config foundation; it
+runs no agent and executes nothing (the executor is L7b-2). Apply **fail-closes** on an
+`AGENT_TASK` today and it is deliberately excluded from the deterministic evidence-only apply path
+(`ail.loop.apply._EVIDENCE_ONLY_APPLYABLE_KINDS`) — an open-ended agent change must never ship
+without the executor and a human diff-preview. The registry gains an optional
+`Agent.target_workspace` (the repo/path the executor edits + snapshots) — optional at the model
+level (`None` = not configured yet), **required for the executor**.
+
+Lineage/revert for the produced change stays **Databricks-native, not git-dependent**: the MLflow
+Prompt Registry (versions + champion alias), UC Volume snapshots for arbitrary file change-sets,
+and `ail.publish_lineage` — exactly the §8 mechanisms.
+
 ## 8. Versioning & revert — Databricks-native, no git
 
 | Change | Mechanism | Revert |

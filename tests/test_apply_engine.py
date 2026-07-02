@@ -250,6 +250,15 @@ def _revert_proposal(target: str = "v1", **kw: Any) -> ProposedAction:
     return _proposal(ActionKind.REVERT, change, **kw)
 
 
+def _agent_task_proposal(**kw: Any) -> ProposedAction:
+    change = ProposedChange(
+        kind=ChangeKind.AGENT_TASK_PLAN,
+        summary="agent-produced read-cache tool",
+        plan="Add a read-cache tool; the agent re-reads unchanged files across 5 traces.",
+    )
+    return _proposal(ActionKind.AGENT_TASK, change, **kw)
+
+
 def _approve(
     proposal: ProposedAction, *, approver: str = "austin@databricks.com"
 ) -> ApprovalDecision:
@@ -791,6 +800,49 @@ def test_evidence_only_gepa_prompt_is_still_refused(tmp_path: Path) -> None:
     # refused before any capability ran and before the gate re-check
     assert not seams.any_capability_called
     assert seams.gate_calls == []
+    assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# LANE L7b-1 — AGENT_TASK (the open-ended executor's change) is RECOGNIZED at the
+# apply routing boundary but FAIL-CLOSED REFUSED until the executor lane (L7b-2)
+# exists, and it is NEVER on the deterministic evidence-only apply allowlist.
+# ---------------------------------------------------------------------------
+
+
+def test_agent_task_excluded_from_evidence_only_allowlist() -> None:
+    # An open-ended agent-produced change must never apply via L7a's deterministic
+    # evidence-only path — it needs the executor + a human diff-preview. Assert the
+    # allowlist itself excludes it (the module also asserts this at import).
+    from ail.loop.apply import _EVIDENCE_ONLY_APPLYABLE_KINDS
+
+    assert ActionKind.AGENT_TASK not in _EVIDENCE_ONLY_APPLYABLE_KINDS
+
+
+def test_apply_agent_task_is_refused_not_yet_wired() -> None:
+    # A proof present + gate ok gets the proposal past the proof/gate walls, so the
+    # ROUTING refusal (the executor lane does not exist) is what surfaces. Nothing
+    # half-applies: no capability ran, no lineage recorded.
+    seams = Seams()
+    proposal = _agent_task_proposal()  # proof present, gate ok
+    with pytest.raises(ApplyRefused, match="not yet wired"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert len(seams.gate_calls) == 1  # reached routing only after the gate wall
+    assert not seams.any_capability_called
+    assert seams.lineage_records == []
+
+
+def test_apply_agent_task_evidence_only_is_refused_before_gate() -> None:
+    # The realistic shape: an AGENT_TASK carries no frozen-suite proof (proof=None). It is
+    # NOT an evidence-only-applyable kind, so it is refused at the proof/evidence check —
+    # before the gate re-check and before any capability.
+    seams = Seams()
+    proposal = _agent_task_proposal(proof_present=False)
+    assert proposal.proof is None
+    with pytest.raises(ApplyRefused, match="not an evidence-only-applyable"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []  # short-circuits before the gate re-check
     assert seams.lineage_records == []
 
 

@@ -380,15 +380,26 @@ class BodyResolver(Protocol):
 #: It is an **allowlist**, so it fails closed: any kind absent from it still requires a
 #: proof and is refused on ``proof=None``. That deliberately excludes ``GEPA_PROMPT``
 #: (its apply re-runs the held-out improvement check — it genuinely *re-verifies a
-#: proof*), ``REVERT`` (unchanged — still proof-gated here), and any future 'an agent
-#: must produce the change' kind (never fully specified). The apply-time ``gate_recheck``
-#: still runs for **every** kind regardless — it is the wall, not the proof.
+#: proof*), ``REVERT`` (unchanged — still proof-gated here), and ``AGENT_TASK`` — the
+#: open-ended agent-produced change (never fully specified by the proposal; it needs the
+#: executor to produce a concrete change in a sandbox and a human to review the real
+#: diff, so it must NEVER apply via this deterministic evidence-only path). The
+#: apply-time ``gate_recheck`` still runs for **every** kind regardless — it is the wall,
+#: not the proof.
 _EVIDENCE_ONLY_APPLYABLE_KINDS: frozenset[ActionKind] = frozenset(
     {
         ActionKind.METRIC_VIEW,
         ActionKind.SKILL_UPDATE,
         ActionKind.INSTRUCTION_UPDATE,
     }
+)
+
+#: Hard invariant (defense-in-depth, checked at import): an open-ended ``AGENT_TASK``
+#: must never be evidence-only-applyable. Its change is produced by the executor + must
+#: be diff-previewed by a human before approval; letting it apply on evidence + gate
+#: alone would ship an unreviewed open-ended agent change. A test asserts this too.
+assert ActionKind.AGENT_TASK not in _EVIDENCE_ONLY_APPLYABLE_KINDS, (
+    "AGENT_TASK must be excluded from the evidence-only apply allowlist (fail-closed)"
 )
 
 
@@ -436,6 +447,10 @@ def apply_approved_proposal(
       improvement — a second fail-closed proof), pointing champion at the new version;
     * ``REVERT`` → re-point the champion alias to the target prior version via the
       guarded :func:`ail.jobs.revert_champion.revert_champion`.
+    * ``AGENT_TASK`` → **refused fail-closed** — the open-ended executor (L7b-2) that
+      produces and commits the concrete change does not exist yet, so there is nothing
+      to apply. (An ``AGENT_TASK`` with ``proof=None`` is refused even earlier, at the
+      proof/evidence check, since it is not an evidence-only-applyable kind.)
 
     After a successful apply the change is recorded to the lineage (``lineage_recorder``),
     the proposal is marked applied, and a typed :class:`ApplyResult` (with the new
@@ -626,6 +641,18 @@ def _apply_change(
     schema: str,
 ) -> _Applied:
     kind = proposal.action_kind
+    if kind is ActionKind.AGENT_TASK:
+        # Recognized, but the open-ended executor (L7b-2) does not exist yet — refuse
+        # fail-closed BEFORE any routing/payload check so this clear message always
+        # wins. Nothing half-applies: no executor to produce the change, no
+        # human-reviewed diff, no snapshot to commit. This is deliberately not a
+        # silent no-op nor a fallthrough to the "unknown action_kind" refusal.
+        raise ApplyRefused(
+            f"AGENT_TASK execution is not yet wired — refusing proposal "
+            f"{proposal.proposal_id!r}; requires the executor lane (L7b-2) to produce "
+            "the concrete change in a sandbox, have a human review the diff, then commit "
+            "it via the L6 snapshot (fail-closed)"
+        )
     expected = _EXPECTED_CHANGE_KIND.get(kind)
     if expected is not None and proposal.change.kind is not expected:
         raise ApplyRefused(
