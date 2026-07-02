@@ -14,7 +14,9 @@ engine is unit-testable with no live MLflow/warehouse write:
   proposal, or a decision that does not reference the proposal it is applied to;
 * on **reject** it records the decision (approver + timestamp + reason) and calls
   **no** capability;
-* on **approve** it re-verifies the proof *and* re-runs the gate at apply-time
+* on **approve** it re-verifies the proof *when the proposal carries one* (an
+  evidence-only proposal of a deterministic kind applies on its evidence + gate
+  alone — lane L7a) *and* re-runs the gate at apply-time
   (:paramref:`apply_approved_proposal.gate_recheck`) — a proposal whose gate no
   longer holds (judge went distrusted, readiness dropped) is refused, not applied;
 * it **reuses** the existing capabilities rather than reimplementing them — the
@@ -368,6 +370,28 @@ class BodyResolver(Protocol):
 # ---------------------------------------------------------------------------
 
 
+#: The DETERMINISTIC action kinds whose change is *fully specified by the proposal*
+#: and whose apply performs **no proof re-verification** — so an approved, still-
+#: PENDING, gated proposal of one of these kinds applies on its **evidence + gate
+#: status alone**, with no frozen-suite proof (``proof=None``). This is the lane-L7a
+#: relaxation of the evidence-first architecture (``docs/PRODUCT_ARCHITECTURE.md``
+#: §3/§7 — proving is opt-in Tier-2, not a pre-ship gate).
+#:
+#: It is an **allowlist**, so it fails closed: any kind absent from it still requires a
+#: proof and is refused on ``proof=None``. That deliberately excludes ``GEPA_PROMPT``
+#: (its apply re-runs the held-out improvement check — it genuinely *re-verifies a
+#: proof*), ``REVERT`` (unchanged — still proof-gated here), and any future 'an agent
+#: must produce the change' kind (never fully specified). The apply-time ``gate_recheck``
+#: still runs for **every** kind regardless — it is the wall, not the proof.
+_EVIDENCE_ONLY_APPLYABLE_KINDS: frozenset[ActionKind] = frozenset(
+    {
+        ActionKind.METRIC_VIEW,
+        ActionKind.SKILL_UPDATE,
+        ActionKind.INSTRUCTION_UPDATE,
+    }
+)
+
+
 def apply_approved_proposal(
     proposal: ProposedAction,
     decision: ApprovalDecision,
@@ -388,9 +412,12 @@ def apply_approved_proposal(
     * the ``decision`` must reference *this* ``proposal``;
     * the proposal must still be :attr:`~ail.loop.proposals.ProposalStatus.PENDING`
       (never re-apply an already applied/rejected/superseded proposal);
-    * for an **approve** only: the proposal must still carry a proven improvement
-      (``proof.proved_improvement and proof.correctness_held``) *and* pass the
-      apply-time ``gate_recheck``.
+    * for an **approve** only: the proposal must pass the apply-time ``gate_recheck``,
+      and — unless it is an evidence-only proposal (``proof=None``) of a DETERMINISTIC
+      kind (:data:`_EVIDENCE_ONLY_APPLYABLE_KINDS`), which applies on its evidence +
+      gate alone — it must still carry a proven improvement
+      (``proof.proved_improvement and proof.correctness_held``). An evidence-only
+      proposal of a proof-dependent kind (GEPA's held-out re-check) is still refused.
 
     On **reject**: the decision (approver + timestamp + reason) is recorded on the
     returned result and the proposal is marked rejected; **no** capability is called.
@@ -448,20 +475,28 @@ def apply_approved_proposal(
             reason=decision.reason,
         )
 
-    # --- approve preconditions (re-verify proof, then re-run the gate) --------
+    # --- approve preconditions (verify proof-or-evidence, then re-run the gate) --
+    # Evidence-first (docs/PRODUCT_ARCHITECTURE.md §3/§7): proving is opt-in Tier-2,
+    # not a pre-ship gate. An evidence-only proposal (proof=None) applies on its
+    # evidence + gate status alone — but ONLY for a DETERMINISTIC kind whose change is
+    # fully specified by the proposal and whose apply re-verifies no proof
+    # (_EVIDENCE_ONLY_APPLYABLE_KINDS). A proof-dependent kind (GEPA's held-out re-check)
+    # — or any kind off the allowlist — still requires a proof and is refused here.
+    # When a proof IS present it is re-verified unchanged, whatever the kind. The
+    # apply-time gate_recheck below is the wall in every case (it always runs).
     proof = proposal.proof
     if proof is None:
-        # An evidence-first proposal (ail.loop.evidence_cycle) carries no frozen-suite
-        # proof (proof=None). This prove-requiring apply path refuses it — identical to
-        # the unproven case below — until an opt-in Tier-2 verification attaches a
-        # measured delta (docs/PRODUCT_ARCHITECTURE.md §3/§7). Fail-closed.
-        raise ApplyRefused(
-            f"proposal {proposal.proposal_id!r} carries no frozen-suite proof "
-            "(evidence-first, proof=None) — refusing to apply without an opt-in Tier-2 "
-            "verification (fail-closed); run 'verify on my suite' to attach a measured "
-            "delta, then approve"
-        )
-    if not (proof.proved_improvement and proof.correctness_held):
+        if proposal.action_kind not in _EVIDENCE_ONLY_APPLYABLE_KINDS:
+            raise ApplyRefused(
+                f"proposal {proposal.proposal_id!r} carries no frozen-suite proof "
+                f"(evidence-first, proof=None) and action_kind "
+                f"{proposal.action_kind.value!r} is not an evidence-only-applyable "
+                "deterministic kind (its apply re-verifies a proof, or its change is not "
+                "fully specified) — refusing to apply without an opt-in Tier-2 "
+                "verification (fail-closed); run 'verify on my suite' to attach a "
+                "measured delta, then approve"
+            )
+    elif not (proof.proved_improvement and proof.correctness_held):
         raise ApplyRefused(
             f"proposal {proposal.proposal_id!r} no longer carries a proven improvement "
             f"(proved_improvement={proof.proved_improvement}, "
@@ -529,8 +564,10 @@ def apply_approved_proposal(
         reverted_to_version=applied.reverted_to_version,
         trigger_summary=proposal.trigger.summary,
         objective_metric=proposal.objective_metric,
-        proved_improvement=proof.proved_improvement,
-        realized_savings_pct=proof.realized_savings_pct,
+        # Evidence-only apply (proof=None): no frozen-suite delta — the audit record
+        # honestly reflects that (proved_improvement=False, no realized savings).
+        proved_improvement=proof.proved_improvement if proof is not None else False,
+        realized_savings_pct=proof.realized_savings_pct if proof is not None else None,
         approver=decision.approver,
         decided_at=decision.decided_at,
         approval_reason=decision.reason,

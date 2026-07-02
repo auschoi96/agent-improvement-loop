@@ -760,6 +760,36 @@ def _b(row: dict[str, Any], key: str) -> bool:
     return str(v).strip().lower() == "true" if v is not None else False
 
 
+#: The ten ``proof_*`` columns :func:`ail.loop.publish_proposals._proposal_row` writes.
+#: They are written atomically — all populated for a *prove-before-propose* proposal, or
+#: all ``NULL`` for an **evidence-first** proposal (``proof=None``).
+_PROOF_COLUMNS: tuple[str, ...] = (
+    "proof_objective_metric",
+    "proof_proved_improvement",
+    "proof_correctness_held",
+    "proof_realized_savings_absolute",
+    "proof_realized_savings_pct",
+    "proof_n_promote",
+    "proof_n_block",
+    "proof_n_errored",
+    "proof_suite_content_hash",
+    "proof_suite_version",
+)
+
+
+def _has_proof(row: dict[str, Any]) -> bool:
+    """True iff the row carries a frozen-suite proof (any ``proof_*`` column populated).
+
+    An evidence-first proposal (:func:`ail.loop.evidence_cycle.run_evidence_cycle`)
+    stores ``proof=None`` as all-``NULL`` proof_* columns, so a row with every proof_*
+    column NULL/empty reconstructs as ``proof=None`` — never a fabricated zero-value
+    :class:`~ail.loop.proposals.ProofSummary` that would misread as an unproven proof
+    and be refused at apply time (lane L7a). A real proof always populates the boolean
+    and integer columns, so it is always detected.
+    """
+    return any(row.get(k) not in (None, "") for k in _PROOF_COLUMNS)
+
+
 def _json_list(row: dict[str, Any], key: str) -> list[str]:
     v = row.get(key)
     if not v:
@@ -797,17 +827,24 @@ def _row_to_proposal(row: dict[str, Any]) -> ProposedAction:
         evolved_body_ref=_s(row, "change_evolved_body_ref"),
         revert_target=_s(row, "change_revert_target"),
     )
-    proof = ProofSummary(
-        objective_metric=str(row.get("proof_objective_metric") or ""),
-        proved_improvement=_b(row, "proof_proved_improvement"),
-        correctness_held=_b(row, "proof_correctness_held"),
-        realized_savings_absolute=_f(row, "proof_realized_savings_absolute") or 0.0,
-        realized_savings_pct=_f(row, "proof_realized_savings_pct"),
-        n_promote=_i(row, "proof_n_promote") or 0,
-        n_block=_i(row, "proof_n_block") or 0,
-        n_errored=_i(row, "proof_n_errored") or 0,
-        suite_content_hash=str(row.get("proof_suite_content_hash") or ""),
-        suite_version=str(row.get("proof_suite_version") or ""),
+    # Reconstruct proof=None for an evidence-first proposal (all proof_* columns NULL),
+    # so it round-trips as evidence-only and the apply engine applies it on evidence +
+    # gate alone (lane L7a) rather than refusing it as an unproven zero-value proof.
+    proof = (
+        ProofSummary(
+            objective_metric=str(row.get("proof_objective_metric") or ""),
+            proved_improvement=_b(row, "proof_proved_improvement"),
+            correctness_held=_b(row, "proof_correctness_held"),
+            realized_savings_absolute=_f(row, "proof_realized_savings_absolute") or 0.0,
+            realized_savings_pct=_f(row, "proof_realized_savings_pct"),
+            n_promote=_i(row, "proof_n_promote") or 0,
+            n_block=_i(row, "proof_n_block") or 0,
+            n_errored=_i(row, "proof_n_errored") or 0,
+            suite_content_hash=str(row.get("proof_suite_content_hash") or ""),
+            suite_version=str(row.get("proof_suite_version") or ""),
+        )
+        if _has_proof(row)
+        else None
     )
     gate = GateStatus(
         readiness_tier=str(row.get("gate_readiness_tier") or ""),

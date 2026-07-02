@@ -512,10 +512,25 @@ def test_row_to_proposal_round_trips_the_publish_shape() -> None:
     assert restored.proposal_id == original.proposal_id
     assert restored.action_kind is ActionKind.SKILL_UPDATE
     assert restored.change.diff == original.change.diff
+    assert restored.proof is not None
     assert restored.proof.proved_improvement is True
     assert restored.proof.n_promote == 3
     assert restored.trigger.trace_refs == ["t1", "t2"]
     assert restored.gate_status.gated is True
+
+
+def test_row_to_proposal_reconstructs_none_proof_for_evidence_only() -> None:
+    # LANE L7a: an evidence-first proposal (proof=None) is stored with all ten proof_*
+    # columns NULL; the row→proposal inverse must reconstruct proof=None — not a
+    # fabricated zero-value ProofSummary that would misread as an unproven proof and be
+    # refused by the apply engine. Guards the DB-load path for the evidence-only apply.
+    evidence_only = _metric_view_proposal().model_copy(update={"proof": None})
+    flat = _proposal_row(evidence_only, generated_at="2026-06-30T00:00:00+00:00")
+    row = dict(zip(PROPOSAL_COLUMNS, [None if v is None else str(v) for v in flat], strict=True))
+    restored = _row_to_proposal(row)
+    assert restored.proof is None
+    assert restored.action_kind is ActionKind.METRIC_VIEW
+    assert restored.change.sql == METRIC_VIEW_SQL
 
 
 # ---------------------------------------------------------------------------

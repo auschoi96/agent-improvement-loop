@@ -437,8 +437,11 @@ def test_evidence_only_row_has_null_proof_and_full_width() -> None:
 def test_evidence_only_row_round_trips_through_app_reader() -> None:
     # The app reads agent_proposed_actions SELECT-only; lane 3b reconstructs a proposal
     # from the flat row via ail.loop.apply_service._row_to_proposal. An evidence-only
-    # (proof=None) row must reconstruct WITHOUT error (NULL proof columns -> a zeroed
-    # ProofSummary), so the read path stays compatible.
+    # (proof=None) row must reconstruct WITHOUT error, so the read path stays compatible.
+    # Lane L7a: NULL proof columns now reconstruct LOSSLESSLY to proof=None (not a
+    # fabricated zeroed ProofSummary) — so the loaded proposal round-trips as evidence-
+    # only and the apply engine applies it on evidence + gate alone rather than refusing
+    # it as an unproven proof.
     from ail.loop.apply_service import _row_to_proposal
     from ail.loop.publish_proposals import PROPOSAL_COLUMNS, _proposal_row
 
@@ -455,9 +458,8 @@ def test_evidence_only_row_round_trips_through_app_reader() -> None:
     assert reconstructed.action_kind is ActionKind.METRIC_VIEW
     assert reconstructed.change.kind is ChangeKind.METRIC_VIEW_SQL
     assert reconstructed.trigger.kind is TriggerKind.RLM_RECOMMENDED_ASSET
-    # a NULL-proof row reads back as a non-improving zeroed proof (no crash)
-    assert reconstructed.proof is not None
-    assert reconstructed.proof.proved_improvement is False
+    # an evidence-only row reads back as proof=None (lossless), never a fabricated proof
+    assert reconstructed.proof is None
     assert reconstructed.gate_status.gated is True
 
 
