@@ -880,3 +880,46 @@ def test_evidence_only_resolver_legit_body_with_plus_line_still_applies() -> Non
     assert result.outcome is ApplyOutcome.APPLIED
     assert seams.registry.register_calls[0]["template"].startswith("# Read-cache skill")
     assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]
+
+
+def test_evidence_only_resolver_generic_header_diff_body_is_refused() -> None:
+    # A GENERIC unified-diff body with plain headers (--- old / +++ new — NO a//b/
+    # prefixes, NO @@ hunk header, NO `diff --git` line) is still diff-shaped and must be
+    # refused. Guards the broadened, prefix-agnostic header-pair detection.
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def generic_header_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body="--- old_skill\n+++ new_skill\n context\n+added\n",
+            provenance=PromptProvenance(source=PromptSource.SEED),
+        )
+
+    with pytest.raises(ApplyRefused, match="diff-shaped body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=generic_header_resolver)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+def test_evidence_only_resolver_lone_horizontal_rule_body_still_applies() -> None:
+    # No over-correction: a legitimate body with a LONE `---` markdown horizontal rule
+    # (not immediately followed by a `+++ ` line) is not a diff header pair — it must
+    # still apply, even alongside a leading '-' line and the word "diff".
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def lone_rule_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body=(
+                "# Read-cache skill\n\n"
+                "Reuse prior reads; do not re-read unchanged files.\n\n"
+                "---\n\n"
+                "- Run a quick diff review before editing.\n"
+            ),
+            provenance=PromptProvenance(source=PromptSource.SEED, registration_reason="skill"),
+        )
+
+    result = _run(proposal, _approve(proposal), seams=seams, body_resolver=lone_rule_resolver)
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert seams.registry.register_calls[0]["template"].startswith("# Read-cache skill")
+    assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]

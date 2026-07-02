@@ -691,6 +691,11 @@ def _apply_metric_view(proposal: ProposedAction, warehouse_executor: WarehouseEx
 
 
 _DIFF_HUNK_RE = re.compile(r"^@@ .* @@", re.MULTILINE)
+#: A generic unified-diff file-header pair: a ``--- `` line IMMEDIATELY followed by a
+#: ``+++ `` line (any/no ``a/``/``b/`` prefix). Adjacency is required so a lone ``---``
+#: (a markdown rule / YAML document separator) — not followed by a ``+++ `` line — is
+#: not mistaken for a diff header.
+_DIFF_HEADER_PAIR_RE = re.compile(r"^--- .*\n\+\+\+ ", re.MULTILINE)
 
 
 def _normalize_for_diff_compare(text: str) -> str:
@@ -707,16 +712,18 @@ def _normalize_for_diff_compare(text: str) -> str:
 def _looks_like_unified_diff(text: str) -> bool:
     """True iff ``text`` carries unambiguous unified-diff/patch markers.
 
-    Marker-based on purpose: a hunk header (``@@ ... @@``), a ``diff --git`` line, or the
-    ``--- a/`` + ``+++ b/`` file-header pair — structures a real prompt/skill body would
-    not contain. It deliberately never keys off bare ``+``/``-`` line prefixes
-    (legitimate body text may start a line with those), so it does not over-correct.
+    Marker-based on purpose: a hunk header (``@@ ... @@``), a ``diff --git`` line, or a
+    generic unified-diff file-header pair (a ``--- `` line immediately followed by a
+    ``+++ `` line, with or without ``a/``/``b/`` prefixes) — structures a real
+    prompt/skill body would not contain. It deliberately never keys off bare ``+``/``-``
+    line prefixes, nor a lone ``---`` line (a markdown rule / YAML separator), so it does
+    not over-correct.
     """
     if _DIFF_HUNK_RE.search(text):
         return True
     if "diff --git " in text:
         return True
-    return "--- a/" in text and "+++ b/" in text
+    return _DIFF_HEADER_PAIR_RE.search(text) is not None
 
 
 def _apply_prompt_body(
