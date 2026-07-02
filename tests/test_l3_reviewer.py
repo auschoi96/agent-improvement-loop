@@ -471,6 +471,117 @@ class TestEngineSeam:
         assert captured["messages"][0].content == "PROMPT"
 
 
+class TestReasoningEffort:
+    """The gpt-5-5-pro effort fix: normalize the Databricks alias so HALO's own
+    family→effort table applies, then set it as an EXPLICIT ModelConfig override
+    (HALO's ModelConfig is external and its hyphen-blind prefix check would otherwise
+    resolve databricks-gpt-5-5-pro to None)."""
+
+    def test_normalize_strips_provider_and_restores_dotted_minor(self) -> None:
+        assert rv._normalize_model_for_reasoning("databricks-gpt-5-5-pro") == "gpt-5.5-pro"
+        assert rv._normalize_model_for_reasoning("gpt-5-5-pro") == "gpt-5.5-pro"
+        assert (
+            rv._normalize_model_for_reasoning("databricks-gpt-5-1-codex-max") == "gpt-5.1-codex-max"
+        )
+        # Non-gpt-5 aliases: provider stripped, no dotting applied.
+        assert rv._normalize_model_for_reasoning("databricks-claude-sonnet-4-6") == (
+            "claude-sonnet-4-6"
+        )
+        assert rv._normalize_model_for_reasoning("gpt-5") == "gpt-5"
+
+    def test_resolve_gives_xhigh_for_databricks_gpt_5_5_pro(self) -> None:
+        pytest.importorskip("engine", reason="reasoning table lives in halo-engine")
+        # The bug this fixes: HALO's own check returns None for the hyphenated alias.
+        from engine.model_config import max_reasoning_effort_for_model
+
+        assert max_reasoning_effort_for_model("databricks-gpt-5-5-pro") is None
+        # Our resolver recovers xhigh by normalizing first.
+        assert rv.resolve_reasoning_effort("databricks-gpt-5-5-pro") == "xhigh"
+
+    def test_resolve_none_for_non_reasoning_model(self) -> None:
+        pytest.importorskip("engine", reason="reasoning table lives in halo-engine")
+        assert rv.resolve_reasoning_effort("databricks-claude-sonnet-4-6") is None
+
+    def test_build_engine_config_sets_explicit_xhigh_override(self) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        cfg = rv.build_engine_config("databricks-gpt-5-5-pro", base_url="http://x", api_key="k")
+        model_cfg = cfg.root_agent.model
+        # Set as an EXPLICIT field (not left to HALO's auto-detect, which would be None),
+        # and effective effort confirms HALO will actually send it.
+        assert model_cfg.reasoning_effort == "xhigh"
+        assert model_cfg.effective_reasoning_effort() == "xhigh"
+        # Every arm (subagent/synthesis/compaction) shares the one config.
+        assert cfg.synthesis_model.reasoning_effort == "xhigh"
+
+    def test_explicit_reasoning_effort_wins(self) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        cfg = rv.build_engine_config("databricks-gpt-5-5-pro", reasoning_effort="medium")
+        assert cfg.root_agent.model.reasoning_effort == "medium"
+
+    @pytest.mark.parametrize(
+        "value",
+        [None, "", "   ", "none", "NONE", "None", "auto", "AUTO", " Auto "],
+    )
+    def test_normalize_treats_auto_sentinels_as_no_override(self, value: str | None) -> None:
+        # Pure (no engine): empty/whitespace/none/auto (any case) => None ("auto-resolve").
+        assert rv.normalize_reasoning_effort(value) is None
+
+    @pytest.mark.parametrize("value", ["high", " xhigh ", "medium"])
+    def test_normalize_returns_genuine_effort_stripped(self, value: str) -> None:
+        assert rv.normalize_reasoning_effort(value) == value.strip()
+
+    @pytest.mark.parametrize("sentinel", ["none", "NONE", "auto", "AUTO", "", "  "])
+    def test_none_and_auto_sentinels_auto_resolve_not_literal_override(self, sentinel: str) -> None:
+        """The footgun regression: a 'none'/'auto'/empty effort must auto-resolve to
+        xhigh for databricks-gpt-5-5-pro, NOT inject the literal string into HALO."""
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        cfg = rv.build_engine_config("databricks-gpt-5-5-pro", reasoning_effort=sentinel)
+        assert cfg.root_agent.model.reasoning_effort == "xhigh"
+        assert cfg.root_agent.model.effective_reasoning_effort() == "xhigh"
+
+    def test_bogus_reasoning_effort_still_fails_loud(self) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        import pydantic
+
+        # A genuine unrecognized effort is NOT a sentinel: it reaches HALO's
+        # ReasoningEffort Literal and fails loud rather than silently passing.
+        with pytest.raises(pydantic.ValidationError):
+            rv.build_engine_config("databricks-gpt-5-5-pro", reasoning_effort="banana")
+
+    def test_non_reasoning_model_gets_no_effort(self) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        cfg = rv.build_engine_config("databricks-claude-sonnet-4-6")
+        assert cfg.root_agent.model.reasoning_effort is None
+
+    def test_review_trace_threads_effort_to_halo(
+        self,
+        synthetic_trace: Any,
+        captured_feedback: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """review_trace forwards reasoning_effort down to the HALO seam."""
+        trace = normalize_trace(synthetic_trace)
+        captured: dict[str, Any] = {}
+
+        def fake_run(*args: Any, **kwargs: Any) -> str:
+            captured.update(kwargs)
+            return _REPORT
+
+        # captured_feedback stubbed the workspace + a bare run_halo_review; re-stub the
+        # HALO seam here to capture the kwargs review_trace forwards (monkeypatch undoes
+        # both at teardown).
+        monkeypatch.setattr(rv, "run_halo_review", fake_run)
+        rv.review_trace(
+            trace.trace_id,
+            experiment_id="e",
+            model="databricks-gpt-5-5-pro",
+            source=_FakeSource(trace),
+            reasoning_effort="xhigh",
+        )
+        assert captured["reasoning_effort"] == "xhigh"
+        assert captured["model"] == "databricks-gpt-5-5-pro"
+
+
 @pytest.mark.live
 def test_live_review_trace() -> None:
     """End-to-end live review of one real trace (read-only: does not attach).

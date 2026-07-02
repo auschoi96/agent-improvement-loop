@@ -60,6 +60,8 @@ from ail.l3.reviewer import (
     build_engine_config,
     build_review_prompt,
     guideline_feedback_name,
+    normalize_reasoning_effort,
+    resolve_reasoning_effort,
     review_trace,
     run_halo_review,
 )
@@ -109,6 +111,8 @@ __all__ = [
     "ASSETS_FEEDBACK_NAME",
     "GUIDELINE_FEEDBACK_PREFIX",
     "guideline_feedback_name",
+    "resolve_reasoning_effort",
+    "normalize_reasoning_effort",
     "build_engine_config",
     "build_review_prompt",
     "run_halo_review",

@@ -126,6 +126,18 @@ and adds only the judgement layer.
   specific waste (which repeated target / which boilerplate) so the verdict is
   actionable.
 
+### Authoring — `ail.judges.authoring`
+
+The **"describe a quality dimension in natural language → get a judge"** front
+door. `author_judge(name, description, *, experiment_id, scale=..., ...)` turns a
+plain-language description into a registered, MemAlign-alignable `{{ trace }}`
+judge **plus** the label schema whose `name` matches the judge name (the pairing
+`align()` needs). It is additive — it composes `make_scorer` and
+`create_aligned_scorer`, and does not change the scorers above or the
+`token_efficiency` computed-inputs exclusion. CLI: `ail-author-judge`. Full
+details, the two hard conventions, and the large-trace/Designer-Critic seams are
+in **`docs/JUDGE_AUTHORING.md`**.
+
 ### Alignment (MemAlign) — `ail.judges.alignment`
 
 ```python
@@ -371,6 +383,20 @@ The same shape records the **unaligned** case (`unaligned_report`, used by
 not-yet-trusted until labels exist. This is the authoritative `aligned` flag the
 loop reads (the experiment tag `ail.judge.<name>.aligned` is its best-effort,
 queryable companion).
+
+## Auto-align trigger — `ail.judges.auto_align`
+
+The pieces above are *driven* by the **auto-align trigger** — a scheduled
+Databricks job (`ail-auto-align`) that, per judged dimension, aligns the judge
+with MemAlign once enough human labels exist, re-aligns as more accrue, guards
+trust with the agreement floor, and rolls back a regression. It turns "a human
+adds labels" into "the judge becomes trusted automatically" — orchestration only,
+reusing `labeling` / `alignment` / `agreement` / `registration` unchanged. It
+registers the aligned judge with `register_prealigned_scorer` (register the exact
+judge whose held-out agreement was measured, without re-running MemAlign), so a
+rolled-back candidate is simply never promoted and the prior aligned version stays
+live. See **`docs/AUTO_ALIGN.md`** for the full decision, the per-judge watermark,
+and the bundle knobs.
 
 ## Resolved MLflow version
 

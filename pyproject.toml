@@ -50,12 +50,17 @@ ail-readiness = "ail.jobs.readiness_preflight:main"
 # champion alias to a prior version. Fail-closed, dry-run by default (--yes to write);
 # prints the WAS->BECOMES audit. Re-run the lineage publish after (see docs).
 ail-revert = "ail.jobs.revert_champion:main"
-# Manually-runnable + in-cycle-reused L3/RLM reviewer: a bounded runner that
-# idempotently attaches rlm_* feedback only to sampled traces without RLM
-# assessments. The standalone trace-table-update trigger Job was retired (the
-# trace store is a VIEW, not a Delta table, so table_update is infeasible); this
-# reviewer now runs INSIDE the scheduled optimization cycle (ail-optimization-cycle)
-# and remains available to run by hand.
+# Judge authoring: `ail-author-judge <name> --description "..."` turns a natural-language
+# quality dimension into a registered, MemAlign-alignable {{ trace }} judge plus the
+# name-matched label schema. Reuses ail.judges.authoring; --no-register to preview.
+ail-author-judge = "ail.jobs.author_judge:main"
+# Standalone SCHEDULED L3/RLM deep-reviewer (resources/continuous_rlm.job.yml): a
+# bounded runner that idempotently attaches rlm_* feedback only to sampled traces
+# without RLM assessments, on the most powerful viable judge (databricks-gpt-5-5-pro)
+# and steered by the user's goal. It is SCHEDULED, not trace-arrival-triggered (the
+# trace store is a VIEW, so table_update is infeasible — the reason its original
+# trigger job was retired). The same reviewer also runs INSIDE ail-optimization-cycle
+# on the lighter in-cycle model; both remain runnable by hand.
 ail-continuous-rlm = "ail.jobs.continuous_rlm:main"
 # Unified, scheduled optimization cycle: one cadence over one sampled trace set —
 # in-cycle RLM review, then the layered A+B loop controller (deterministic rules +
@@ -70,6 +75,11 @@ ail-optimization-cycle = "ail.jobs.optimization_cycle:main"
 # proposals) as it runs. Static env-token auth; fail-closed; a human approves in the
 # app. See docs/LOCAL_RUNNER.md.
 ail-local-cycle = "ail.jobs.local_cycle:main"
+# Scheduled auto-align trigger: per judged dimension, align the judge with MemAlign
+# once enough human labels exist, re-align as more accrue, guard trust with the
+# agreement floor, and roll back a regression. Turns "a human adds labels" into
+# "the judge becomes trusted automatically". Reuses ail.judges.auto_align.
+ail-auto-align = "ail.jobs.auto_align_job:main"
 
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
