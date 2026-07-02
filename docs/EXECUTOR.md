@@ -112,10 +112,11 @@ An independent cross-review found five safety issues; each is fixed and tested
 The preview agent in `produce_preview` runs with edit + Bash tools, so symlink-neutralization
 (BLOCKER 1) alone cannot stop an *absolute-path* write escaping the sandbox copy during a
 preview that must be side-effect-free. The preview therefore also runs under the Claude Agent
-SDK's **own native filesystem sandbox**: `ClaudeAgentOptions(sandbox=…)` scopes the agent's
-writes to the sandbox copy directory (write tools allowed only under `{sandbox}/**`,
-`permission_mode="dontAsk"`), so the agent cannot write outside the copy regardless of the path
-form it attempts.
+SDK's **own native filesystem sandbox** *plus* sandbox-scoped write-tool permission rules: the
+`ClaudeAgentOptions` sandbox setting confines the agent's filesystem effects (including Bash) to
+the sandbox copy, and the write tools are additionally permission-scoped to `{sandbox}/**` under
+`permission_mode="dontAsk"`. Together these mean the agent cannot write outside the copy
+regardless of the path form it attempts.
 
 This is **fail-closed**: the adapter validates that the installed `claude-agent-sdk` actually
 exposes the native sandbox option, and if it does not, `produce_preview` refuses to run and
