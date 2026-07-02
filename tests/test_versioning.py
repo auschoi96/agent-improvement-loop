@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from ail.versioning import (
     SNAPSHOT_TAG_PREFIX,
     FileSnapshot,
     RestoreError,
+    RestoreRollbackError,
     SnapshotRef,
     SnapshotWriteError,
     load_snapshot_ref,
@@ -448,3 +450,182 @@ def test_file_snapshot_contract_is_strict() -> None:
         FileSnapshot(  # type: ignore[call-arg]
             original_path="/a", volume_path="/b", sha256="x", size=1, extra="nope"
         )
+
+
+# ---------------------------------------------------------------------------
+# Transactional restore: a mid-restore local I/O error is never a silent partial
+# (BLOCKING 1: swap-back rollback; BLOCKING 2: reversible staging)
+# ---------------------------------------------------------------------------
+
+
+def _tree_state(root: Path) -> dict[str, Any]:
+    """Capture the exact on-disk state under ``root``: file bytes + directory set.
+
+    ``rglob('*')`` includes dotfiles, so a leaked ``.ail-restore`` / ``.ail-rb`` temp
+    would show up here and fail an equality check — exactly what the byte-for-byte
+    assertions rely on.
+    """
+    files: dict[str, bytes] = {}
+    dirs: set[str] = set()
+    for path in sorted(root.rglob("*")):
+        rel = str(path.relative_to(root))
+        if path.is_dir():
+            dirs.add(rel)
+        elif path.is_file():
+            files[rel] = path.read_bytes()
+    return {"files": files, "dirs": dirs}
+
+
+def _fail_os_replace_on(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    swap_dsts: frozenset[str] = frozenset(),
+    rollback_dsts: frozenset[str] = frozenset(),
+) -> None:
+    """Patch ``os.replace`` to fail on specific swaps and/or rollback writes.
+
+    A rollback write is identified by its ``.ail-rb`` temp suffix (vs a swap's
+    ``.ail-restore``), so a test can fail a file's *rollback* without also failing its
+    initial swap even though both target the same destination path.
+    """
+    real_replace = os.replace
+
+    def fake_replace(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        is_rollback = str(src).endswith(".ail-rb")
+        if is_rollback and str(dst) in rollback_dsts:
+            raise OSError(f"simulated rollback os.replace failure -> {dst}")
+        if not is_rollback and str(dst) in swap_dsts:
+            raise OSError(f"simulated swap os.replace failure -> {dst}")
+        real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fake_replace)
+
+
+def _three_existing_files(tmp_path: Path, client: FakeVolumeClient) -> tuple[Path, Path, Path]:
+    """Snapshot three files (order a, b, c), then mutate them to distinct local bytes."""
+    a = _write(tmp_path / "a.txt", b"A-snapshot")
+    b = _write(tmp_path / "b.txt", b"B-snapshot")
+    c = _write(tmp_path / "c.txt", b"C-snapshot")
+    snapshot_paths([a, b, c], volume_root=VOLUME_ROOT, change_id="chg", client=client)
+    return a, b, c
+
+
+def test_swap_failure_fully_rolls_back_to_pre_restore_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """os.replace fails on the 2nd of 3 targets -> full rollback; NO silent partial."""
+    client = FakeVolumeClient()
+    a, b, c = _three_existing_files(tmp_path, client)
+    ref = load_snapshot_ref(f"{VOLUME_ROOT}/chg", client=client)
+
+    a.write_bytes(b"A-local")
+    b.write_bytes(b"B-local")
+    c.write_bytes(b"C-local")
+    pre = _tree_state(tmp_path)
+
+    _fail_os_replace_on(monkeypatch, swap_dsts=frozenset({str(b)}))  # b is the 2nd swap
+
+    with pytest.raises(RestoreError) as exc:
+        restore_snapshot(ref, client=client)
+
+    assert not isinstance(exc.value, RestoreRollbackError)  # rollback succeeded
+    assert "rolled back to pre-restore state" in str(exc.value)
+    # The key anti-silent-partial assertion: `a` was swapped, then rolled back — it must
+    # hold its pre-restore bytes, NOT the restored snapshot bytes.
+    assert a.read_bytes() == b"A-local"
+    assert _tree_state(tmp_path) == pre  # whole tree byte-for-byte at pre-restore state
+
+
+def test_swap_failure_rolls_back_a_created_file_and_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file/dir that did not exist pre-restore is removed on rollback (no silent partial)."""
+    client = FakeVolumeClient()
+    x = _write(tmp_path / "xdir" / "x.txt", b"X-snapshot")
+    y = _write(tmp_path / "y.txt", b"Y-snapshot")
+    snapshot_paths([x, y], volume_root=VOLUME_ROOT, change_id="chg", client=client)
+    ref = load_snapshot_ref(f"{VOLUME_ROOT}/chg", client=client)
+
+    # x (and its dir) do NOT exist pre-restore; y exists (mutated).
+    x.unlink()
+    x.parent.rmdir()
+    y.write_bytes(b"Y-local")
+    pre = _tree_state(tmp_path)
+
+    _fail_os_replace_on(monkeypatch, swap_dsts=frozenset({str(y)}))  # x swaps first, y fails
+
+    with pytest.raises(RestoreError) as exc:
+        restore_snapshot(ref, client=client)
+
+    assert not isinstance(exc.value, RestoreRollbackError)
+    assert not x.exists()  # the created file was removed on rollback
+    assert not x.parent.exists()  # ...and so was the directory staging created
+    assert _tree_state(tmp_path) == pre
+
+
+def test_swap_failure_with_failing_rollback_raises_loud_named_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If rollback itself fails, a distinct loud error names the exact partial state."""
+    client = FakeVolumeClient()
+    a, b, c = _three_existing_files(tmp_path, client)
+    ref = load_snapshot_ref(f"{VOLUME_ROOT}/chg", client=client)
+
+    a.write_bytes(b"A-local")
+    b.write_bytes(b"B-local")
+    c.write_bytes(b"C-local")
+
+    # Fail the swap of b AND the rollback write of a -> a cannot be reverted.
+    _fail_os_replace_on(
+        monkeypatch, swap_dsts=frozenset({str(b)}), rollback_dsts=frozenset({str(a)})
+    )
+
+    with pytest.raises(RestoreRollbackError) as exc:
+        restore_snapshot(ref, client=client)
+
+    message = str(exc.value)
+    assert "INCONSISTENT" in message
+    assert str(a) in message  # the file left with restored content is named explicitly
+    assert "RESTORED" in message
+    # It really is left restored (not silently reverted); c was never touched.
+    assert a.read_bytes() == b"A-snapshot"
+    assert c.read_bytes() == b"C-local"
+
+
+def test_staging_failure_leaves_tree_byte_for_byte_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A staging failure on file B (of A, B, C) creates/leaves nothing behind."""
+    client = FakeVolumeClient()
+    a = _write(tmp_path / "a.txt", b"A-snapshot")
+    b = _write(tmp_path / "newdir" / "b.txt", b"B-snapshot")  # b lives under a fresh dir
+    c = _write(tmp_path / "c.txt", b"C-snapshot")
+    snapshot_paths([a, b, c], volume_root=VOLUME_ROOT, change_id="chg", client=client)
+    ref = load_snapshot_ref(f"{VOLUME_ROOT}/chg", client=client)
+
+    # Pre-restore: a/c mutated and present; b's dir removed so staging must recreate it.
+    a.write_bytes(b"A-local")
+    c.write_bytes(b"C-local")
+    b.unlink()
+    b.parent.rmdir()
+    pre = _tree_state(tmp_path)
+    assert "newdir" not in pre["dirs"]
+
+    # Fail mkstemp on the 2nd staged file (b) — AFTER its parent dir was created.
+    real_mkstemp = tempfile.mkstemp
+    state = {"calls": 0}
+
+    def fake_mkstemp(*args: Any, **kwargs: Any) -> Any:
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise OSError("simulated staging failure")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "mkstemp", fake_mkstemp)
+
+    with pytest.raises(RestoreError, match="nothing written back"):
+        restore_snapshot(ref, client=client)
+
+    # Nothing created (no newdir), no temp files left, a/c untouched: identical to pre.
+    assert _tree_state(tmp_path) == pre
+    assert not (tmp_path / "newdir").exists()

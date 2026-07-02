@@ -73,12 +73,19 @@ complete.
   the manifest persist, so a change is never reported "versioned / revertible" when
   the snapshot did not persist. (A failed snapshot may leave orphan blobs no ref
   points at — harmless, and overwritten if the same `change_id` is re-snapshotted.)
-- **Restore is all-or-nothing.** Every manifested object is downloaded and its
-  sha256 + size verified against the manifest **before any byte is written back**; a
-  missing or corrupt object raises `RestoreError` and the local tree is left
-  untouched (no half-reverted tree). The verified bytes are then staged to sibling
-  temp files and swapped in with `os.replace`, so even a mid-restore local I/O error
-  cannot leave a partially reverted set.
+- **Restore is transactional — never a silent partial.** Every manifested object is
+  downloaded and its sha256 + size verified against the manifest **before any byte is
+  written back**; a missing or corrupt object raises `RestoreError` and the local
+  tree is left untouched. The verified bytes are then **staged reversibly** (a staging
+  failure removes its temps *and* any newly-created directories, leaving the tree
+  byte-for-byte unchanged), then swapped in with `os.replace`. True cross-file
+  atomicity of N renames is not physically guaranteed on POSIX, so the swap is made
+  **recoverable**: the pre-restore bytes of every target are captured first, and if an
+  `os.replace` fails mid-swap the already-swapped files are rolled back to that state
+  (raising `RestoreError`, tree == pre-restore). If the rollback itself fails, a
+  distinct, loud `RestoreRollbackError` names exactly which files hold restored /
+  rolled-back / original content — so a mid-restore I/O error is never a silent
+  half-reverted tree.
 - **Round-trip integrity:** restored bytes equal snapshotted bytes exactly (tested
   across text / binary / unicode / empty content).
 
