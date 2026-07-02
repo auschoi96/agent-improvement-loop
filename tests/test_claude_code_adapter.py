@@ -8,7 +8,13 @@ its missing-SDK behavior, since the SDK is an optional dependency.
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -82,14 +88,118 @@ class TestBuildNormalizedTrace:
 
 
 class TestRunWithoutSdk:
-    def test_run_returns_failed_result_when_sdk_missing(self) -> None:
-        # claude-agent-sdk is an optional dependency and not installed in CI.
+    def test_run_returns_failed_result_when_sdk_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # claude-agent-sdk is optional; simulate absence even if it is installed locally.
+        monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
         result = ClaudeCodeAdapter().run(AgentTask(prompt="hello"))
         assert result.success is False
         assert result.error is not None
         assert "claude-agent-sdk" in result.error
         assert result.trace.status is TraceStatus.ERROR
         assert result.trace.producer == "claude_code"
+
+
+class TestRunSandboxWiring:
+    def test_run_passes_required_filesystem_sandbox_to_sdk_options(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+        sandbox_real = str(sandbox.resolve())
+        captured_options: dict[str, Any] = {}
+
+        @dataclass(init=False)
+        class FakeClaudeAgentOptions:
+            cwd: str
+            allowed_tools: list[str] | None
+            permission_mode: str
+            mcp_servers: dict[str, object]
+            system_prompt: str
+            setting_sources: list[str]
+            env: dict[str, str]
+            hooks: object | None
+            stderr: object
+            sandbox: dict[str, object] | None = None
+
+            def __init__(self, **kwargs: Any) -> None:
+                captured_options.update(kwargs)
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        class FakeHookMatcher:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+        class FakeResultMessage:
+            session_id = "fake-session"
+            duration_ms = 1
+
+        class FakeClaudeSDKClient:
+            def __init__(self, *, options: FakeClaudeAgentOptions) -> None:
+                self.options = options
+
+            async def __aenter__(self) -> FakeClaudeSDKClient:
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return None
+
+            async def query(self, prompt: str) -> None:
+                assert prompt == "make a sandboxed edit"
+
+            async def receive_response(self) -> AsyncIterator[object]:
+                yield FakeResultMessage()
+
+        sdk_module = types.ModuleType("claude_agent_sdk")
+        sdk_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        sdk_module.ClaudeSDKClient = FakeClaudeSDKClient
+        sdk_module.HookMatcher = FakeHookMatcher
+
+        types_module = types.ModuleType("claude_agent_sdk.types")
+        types_module.AssistantMessage = type("AssistantMessage", (), {})
+        types_module.ResultMessage = FakeResultMessage
+        types_module.SystemMessage = type("SystemMessage", (), {})
+        types_module.TextBlock = type("TextBlock", (), {})
+        types_module.ToolResultBlock = type("ToolResultBlock", (), {})
+        types_module.ToolUseBlock = type("ToolUseBlock", (), {})
+        types_module.UserMessage = type("UserMessage", (), {})
+
+        monkeypatch.setitem(sys.modules, "claude_agent_sdk", sdk_module)
+        monkeypatch.setitem(sys.modules, "claude_agent_sdk.types", types_module)
+
+        result = ClaudeCodeAdapter().run(
+            AgentTask(
+                prompt="make a sandboxed edit",
+                cwd=str(sandbox),
+                allowed_tools=["Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+                timeout_seconds=5,
+                params={
+                    "claude_code_filesystem_sandbox": {
+                        "required": True,
+                        "sandbox_dir": sandbox_real,
+                    }
+                },
+            )
+        )
+
+        assert result.success is True
+        assert captured_options["sandbox"] == {
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+        }
+        assert captured_options["permission_mode"] == "dontAsk"
+        assert Path(captured_options["cwd"]).resolve() == sandbox.resolve()
+        assert captured_options["allowed_tools"] == [
+            "Read",
+            f"Write({sandbox_real}/**)",
+            f"Edit({sandbox_real}/**)",
+            f"MultiEdit({sandbox_real}/**)",
+            f"NotebookEdit({sandbox_real}/**)",
+            "Bash(*)",
+        ]
 
 
 class TestHardTimeout:

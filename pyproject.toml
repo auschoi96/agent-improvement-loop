@@ -81,6 +81,14 @@ ail-companion-planner = "ail.jobs.companion_planner:main"
 # agreement floor, and roll back a regression. Turns "a human adds labels" into
 # "the judge becomes trusted automatically". Reuses ail.judges.auto_align.
 ail-auto-align = "ail.jobs.auto_align_job:main"
+# Local companion executor (L7b-2, the open-ended AGENT_TASK executor). Deployer-run
+# (Claude Agent SDK compute, not serverless): previews PENDING AGENT_TASK proposals by
+# running a sandboxed agent against a COPY of the agent's target_workspace (recording the
+# real diff + an L6 snapshot for review), and commits APPROVED ones to the live workspace
+# by applying the STORED, approved change-set (snapshot-live-first, then apply, then
+# record) — it never re-runs the agent at commit. Databricks-native (no git). Requires a
+# STATIC DATABRICKS_TOKEN pinned to the workspace host (a --profile OAuth login is refused).
+ail-agent-executor = "ail.jobs.agent_executor:main"
 
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
