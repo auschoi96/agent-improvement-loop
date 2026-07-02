@@ -67,6 +67,15 @@ ail-continuous-rlm = "ail.jobs.continuous_rlm:main"
 # the LLM-agent planner), then PENDING-proposal publish. Propose-only; applies
 # nothing (a human approves the apply in the app, lane 3).
 ail-optimization-cycle = "ail.jobs.optimization_cycle:main"
+# Local companion planner (EVIDENCE-FIRST, no proving): the deployer-run planner lane
+# (docs/PRODUCT_ARCHITECTURE.md §4/§7). Reads an agent's judge/RLM/L0 evidence, plans
+# (Lane A rules + the LLM Lane-B planner), gates on readiness + judge trust ONLY (no
+# frozen-suite prover, no ProofSummary), and publishes PENDING evidence-backed proposals
+# to agent_proposed_actions. Proving is opt-in Tier-2, run later on the user's frozen
+# suite; this proves nothing and applies nothing. Requires a STATIC DATABRICKS_TOKEN
+# pinned to the experiment's workspace host (a --profile OAuth login is refused — its
+# mid-run refresh cannot persist from a long-running local process).
+ail-companion-planner = "ail.jobs.companion_planner:main"
 # Scheduled auto-align trigger: per judged dimension, align the judge with MemAlign
 # once enough human labels exist, re-align as more accrue, guard trust with the
 # agreement floor, and roll back a regression. Turns "a human adds labels" into

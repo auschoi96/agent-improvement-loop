@@ -16,8 +16,14 @@ proposed-action record" requires:
 * **Proof** — the :class:`ProofSummary`: the frozen-suite objective delta with
   correctness held, sourced from the comparison harness's aggregate
   (:class:`~ail.optimize.phase2.Phase2Artifact`, itself built from
-  :class:`~ail.compare.contract.ComparisonResult`). Fail-closed: a proposal only
-  exists when this proved an improvement.
+  :class:`~ail.compare.contract.ComparisonResult`). **Optional.** A
+  *prove-before-propose* proposal (the ``ail.loop.controller.run_cycle`` path)
+  carries it and only exists when it proved an improvement; an **evidence-first**
+  proposal (the ``ail.loop.evidence_cycle.run_evidence_cycle`` path, per
+  ``docs/PRODUCT_ARCHITECTURE.md`` §3/§7 — proving is opt-in Tier-2, not a pre-ship
+  gate) carries ``proof=None`` and rests on its evidence + gate status alone. The
+  human decides on the evidence, optionally running Tier-2 "verify on my suite"
+  later to attach a proof.
 * **Gate status** — the :class:`GateStatus`: the readiness tier, the certifying
   judge's agreement, and scored coverage, from
   :class:`~ail.readiness.contract.ReadinessStatus`.
@@ -381,7 +387,7 @@ class ProposedAction(_Model):
     goal_cohort: str
     trigger: TriggerSignal
     change: ProposedChange
-    proof: ProofSummary
+    proof: ProofSummary | None = None
     gate_status: GateStatus
     created_at: str | None = None  # ISO-8601
     notes: list[str] = Field(default_factory=list)

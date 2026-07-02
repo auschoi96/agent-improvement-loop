@@ -450,6 +450,17 @@ def apply_approved_proposal(
 
     # --- approve preconditions (re-verify proof, then re-run the gate) --------
     proof = proposal.proof
+    if proof is None:
+        # An evidence-first proposal (ail.loop.evidence_cycle) carries no frozen-suite
+        # proof (proof=None). This prove-requiring apply path refuses it — identical to
+        # the unproven case below — until an opt-in Tier-2 verification attaches a
+        # measured delta (docs/PRODUCT_ARCHITECTURE.md §3/§7). Fail-closed.
+        raise ApplyRefused(
+            f"proposal {proposal.proposal_id!r} carries no frozen-suite proof "
+            "(evidence-first, proof=None) — refusing to apply without an opt-in Tier-2 "
+            "verification (fail-closed); run 'verify on my suite' to attach a measured "
+            "delta, then approve"
+        )
     if not (proof.proved_improvement and proof.correctness_held):
         raise ApplyRefused(
             f"proposal {proposal.proposal_id!r} no longer carries a proven improvement "
