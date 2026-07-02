@@ -26,12 +26,19 @@ Fail-closed by construction (this framework's whole point is anti-fake-good)
   :class:`SnapshotWriteError`. A :class:`SnapshotRef` is returned **only** after
   every blob *and* the manifest have persisted, so a change is never reported
   "versioned / revertible" when the snapshot did not persist.
-* **Restore is all-or-nothing.** Every manifested file is downloaded and its
-  sha256 + size verified against the manifest *before any bytes are written back*;
-  a missing or corrupt object raises :class:`RestoreError` and nothing is written
-  (no half-reverted tree). The verified bytes are then staged to sibling temp files
-  and swapped in, so a mid-restore local I/O error still cannot leave a partially
-  reverted set.
+* **Restore is transactional (never a silent partial).** Every manifested file is
+  downloaded and its sha256 + size verified against the manifest *before any bytes
+  are written back*; a missing or corrupt object raises :class:`RestoreError` and
+  nothing is written. The verified bytes are then staged to sibling temp files — a
+  staging failure fully reverses itself (temps and any newly-created directories are
+  removed), leaving the local tree byte-for-byte unchanged. Only then are the temps
+  swapped in with ``os.replace``. True cross-file atomicity of N renames is not
+  physically guaranteed on a POSIX filesystem, so the swap is made *recoverable*: the
+  pre-restore bytes of every target are captured first, and if any ``os.replace``
+  fails mid-swap the already-swapped files are rolled back to that captured state
+  (raising :class:`RestoreError`). If the rollback itself fails, a distinct, loud
+  :class:`RestoreRollbackError` names exactly which files are in which state — so a
+  mid-restore I/O error is never a silent half-reverted tree.
 
 Injectable client (no live Databricks call on import or in tests)
 -----------------------------------------------------------------
@@ -75,6 +82,7 @@ __all__ = [
     "SnapshotError",
     "SnapshotWriteError",
     "RestoreError",
+    "RestoreRollbackError",
     "FileSnapshot",
     "SnapshotRef",
     "VolumeClient",
@@ -124,11 +132,25 @@ class SnapshotWriteError(SnapshotError):
 
 
 class RestoreError(SnapshotError):
-    """A restore could not be completed safely — nothing is written back.
+    """A restore could not be completed — the local tree is at its *pre-restore* state.
 
-    Raised when a manifested object is missing or its bytes do not match the
-    manifest's sha256/size (corrupt). Verification of *every* file completes before
-    any write, so this leaves the local tree untouched.
+    Raised when a manifested object is missing/corrupt (verification of every file
+    completes before any write, so the tree is untouched), when the verified bytes
+    cannot be staged (staging is fully reversed first), or when a mid-swap
+    ``os.replace`` failed and the already-swapped files were **successfully rolled
+    back** to their pre-restore content. In every case the caller can treat the tree
+    as it was before the restore. (The unrecoverable case raises the distinct
+    :class:`RestoreRollbackError` instead.)
+    """
+
+
+class RestoreRollbackError(RestoreError):
+    """A mid-swap failure could **not** be fully rolled back — the tree is inconsistent.
+
+    Raised only when an ``os.replace`` failed part-way through the swap and the
+    automatic rollback of already-swapped files then failed too. The message names
+    exactly which files hold restored (new) / rolled-back / original content, so the
+    inconsistency is never silent and a human/audit can reconcile the exact state.
     """
 
 
@@ -309,17 +331,20 @@ def _upload(client: VolumeClient, volume_path: str, data: bytes) -> None:
 def restore_snapshot(ref: SnapshotRef, *, client: VolumeClient) -> None:
     """Restore the exact snapshotted bytes in ``ref`` to their original paths.
 
-    All-or-nothing: every manifested object is downloaded and its sha256 + size
-    verified against the manifest **before any byte is written back**; a missing or
-    corrupt object raises :class:`RestoreError` and the local tree is left untouched.
-    The verified bytes are then staged to sibling temp files and swapped in with
-    ``os.replace``, so even a mid-restore local I/O error cannot leave a half-reverted
-    tree. Restoring a file whose original path no longer exists recreates it (and any
-    missing parent directories).
+    Transactional and never a silent partial: every manifested object is downloaded
+    and its sha256 + size verified against the manifest **before any byte is written
+    back**; a missing or corrupt object raises :class:`RestoreError` and the local
+    tree is left untouched. The verified bytes are then written via
+    :func:`_write_back`, which stages them reversibly and swaps them in with a
+    captured-state rollback (see that function). Restoring a file whose original path
+    no longer exists recreates it (and any missing parent directories).
 
     Raises:
-        RestoreError: if the ref is empty, or any object is missing/corrupt, or the
-            verified bytes cannot be staged.
+        RestoreError: if the ref is empty, any object is missing/corrupt, the verified
+            bytes cannot be staged, or a mid-swap failure was fully rolled back to the
+            pre-restore state.
+        RestoreRollbackError: if a mid-swap failure could not be fully rolled back —
+            the message names exactly which files are in which state.
     """
     if not ref.files:
         raise RestoreError("snapshot ref carries no files; nothing to restore (invalid/empty ref)")
@@ -335,19 +360,8 @@ def restore_snapshot(ref: SnapshotRef, *, client: VolumeClient) -> None:
         _verify(entry, data)
         verified.append((entry.original_path, data))
 
-    # Phase 2 — verification passed for ALL files: stage each to a sibling temp, then
-    # swap them in. Staging fully before the first swap keeps a mid-restore I/O error
-    # from leaving a partially reverted set.
-    staged: list[tuple[str, str]] = []  # (tmp_path, target_path)
-    try:
-        for original_path, data in verified:
-            staged.append((_stage(Path(original_path), data), original_path))
-    except OSError as exc:
-        for tmp, _ in staged:
-            _silent_unlink(tmp)
-        raise RestoreError(f"failed to stage restored files (nothing written back): {exc}") from exc
-    for tmp, target in staged:
-        os.replace(tmp, target)
+    # Phase 2 — verification passed for ALL files: write them back transactionally.
+    _write_back(verified)
 
 
 def _download(client: VolumeClient, entry: FileSnapshot) -> bytes:
@@ -373,13 +387,170 @@ def _verify(entry: FileSnapshot, data: bytes) -> None:
         )
 
 
-def _stage(path: Path, data: bytes) -> str:
-    """Write ``data`` to a sibling temp file (creating parents); return its path."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".ail-restore")
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    return tmp
+def _write_back(verified: list[tuple[str, bytes]]) -> None:
+    """Write the verified bytes to their targets — reversible staging + rollback swap.
+
+    Two transactional phases:
+
+    * **Stage** every file to a sibling temp, tracking every temp *and* every directory
+      newly created along the way. If any staging step fails, all created temps are
+      unlinked and all newly-created (now-empty) directories removed, so the local tree
+      is left byte-for-byte identical to before — a staging failure writes *nothing*.
+    * **Swap.** Capture the pre-restore bytes of every target first, then ``os.replace``
+      each temp into place. If a replace fails mid-loop, roll the already-swapped files
+      back to the captured state (restoring prior bytes, or removing a file that did not
+      exist pre-restore) and raise :class:`RestoreError`. If the rollback itself fails,
+      raise :class:`RestoreRollbackError` naming exactly which files hold restored /
+      rolled-back / original content — never a silent partial.
+    """
+    staged: list[tuple[str, str]] = []  # (tmp_path, target_path) in verified order
+    created_dirs: list[Path] = []  # directories newly created during staging
+    created_temps: list[str] = []  # every temp file created (for cleanup)
+
+    # --- Stage (fully reversible) ---
+    try:
+        for target_str, data in verified:
+            target = Path(target_str)
+            _make_missing_dirs(target.parent, created_dirs)
+            fd, tmp = tempfile.mkstemp(
+                dir=str(target.parent), prefix=f".{target.name}.", suffix=".ail-restore"
+            )
+            created_temps.append(tmp)  # tracked before the write, so a write failure can't leak it
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            staged.append((tmp, target_str))
+    except OSError as exc:
+        for tmp in created_temps:
+            _silent_unlink(tmp)
+        _rmdir_created(created_dirs)
+        raise RestoreError(f"failed to stage restored files (nothing written back): {exc}") from exc
+
+    # --- Capture pre-restore state so a mid-swap failure can roll back ---
+    prior: dict[str, bytes | None] = {}
+    for _tmp, target_str in staged:
+        target = Path(target_str)
+        try:
+            prior[target_str] = target.read_bytes() if target.is_file() else None
+        except OSError as exc:
+            for tmp, _ in staged:
+                _silent_unlink(tmp)
+            _rmdir_created(created_dirs)
+            raise RestoreError(
+                f"cannot read current bytes of {target_str!r} to guarantee safe rollback; "
+                f"nothing written back: {exc}"
+            ) from exc
+
+    # --- Swap in; roll back on any failure ---
+    replaced: list[str] = []
+    for idx, (tmp, target_str) in enumerate(staged):
+        try:
+            os.replace(tmp, target_str)
+        except OSError as exc:
+            # Temps not yet swapped are orphaned; their targets are untouched originals.
+            for leftover_tmp, _ in staged[idx:]:
+                _silent_unlink(leftover_tmp)
+            rolled_back, still_restored = _rollback(replaced, prior)
+            if still_restored:
+                raise RestoreRollbackError(
+                    _rollback_failure_message(
+                        failed_target=target_str,
+                        cause=exc,
+                        still_restored=still_restored,
+                        rolled_back=rolled_back,
+                        untouched=[t for _t, t in staged if t not in replaced],
+                    )
+                ) from exc
+            # Full rollback succeeded — drop any now-empty directories we created.
+            _rmdir_created(created_dirs)
+            raise RestoreError(
+                "restore aborted; local tree rolled back to pre-restore state "
+                f"(os.replace of {target_str!r} failed): {type(exc).__name__}: {exc}"
+            ) from exc
+        replaced.append(target_str)
+
+
+def _make_missing_dirs(directory: Path, created: list[Path]) -> None:
+    """Create ``directory`` (and missing ancestors), appending each created dir to ``created``.
+
+    Only directories that did **not** already exist are created and tracked, so a
+    caller can later remove exactly what it made (via :func:`_rmdir_created`) without
+    touching pre-existing directories. Directories are created shallowest-first and
+    appended as they are made, so a mid-way failure still leaves the ones already
+    created tracked for cleanup.
+    """
+    missing: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:  # filesystem root
+            break
+        current = current.parent
+    for made in reversed(missing):
+        made.mkdir()
+        created.append(made)
+
+
+def _rmdir_created(created_dirs: list[Path]) -> None:
+    """Remove directories we created, deepest-first; skip any that are not empty."""
+    for directory in sorted(set(created_dirs), key=lambda d: len(d.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
+def _rollback(replaced: list[str], prior: dict[str, bytes | None]) -> tuple[list[str], list[str]]:
+    """Undo already-swapped targets. Returns ``(rolled_back, still_restored)``.
+
+    ``rolled_back`` = reverted to pre-restore content (or removed if it did not exist
+    pre-restore); ``still_restored`` = the revert failed, so the target still holds the
+    new restored bytes. Each revert is itself atomic (temp + ``os.replace``) so a
+    target is only ever old-content or new-content, never half-written.
+    """
+    rolled_back: list[str] = []
+    still_restored: list[str] = []
+    for target_str in replaced:
+        original = prior[target_str]
+        try:
+            if original is None:
+                Path(target_str).unlink()
+            else:
+                _atomic_write_bytes(Path(target_str), original)
+            rolled_back.append(target_str)
+        except OSError:
+            still_restored.append(target_str)
+    return rolled_back, still_restored
+
+
+def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    """Write ``data`` to ``target`` atomically (temp in the same dir, then ``os.replace``)."""
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", suffix=".ail-rb")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp, target)
+    except OSError:
+        _silent_unlink(tmp)
+        raise
+
+
+def _rollback_failure_message(
+    *,
+    failed_target: str,
+    cause: OSError,
+    still_restored: list[str],
+    rolled_back: list[str],
+    untouched: list[str],
+) -> str:
+    """Build the loud, exhaustive message for an un-rolled-back partial restore."""
+    return (
+        "restore FAILED and could not be fully rolled back — the local tree is in a "
+        "known-INCONSISTENT state and needs manual reconciliation. "
+        f"os.replace of {failed_target!r} failed ({type(cause).__name__}: {cause}). "
+        f"Files LEFT WITH RESTORED (new) content: {sorted(still_restored)}. "
+        f"Files rolled back to pre-restore content: {sorted(rolled_back)}. "
+        f"Files never modified (original content): {sorted(untouched)}."
+    )
 
 
 def _silent_unlink(tmp: str) -> None:
