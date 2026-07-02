@@ -422,6 +422,32 @@ class TestWatermarkReadFailsClosed:
         assert seams["align_calls"] == []
         assert store.writes == []
 
+    def test_partial_watermark_skips_the_judge_end_to_end(self, seams: dict[str, Any]) -> None:
+        # A partial EXISTING watermark (a prior alignment happened: label_count +
+        # aligned_at present, but the agreement bar tag is missing) must make the
+        # real store raise -> the judge is skipped, not re-aligned/promoted.
+        seams["labels"] = 40
+        seams["score"] = _agreement(0.9)
+        client = _FakeMlflowClient(
+            tags={
+                "ail.autoalign.correctness.label_count": "25",
+                "ail.autoalign.correctness.aligned_at": "t0",
+                # no agreement tag -> partial -> fail closed
+            }
+        )
+        store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
+        result = auto_align_judge(
+            CORRECTNESS,
+            experiment_id="exp1",
+            source=object(),
+            store=store,
+            now="2026-07-02T00:00:00+00:00",
+        )
+        assert result.status is AutoAlignStatus.FAILED
+        assert seams["align_calls"] == []  # never aligned
+        assert seams["register_calls"] == []  # never promoted
+        assert client.set_calls == []  # prior watermark not overwritten
+
 
 # --- reading human labels (the L1 name-matching read side) -----------------
 
@@ -670,6 +696,48 @@ class TestExperimentTagWatermarkStore:
         store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
         with pytest.raises(WatermarkReadError):
             store.read("correctness")
+
+    def test_partial_watermark_missing_agreement_raises(self) -> None:
+        # A prior alignment happened (label_count + aligned_at present) but the
+        # agreement tag is absent -> reading it as agreement=None would drop the
+        # last-known-good bar and skip rollback on the next re-align. Fail closed.
+        client = _FakeMlflowClient(
+            tags={
+                "ail.autoalign.correctness.label_count": "25",
+                "ail.autoalign.correctness.aligned_at": "t0",
+                # no agreement tag
+            }
+        )
+        store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
+        with pytest.raises(WatermarkReadError):
+            store.read("correctness")
+
+    def test_partial_watermark_missing_aligned_at_raises(self) -> None:
+        client = _FakeMlflowClient(
+            tags={
+                "ail.autoalign.correctness.label_count": "25",
+                "ail.autoalign.correctness.agreement": "0.9",
+                # no aligned_at tag
+            }
+        )
+        store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
+        with pytest.raises(WatermarkReadError):
+            store.read("correctness")
+
+    def test_complete_watermark_with_empty_agreement_bar_is_valid(self) -> None:
+        # A held/rolled-back state writes agreement="" (present, empty) + aligned_at="".
+        # That is COMPLETE (all three tags present), not partial: read it, don't raise.
+        client = _FakeMlflowClient(
+            tags={
+                "ail.autoalign.correctness.label_count": "25",
+                "ail.autoalign.correctness.agreement": "",
+                "ail.autoalign.correctness.aligned_at": "",
+            }
+        )
+        store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
+        assert store.read("correctness") == AutoAlignState(
+            label_count=25, agreement=None, aligned_at=None
+        )
 
     def test_none_agreement_serializes_to_empty(self) -> None:
         client = _FakeMlflowClient()

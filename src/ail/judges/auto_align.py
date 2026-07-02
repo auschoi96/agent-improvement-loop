@@ -335,32 +335,43 @@ class ExperimentTagWatermarkStore:
                 f"experiment {self.experiment_id}: {exc}"
             ) from exc
         tags: Mapping[str, str] = dict(getattr(experiment, "tags", None) or {})
-        count_tag = tags.get(self._key(judge_name, "label_count"))
-        agreement_tag = tags.get(self._key(judge_name, "agreement"))
-        aligned_at_tag = tags.get(self._key(judge_name, "aligned_at"))
+        fields = {
+            name: tags.get(self._key(judge_name, name))
+            for name in ("label_count", "agreement", "aligned_at")
+        }
 
         # No watermark tags at all -> a genuine first run; proceed with fresh state.
-        if count_tag is None and agreement_tag is None and aligned_at_tag is None:
+        if all(value is None for value in fields.values()):
             return AutoAlignState()
 
-        # A watermark EXISTS. Every field must parse, else it is malformed/partial:
-        # do NOT downgrade a previously-aligned judge to "never aligned" -> fail closed.
-        label_count = _parse_int(count_tag)
+        # A watermark EXISTS (some tag is present). It must be COMPLETE and every
+        # field must parse. A missing companion tag is a partial/corrupt watermark:
+        # fail closed rather than downgrade a previously-aligned judge to "never
+        # aligned" (which would drop the last-known-good agreement bar and skip the
+        # rollback guard). This distinguishes "no tags" (first run, above) from
+        # "some-but-not-all" (partial -> fail closed).
+        missing = sorted(name for name, value in fields.items() if value is None)
+        if missing:
+            raise WatermarkReadError(
+                f"auto-align watermark for judge {judge_name!r} is partial: tag(s) {missing} "
+                "missing while others are present; failing closed"
+            )
+        label_count = _parse_int(fields["label_count"])
         if label_count is None:
             raise WatermarkReadError(
-                f"auto-align watermark for judge {judge_name!r} exists but its label_count "
-                f"tag is missing or malformed ({count_tag!r}); failing closed"
+                f"auto-align watermark for judge {judge_name!r} has a malformed label_count "
+                f"tag ({fields['label_count']!r}); failing closed"
             )
-        agreement = _parse_optional_float(agreement_tag)
+        agreement = _parse_optional_float(fields["agreement"])
         if agreement is _MALFORMED:
             raise WatermarkReadError(
-                f"auto-align watermark for judge {judge_name!r} exists but its agreement "
-                f"tag is malformed ({agreement_tag!r}); failing closed"
+                f"auto-align watermark for judge {judge_name!r} has a malformed agreement "
+                f"tag ({fields['agreement']!r}); failing closed"
             )
         return AutoAlignState(
             label_count=label_count,
             agreement=agreement,
-            aligned_at=aligned_at_tag or None,
+            aligned_at=fields["aligned_at"] or None,
         )
 
     def write(self, judge_name: str, state: AutoAlignState) -> None:
