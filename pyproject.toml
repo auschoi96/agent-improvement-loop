@@ -54,12 +54,13 @@ ail-revert = "ail.jobs.revert_champion:main"
 # quality dimension into a registered, MemAlign-alignable {{ trace }} judge plus the
 # name-matched label schema. Reuses ail.judges.authoring; --no-register to preview.
 ail-author-judge = "ail.jobs.author_judge:main"
-# Manually-runnable + in-cycle-reused L3/RLM reviewer: a bounded runner that
-# idempotently attaches rlm_* feedback only to sampled traces without RLM
-# assessments. The standalone trace-table-update trigger Job was retired (the
-# trace store is a VIEW, not a Delta table, so table_update is infeasible); this
-# reviewer now runs INSIDE the scheduled optimization cycle (ail-optimization-cycle)
-# and remains available to run by hand.
+# Standalone SCHEDULED L3/RLM deep-reviewer (resources/continuous_rlm.job.yml): a
+# bounded runner that idempotently attaches rlm_* feedback only to sampled traces
+# without RLM assessments, on the most powerful viable judge (databricks-gpt-5-5-pro)
+# and steered by the user's goal. It is SCHEDULED, not trace-arrival-triggered (the
+# trace store is a VIEW, so table_update is infeasible — the reason its original
+# trigger job was retired). The same reviewer also runs INSIDE ail-optimization-cycle
+# on the lighter in-cycle model; both remain runnable by hand.
 ail-continuous-rlm = "ail.jobs.continuous_rlm:main"
 # Unified, scheduled optimization cycle: one cadence over one sampled trace set —
 # in-cycle RLM review, then the layered A+B loop controller (deterministic rules +
