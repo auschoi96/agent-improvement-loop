@@ -61,14 +61,51 @@ written, an honest error is raised, and the live `target_workspace` stays byte-f
 |---|---|---|
 | a | `produce_preview` leaves the live workspace byte-for-byte untouched, even while the agent runs | `test_preview_leaves_live_workspace_untouched` |
 | b | `commit_approved` applies the **stored** change and never re-runs the agent (no runner param; never builds one; applied bytes are the stored ones, not a re-run) | `test_commit_has_no_agent_runner_parameter`, `test_commit_applies_stored_change_never_reruns_agent` |
-| c | Committed live bytes == the previewed produced bytes (and match `preview_diff`) | `test_committed_equals_previewed` |
+| c | Committed live bytes == the previewed produced bytes (`preview_diff` renders from the **stored snapshot**, not a mutable sandbox re-read) | `test_committed_equals_previewed`, `test_preview_diff_from_snapshot_ignores_post_snapshot_sandbox_mutation` |
 | d | Snapshot-live-first crash-safety: a failed apply leaves the tree untouched, with the revert point already taken | `test_commit_snapshot_first_crash_safety` |
 | e | Every fail-closed refusal (missing workspace, non-`AGENT_TASK`, non-`APPROVED`, missing/stale `produced_change_ref`, agent-produced-nothing, agent error, deletions, path escape) | `test_preview_refuses_*`, `test_commit_refuses_*` |
 | f | No live SDK / MLflow / Databricks call — only injected seams | `test_no_live_seams_touched` (+ all tests use fakes) |
 
 The runner's contract is pinned in `tests/test_agent_executor.py` (static-auth refusal,
 fail-closed on an unreadable table, dry-run writes nothing, a real run
-previews/skips/commits, and the persistence SQL).
+previews/skips/commits, the persistence SQL, and the row-count-checked writes).
+
+## Cross-review hardening (BLOCKERs 1–5)
+
+An independent cross-review found five safety issues; each is fixed and tested
+(fail-without / pass-with):
+
+1. **Sandbox symlink-escape (preview).** Escaping symlinks copied from the workspace
+   are neutralized in the sandbox before the agent runs, so a write through a
+   pre-existing symlink lands inside the sandbox, never through to a live/outside file;
+   a produced file whose real path escapes the sandbox is refused
+   (`test_preview_symlink_escape_does_not_write_outside`,
+   `test_preview_refuses_agent_created_escaping_symlink`).
+2. **Commit containment is realpath-based.** Containment resolves the workspace root and
+   every target with `os.path.realpath` (symlinks in every parent component resolved),
+   so a `<workspace>/link/evil` with a symlinked parent escaping the root is refused
+   before any write (`test_commit_refuses_symlinked_parent_escape`).
+3. **A committed pure-add is revertible.** The commit records the exact set of *added*
+   file paths (`added_paths`); `revert_committed_change` restores the overwritten files
+   (from `pre_change_ref`) **and deletes the added ones** — the revert of an addition is
+   a delete (L6 restore cannot delete) — fail-loud and containment-checked. Wired to the
+   runner as `--revert <proposal_id>` (`test_pure_add_commit_is_revertible`,
+   `test_revert_restores_overwritten_and_deletes_added`,
+   `test_revert_refuses_added_path_outside_workspace`,
+   `test_revert_mode_removes_recorded_added_files`).
+4. **`preview_diff` reflects the stored snapshot bytes.** The diff (and the returned
+   change list) render from the snapshot blobs — the exact bytes `produced_change_ref`
+   holds and commit applies — not a fresh sandbox re-read a background process could
+   mutate, so what the human approves is byte-identical to what commit applies
+   (`test_preview_diff_from_snapshot_ignores_post_snapshot_sandbox_mutation`).
+5. **Guarded UPDATEs verify affected-row-count.** `write_preview` / `mark_committed` run
+   through a row-count-checked path (`num_affected_rows` via `_query_rows`, leaving
+   `ail.publish._execute` unchanged for other callers): a zero-row guard match (or an
+   unconfirmable count) is a **failure**, not a success — the runner never prints
+   PREVIEWED / COMMITTED on a no-op, and a zero-row status-mark after a live commit is
+   surfaced as *committed-but-unrecorded* (`test_write_preview_zero_rows_fails_closed`,
+   `test_mark_committed_zero_rows_fails_closed`,
+   `test_commit_zero_row_status_mark_is_committed_but_unrecorded`).
 
 ## Injectable seams (so everything is offline-testable)
 
@@ -88,8 +125,21 @@ imports offline and every test runs with fakes:
 back to the **live** workspace and re-writes the manifest — so a later `restore_snapshot`
 at commit writes the produced bytes to the **live** paths (blobs are content-addressed,
 so they are valid regardless of which path they were read from). `commit_approved`
-re-validates every stored target path is **inside** the workspace before applying, so a
-tampered manifest can never write outside the agent's own source.
+re-validates (via `os.path.realpath`, symlinks resolved) that every stored target path
+is **inside** the workspace before applying, so a tampered or symlinked manifest can
+never write outside the agent's own source.
+
+## Revert — restore overwritten files, delete added ones
+
+A committed change is revertible in **two** parts, because L6 restore can *write* but not
+*delete*: `commit_approved` records both the `pre_change_ref` (the pre-commit snapshot of
+the files it **overwrote**) and `added_paths` (the files it **created**).
+`revert_committed_change` restores the former (L6 restore, all-or-nothing) and deletes the
+latter — so even a pure-addition commit (no `pre_change_ref`) is fully revertible. It is
+fail-loud (a delete it cannot perform raises, naming the partial state) and
+containment-checked (never deletes outside the recorded workspace). The runner exposes it
+as `ail-agent-executor --revert <proposal_id>`, reading the recorded change from
+`agent_executor_commits`.
 
 ## The Databricks-native tradeoff: deletions are refused (fail-closed)
 

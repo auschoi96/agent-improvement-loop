@@ -45,9 +45,12 @@ from typing import Any
 from ail.executor import (
     CommitRecordError,
     CommitRefused,
+    CommittedChangeRecord,
     PreviewError,
+    RevertError,
     commit_approved,
     produce_preview,
+    revert_committed_change,
 )
 from ail.jobs.companion_planner import resolve_static_auth
 from ail.loop.apply_service import DECISIONS_TABLE, _query_rows, _row_to_proposal
@@ -60,14 +63,29 @@ from ail.versioning import SnapshotError, new_volume_client
 __all__ = [
     "COMMITS_TABLE",
     "COMMIT_COLUMNS",
+    "GuardedUpdateError",
     "list_agent_task_proposals",
     "write_preview",
     "mark_committed",
     "latest_approver",
     "record_commit",
+    "load_commit_record",
     "run",
     "main",
 ]
+
+
+class GuardedUpdateError(RuntimeError):
+    """A guarded UPDATE did not affect the intended row — fail-closed, never a fake success.
+
+    Raised when a guarded ``write_preview`` / ``mark_committed`` UPDATE matches **zero**
+    rows (the guard did not select the intended row — e.g. already previewed, no longer
+    pending/approved) or its affected-row count cannot be confirmed. ``_execute`` only
+    checks statement success, so these row-count-checked writes use :func:`_query_rows`
+    (which returns ``num_affected_rows`` for DML) instead — the caller then never prints
+    PREVIEWED / COMMITTED on a zero-row no-op.
+    """
+
 
 _TAG = "[ail.executor]"
 
@@ -88,6 +106,7 @@ COMMIT_COLUMNS: list[str] = [
     "pre_change_ref",
     "n_files",
     "changed_paths",
+    "added_paths",
     "summary",
     "approver",
     "committed_at",
@@ -123,6 +142,48 @@ def list_agent_task_proposals(
     return [_row_to_proposal(row) for row in _query_rows(client, warehouse_id, sql)]
 
 
+def _num_affected_rows(rows: list[dict[str, Any]]) -> int | None:
+    """Parse ``num_affected_rows`` from a DML statement's result set (``None`` if absent).
+
+    A Databricks SQL DML statement returns a one-row result carrying
+    ``num_affected_rows`` (and ``num_inserted_rows``); ``_query_rows`` surfaces it as a
+    string. ``None`` means the count could not be read — treated as fail-closed by the
+    caller (never assumed to be a success).
+    """
+    if not rows:
+        return None
+    row = rows[0]
+    for key in ("num_affected_rows", "num_updated_rows"):
+        val = row.get(key)
+        if val is not None and str(val) != "":
+            try:
+                return int(float(str(val)))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _run_guarded_update(client: Any, warehouse_id: str, statement: str, *, what: str) -> int:
+    """Run a guarded UPDATE and return its affected-row count; raise unless it is >= 1.
+
+    Unlike :func:`ail.publish._execute` (which only checks statement *success*), this runs
+    the UPDATE via :func:`_query_rows` and confirms it affected the intended row — a
+    zero-row guard match (or an unreadable count) raises :class:`GuardedUpdateError`, so
+    the runner never reports PREVIEWED / COMMITTED on a silent no-op.
+    """
+    n = _num_affected_rows(_query_rows(client, warehouse_id, statement))
+    if n is None:
+        raise GuardedUpdateError(
+            f"{what}: could not confirm the guarded update's affected-row count (fail-closed)"
+        )
+    if n < 1:
+        raise GuardedUpdateError(
+            f"{what}: matched 0 rows — the guard did not select the intended row "
+            "(already acted on / no longer in the required state) (fail-closed)"
+        )
+    return n
+
+
 def write_preview(
     client: Any,
     warehouse_id: str,
@@ -133,14 +194,16 @@ def write_preview(
     produced_change_ref: str,
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
-) -> None:
+) -> int:
     """Record a produced preview onto its still-pending, not-yet-previewed proposal row.
 
     The ``change_produced_change_ref IS NULL / ''`` guard makes this fail-closed and
-    idempotent: it never overwrites a preview a human may already be reviewing.
+    idempotent: it never overwrites a preview a human may already be reviewing. Uses the
+    row-count-checked path — a zero-row match raises :class:`GuardedUpdateError` (so the
+    runner never claims PREVIEWED on a no-op). Returns the affected-row count (1).
     """
     fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
-    _execute(
+    return _run_guarded_update(
         client,
         warehouse_id,
         f"UPDATE {fqn} SET change_preview_diff = {_lit(preview_diff)}, "
@@ -148,6 +211,7 @@ def write_preview(
         f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.PENDING.value)} "
         "AND (change_produced_change_ref IS NULL OR change_produced_change_ref = '')",
+        what=f"preview UPDATE for proposal {proposal_id!r}",
     )
 
 
@@ -159,20 +223,24 @@ def mark_committed(
     proposal_id: str,
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
-) -> None:
+) -> int:
     """Advance an approved proposal to ``applied`` after its change is committed live.
 
     Scoped to ``status = 'approved'`` so only a still-approved row is advanced (the
     controller re-materializes the pending set on its next cycle; the durable record of
-    the applied change is the ``agent_executor_commits`` audit).
+    the applied change is the ``agent_executor_commits`` audit). Uses the
+    row-count-checked path — a zero-row match raises :class:`GuardedUpdateError`, which
+    the commit caller surfaces as committed-but-unrecorded (the change is live but the
+    status did not advance), never a clean COMMITTED. Returns the affected-row count (1).
     """
     fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
-    _execute(
+    return _run_guarded_update(
         client,
         warehouse_id,
         f"UPDATE {fqn} SET status = {_lit(ProposalStatus.APPLIED.value)} "
         f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.APPROVED.value)}",
+        what=f"status-mark for proposal {proposal_id!r}",
     )
 
 
@@ -221,17 +289,18 @@ def _commits_ddl(catalog: str, schema: str) -> list[str]:
             pre_change_ref STRING,
             n_files INT,
             changed_paths STRING,
+            added_paths STRING,
             summary STRING,
             approver STRING,
             committed_at STRING,
             recorded_at STRING
         ) USING DELTA
-        COMMENT 'Append-only audit of committed open-ended AGENT_TASK changes (L7b-2 executor); carries the revert-point + approved change-set snapshot refs.'""",  # noqa: E501
+        COMMENT 'Append-only audit of committed open-ended AGENT_TASK changes (L7b-2 executor); carries the revert channel: the pre-change snapshot ref (overwritten files) + added_paths (files to delete on revert).'""",  # noqa: E501
     ]
 
 
 def record_commit(
-    record: Any,
+    record: CommittedChangeRecord,
     *,
     client: Any,
     warehouse_id: str,
@@ -251,6 +320,7 @@ def record_commit(
         record.pre_change_ref,
         record.n_files,
         json.dumps(record.changed_paths),
+        json.dumps(record.added_paths),
         record.summary,
         record.approver,
         record.committed_at,
@@ -260,6 +330,57 @@ def record_commit(
     cols = ", ".join(COMMIT_COLUMNS)
     literals = ", ".join(_lit(v) for v in values)
     _execute(client, warehouse_id, f"INSERT INTO {fqn} ({cols}) VALUES ({literals})")
+
+
+def load_commit_record(
+    client: Any,
+    warehouse_id: str,
+    *,
+    agent_name: str,
+    proposal_id: str,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+) -> CommittedChangeRecord | None:
+    """Load the latest recorded commit for a proposal (the revert channel's source).
+
+    Reconstructs a :class:`~ail.executor.CommittedChangeRecord` from the most recent
+    ``agent_executor_commits`` row — including the ``added_paths`` a revert must delete
+    and the ``pre_change_ref`` it must restore. ``None`` when no commit was recorded.
+    """
+    fqn = f"`{catalog}`.`{schema}`.{COMMITS_TABLE}"
+    sql = (
+        f"SELECT * FROM {fqn} "
+        f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
+        "ORDER BY recorded_at DESC LIMIT 1"
+    )
+    rows = _query_rows(client, warehouse_id, sql)
+    if not rows:
+        return None
+    row = rows[0]
+    pre = row.get("pre_change_ref")
+    return CommittedChangeRecord(
+        proposal_id=str(row["proposal_id"]),
+        agent_name=str(row["agent_name"]),
+        target_workspace=str(row.get("target_workspace") or ""),
+        produced_change_ref=str(row.get("produced_change_ref") or ""),
+        pre_change_ref=str(pre) if pre not in (None, "") else None,
+        n_files=int(float(str(row.get("n_files") or 0))),
+        changed_paths=_json_list(row.get("changed_paths")),
+        added_paths=_json_list(row.get("added_paths")),
+        summary=str(row.get("summary") or ""),
+        approver=str(row.get("approver") or ""),
+        committed_at=str(row.get("committed_at") or ""),
+    )
+
+
+def _json_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except (ValueError, TypeError):
+        return []
+    return [str(x) for x in parsed] if isinstance(parsed, list) else []
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +430,9 @@ def run(args: argparse.Namespace) -> int:
     )
 
     client = _build_workspace_client(None)  # static env token (resolve_static_auth pinned it)
+
+    if args.revert:
+        return _run_revert(agent, client, args)
 
     # Read both slices FIRST, fail-closed: an unreadable table prints an honest error
     # and does nothing (never previews on an unknown state).
@@ -444,38 +568,115 @@ def _run_commits(
                 approver=approver,
                 committed_at=committed_at,
             )
-            mark_committed(
-                client,
-                args.warehouse_id,
-                agent_name=p.agent_name,
-                proposal_id=p.proposal_id,
-                catalog=args.catalog,
-                schema=args.schema,
-            )
-            print(
-                f"{_TAG}   COMMITTED {p.proposal_id}: {res.n_files} file(s) applied to "
-                f"{res.target_workspace} (approver={approver}, revert_point={res.pre_change_ref})"
-            )
         except CommitRefused as exc:
             print(f"{_TAG}   REFUSED {p.proposal_id} (fail-closed): {exc}")
+            continue
         except CommitRecordError as exc:
             # The change is LIVE but its record failed — advance status and surface
             # committed-but-unrecorded for reconciliation (never a fake not-applied state).
-            mark_committed(
-                client,
-                args.warehouse_id,
-                agent_name=p.agent_name,
-                proposal_id=p.proposal_id,
-                catalog=args.catalog,
-                schema=args.schema,
-            )
+            mark_err = _advance_committed(client, p, args)
             print(f"{_TAG}   COMMITTED-BUT-UNRECORDED {p.proposal_id} (reconcile): {exc}")
+            if mark_err:
+                print(f"{_TAG}     (status also not advanced: {mark_err})")
+            continue
         except SnapshotError as exc:
             # The apply itself failed; L6 leaves the live tree restorable/untouched.
             print(
                 f"{_TAG}   APPLY FAILED {p.proposal_id} "
                 f"(live tree restorable, not committed): {exc}"
             )
+            continue
+
+        # The change is LIVE and recorded. Advance the status via the ROW-COUNT-CHECKED
+        # update: a zero-row match (the row is no longer approved) is committed-but-
+        # unrecorded — the change is live but its status did not advance — never a clean
+        # COMMITTED (B5: a guarded update that matched no row is a FAIL, not a success).
+        mark_err = _advance_committed(client, p, args)
+        if mark_err:
+            print(
+                f"{_TAG}   COMMITTED-BUT-UNRECORDED {p.proposal_id} (reconcile): "
+                f"applied {res.n_files} file(s) to {res.target_workspace} but the status did "
+                f"not advance: {mark_err}"
+            )
+            continue
+        print(
+            f"{_TAG}   COMMITTED {p.proposal_id}: {res.n_files} file(s) applied to "
+            f"{res.target_workspace} (approver={approver}, revert_point={res.pre_change_ref})"
+        )
+
+
+def _advance_committed(
+    client: Any, proposal: ProposedAction, args: argparse.Namespace
+) -> str | None:
+    """Advance an approved proposal to ``applied`` (row-count-checked); return an error or None.
+
+    Returns ``None`` on a confirmed single-row update, or the failure message when the
+    guarded update matched zero rows / could not be confirmed — so the caller surfaces
+    committed-but-unrecorded rather than a clean COMMITTED.
+    """
+    try:
+        mark_committed(
+            client,
+            args.warehouse_id,
+            agent_name=proposal.agent_name,
+            proposal_id=proposal.proposal_id,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
+        return None
+    except GuardedUpdateError as exc:
+        return str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Revert: undo a committed open-ended change (restore overwritten + delete added)
+# ---------------------------------------------------------------------------
+
+
+def _run_revert(agent: Agent, client: Any, args: argparse.Namespace) -> int:
+    """Revert a previously-committed AGENT_TASK from its recorded commit record.
+
+    Loads the ``agent_executor_commits`` record for ``--revert <proposal_id>`` and calls
+    :func:`ail.executor.revert_committed_change` — restoring the overwritten files and
+    deleting the added ones. Fail-closed: no recorded commit → nothing done (returns 2);
+    a partial revert (a delete failed) surfaces loud (returns 2).
+    """
+    proposal_id = args.revert
+    print(f"{_TAG} --- REVERT {proposal_id} (agent={agent.agent_name}) ---")
+    try:
+        record = load_commit_record(
+            client,
+            args.warehouse_id,
+            agent_name=agent.agent_name,
+            proposal_id=proposal_id,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface honestly; do nothing on an unknown state
+        print(f"{_TAG} ERROR: could not read the commit record ({type(exc).__name__}: {exc}).")
+        return 2
+    if record is None:
+        print(
+            f"{_TAG} ERROR: no recorded commit for proposal {proposal_id!r} — nothing to revert "
+            "(fail-closed)."
+        )
+        return 2
+
+    volume_client = _build_volume_client(None)
+    try:
+        result = revert_committed_change(record, volume_client=volume_client)
+    except RevertError as exc:
+        print(f"{_TAG}   REVERT FAILED {proposal_id} (fail-loud): {exc}")
+        return 2
+    except SnapshotError as exc:
+        print(f"{_TAG}   REVERT FAILED {proposal_id} (restore failed, nothing deleted): {exc}")
+        return 2
+    print(
+        f"{_TAG}   REVERTED {proposal_id}: restored {result.n_restored} overwritten file(s) "
+        f"(from {result.restored_from_pre_change_ref}) and deleted {result.n_removed} added "
+        f"file(s): {result.removed_added_paths}"
+    )
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +737,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Poll and surface what WOULD be previewed/committed, but run no agent, take no "
         "snapshot, and commit/write nothing.",
+    )
+    parser.add_argument(
+        "--revert",
+        default=None,
+        metavar="PROPOSAL_ID",
+        help="Instead of polling, REVERT a previously-committed AGENT_TASK: restore the files it "
+        "overwrote (from the recorded pre-change snapshot) and delete the files it added.",
     )
     parser.add_argument(
         "--token-secret-scope", default=os.environ.get("AIL_TOKEN_SECRET_SCOPE", "")

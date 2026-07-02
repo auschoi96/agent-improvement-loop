@@ -288,10 +288,21 @@ def test_run_previews_pending_skips_previewed_and_commits_approved(
 # ---------------------------------------------------------------------------
 
 
-def test_write_preview_is_idempotent_guarded(monkeypatch: pytest.MonkeyPatch) -> None:
+def _guarded_query_spy(monkeypatch: pytest.MonkeyPatch, *, affected: str) -> list[str]:
+    """Route the guarded-update path through a fake ``_query_rows`` returning ``affected`` rows."""
     executed: list[str] = []
-    monkeypatch.setattr(ax, "_execute", lambda c, w, s: executed.append(s))
-    ax.write_preview(
+
+    def _fake(client, warehouse_id, statement):  # type: ignore[no-untyped-def]
+        executed.append(statement)
+        return [{"num_affected_rows": affected}]
+
+    monkeypatch.setattr(ax, "_query_rows", _fake)
+    return executed
+
+
+def test_write_preview_is_idempotent_guarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    executed = _guarded_query_spy(monkeypatch, affected="1")
+    n = ax.write_preview(
         object(),
         "w",
         agent_name="claude_code",
@@ -300,18 +311,158 @@ def test_write_preview_is_idempotent_guarded(monkeypatch: pytest.MonkeyPatch) ->
         produced_change_ref=f"{VOLUME_ROOT}/p1",
     )
     sql = executed[0]
+    assert n == 1  # confirmed the intended row was updated
     assert sql.startswith("UPDATE")
     assert "change_produced_change_ref IS NULL" in sql  # never overwrites an existing preview
     assert "status = 'pending'" in sql
 
 
 def test_mark_committed_only_advances_approved(monkeypatch: pytest.MonkeyPatch) -> None:
-    executed: list[str] = []
-    monkeypatch.setattr(ax, "_execute", lambda c, w, s: executed.append(s))
-    ax.mark_committed(object(), "w", agent_name="claude_code", proposal_id="p1")
+    executed = _guarded_query_spy(monkeypatch, affected="1")
+    n = ax.mark_committed(object(), "w", agent_name="claude_code", proposal_id="p1")
     sql = executed[0]
+    assert n == 1
     assert "SET status = 'applied'" in sql
     assert "status = 'approved'" in sql  # only advances a still-approved row
+
+
+def test_write_preview_zero_rows_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B5: a zero-row guard match is a FAIL, never a silent success."""
+    _guarded_query_spy(monkeypatch, affected="0")
+    with pytest.raises(ax.GuardedUpdateError, match="matched 0 rows"):
+        ax.write_preview(
+            object(),
+            "w",
+            agent_name="claude_code",
+            proposal_id="p1",
+            preview_diff="d",
+            produced_change_ref=f"{VOLUME_ROOT}/p1",
+        )
+
+
+def test_mark_committed_zero_rows_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B5: a zero-row status-mark is a FAIL, never a silent success."""
+    _guarded_query_spy(monkeypatch, affected="0")
+    with pytest.raises(ax.GuardedUpdateError, match="matched 0 rows"):
+        ax.mark_committed(object(), "w", agent_name="claude_code", proposal_id="p1")
+
+
+def test_guarded_update_unconfirmed_count_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B5: an unreadable affected-row count is fail-closed too (never assumed a success)."""
+    monkeypatch.setattr(ax, "_query_rows", lambda c, w, s: [])  # no count returned
+    with pytest.raises(ax.GuardedUpdateError, match="could not confirm"):
+        ax.mark_committed(object(), "w", agent_name="claude_code", proposal_id="p1")
+
+
+# ---------------------------------------------------------------------------
+# B5 end-to-end: a zero-row status-mark after a live commit → committed-but-unrecorded
+# ---------------------------------------------------------------------------
+
+
+def test_commit_zero_row_status_mark_is_committed_but_unrecorded(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    ws = tmp_path / "workspace"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "skills" / "token.md").write_text("OLD\n")
+    agent = Agent(agent_name="claude_code", experiment_id="1", target_workspace=str(ws))
+    vol = FakeVolumeClient()
+
+    base = _proposal(plan="commit me", status=ProposalStatus.PENDING)
+    pre = produce_preview(
+        base,
+        agent,
+        volume_client=vol,
+        volume_root=VOLUME_ROOT,
+        preview_writer=lambda **k: None,
+        agent_runner=SpyRunner({"skills/token.md": b"COMMITTED\n"}),
+    )
+    approved = pre.proposal.model_copy(update={"status": ProposalStatus.APPROVED})
+
+    def _list(client, wh, *, status, catalog, schema):  # type: ignore[no-untyped-def]
+        return [approved] if status is ProposalStatus.APPROVED else []
+
+    monkeypatch.setattr(ax, "_resolve_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(ax, "_build_workspace_client", lambda *a, **k: object())
+    monkeypatch.setattr(ax, "_build_volume_client", lambda *a, **k: vol)
+    monkeypatch.setattr(ax, "_build_agent_runner", lambda *a, **k: SpyRunner({}))
+    monkeypatch.setattr(ax, "list_agent_task_proposals", _list)
+    monkeypatch.setattr(ax, "record_commit", lambda record, **k: None)
+    monkeypatch.setattr(ax, "latest_approver", lambda *a, **k: "human@databricks.com")
+
+    def _zero_row_mark(*a, **k):  # type: ignore[no-untyped-def]
+        raise ax.GuardedUpdateError("status-mark: matched 0 rows (fail-closed)")
+
+    monkeypatch.setattr(ax, "mark_committed", _zero_row_mark)
+
+    code = ax.run(_args())
+    out = capsys.readouterr().out
+    assert code == 0
+    # the change WAS applied live...
+    assert (ws / "skills" / "token.md").read_bytes() == b"COMMITTED\n"
+    # ...but a zero-row status-mark is surfaced LOUD as committed-but-unrecorded, never clean
+    assert "COMMITTED-BUT-UNRECORDED" in out
+    assert f"COMMITTED {approved.proposal_id}:" not in out
+
+
+# ---------------------------------------------------------------------------
+# B3 end-to-end: --revert removes exactly the recorded added files
+# ---------------------------------------------------------------------------
+
+
+def test_revert_mode_removes_recorded_added_files(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    ws = tmp_path / "workspace"
+    (ws / "skills").mkdir(parents=True)
+    added = ws / "skills" / "brand_new.md"
+    added.write_text("# brand new\n")  # the file a prior pure-add commit created
+    keep = ws / "keep.txt"
+    keep.write_text("keep\n")
+    agent = Agent(agent_name="claude_code", experiment_id="1", target_workspace=str(ws))
+
+    record = CommittedChangeRecord(
+        proposal_id="pid-1",
+        agent_name="claude_code",
+        target_workspace=str(ws),
+        produced_change_ref=f"{VOLUME_ROOT}/pid-1",
+        pre_change_ref=None,  # pure add: revert is purely deletes
+        n_files=1,
+        changed_paths=[str(added)],
+        added_paths=[str(added)],
+        summary="s",
+        approver="a",
+        committed_at="t",
+    )
+
+    monkeypatch.setattr(ax, "_resolve_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(ax, "_build_workspace_client", lambda *a, **k: object())
+    monkeypatch.setattr(ax, "_build_volume_client", lambda *a, **k: FakeVolumeClient())
+    monkeypatch.setattr(ax, "load_commit_record", lambda *a, **k: record)
+
+    code = ax.run(_args(["--revert", "pid-1"]))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert not added.exists()  # the added file was deleted (revert of an add)
+    assert keep.read_bytes() == b"keep\n"  # nothing else touched
+    assert "REVERTED pid-1" in out
+
+
+def test_revert_mode_no_record_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    agent = Agent(agent_name="claude_code", experiment_id="1", target_workspace=str(tmp_path))
+    monkeypatch.setattr(ax, "_resolve_agent", lambda *a, **k: agent)
+    monkeypatch.setattr(ax, "_build_workspace_client", lambda *a, **k: object())
+    monkeypatch.setattr(ax, "load_commit_record", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ax,
+        "_build_volume_client",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("built volume client")),
+    )
+    code = ax.run(_args(["--revert", "unknown"]))
+    assert code == 2
+    assert "no recorded commit" in capsys.readouterr().out
 
 
 def test_record_commit_emits_ddl_and_insert(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,6 +476,7 @@ def test_record_commit_emits_ddl_and_insert(monkeypatch: pytest.MonkeyPatch) -> 
         pre_change_ref=f"{VOLUME_ROOT}/p1-pre",
         n_files=2,
         changed_paths=["a", "b"],
+        added_paths=["b"],
         summary="committed 2 files",
         approver="human@databricks.com",
         committed_at="2026-07-02T00:00:00Z",
@@ -333,6 +485,9 @@ def test_record_commit_emits_ddl_and_insert(monkeypatch: pytest.MonkeyPatch) -> 
     assert any(
         "CREATE TABLE IF NOT EXISTS" in s and "agent_executor_commits" in s for s in executed
     )
+    ddl = [s for s in executed if "CREATE TABLE IF NOT EXISTS" in s][0]
+    assert "added_paths STRING" in ddl  # the revert channel column is persisted
     insert = [s for s in executed if s.startswith("INSERT INTO")][0]
     assert "'human@databricks.com'" in insert
     assert f"'{VOLUME_ROOT}/p1-pre'" in insert
+    assert '["b"]' in insert  # added_paths recorded as a JSON array

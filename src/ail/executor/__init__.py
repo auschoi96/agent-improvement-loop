@@ -25,8 +25,11 @@ from ail.executor.executor import (
     PreviewError,
     PreviewResult,
     PreviewWriter,
+    RevertError,
+    RevertResult,
     commit_approved,
     produce_preview,
+    revert_committed_change,
 )
 
 __all__ = [
@@ -36,6 +39,7 @@ __all__ = [
     "PreviewError",
     "CommitRefused",
     "CommitRecordError",
+    "RevertError",
     "AgentRunner",
     "PreviewWriter",
     "CommitRecorder",
@@ -43,6 +47,8 @@ __all__ = [
     "CommittedChangeRecord",
     "PreviewResult",
     "CommitResult",
+    "RevertResult",
     "produce_preview",
     "commit_approved",
+    "revert_committed_change",
 ]

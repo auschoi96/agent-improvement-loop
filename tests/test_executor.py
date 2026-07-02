@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,9 +33,12 @@ import ail.executor.executor as ex
 from ail.executor import (
     CommitRecordError,
     CommitRefused,
+    CommittedChangeRecord,
     PreviewError,
+    RevertError,
     commit_approved,
     produce_preview,
+    revert_committed_change,
 )
 from ail.ingest.base import AgentRunResult, AgentTask, NormalizedTrace
 from ail.loop.proposals import (
@@ -693,3 +697,236 @@ def test_no_live_seams_touched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     )
     # all Volume I/O went through the injected fake
     assert vol.upload_calls and result.produced_change_ref.startswith(VOLUME_ROOT)
+
+
+# ---------------------------------------------------------------------------
+# Cross-review fixes — BLOCKER 1 + 2: symlink-escape safety
+# ---------------------------------------------------------------------------
+
+
+def test_preview_symlink_escape_does_not_write_outside(tmp_path: Path) -> None:
+    """B1: an agent write THROUGH a pre-existing escaping symlink stays in the sandbox."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_bytes(b"SECRET")
+
+    ws = tmp_path / "workspace"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "skills" / "token.md").write_text("OLD\n")
+    # a pre-existing (absolute) symlink in the workspace pointing OUTSIDE it
+    os.symlink(str(secret), str(ws / "escape"))
+
+    # the agent tries to write THROUGH the escaping symlink
+    runner = SpyRunner({"escape": b"PWNED"})
+    produce_preview(
+        _agent_task_proposal(),
+        _agent(ws),
+        volume_client=FakeVolumeClient(),
+        volume_root=VOLUME_ROOT,
+        preview_writer=PreviewWriterSpy(),
+        agent_runner=runner,
+    )
+
+    # the outside target is byte-for-byte untouched — the write landed inside the sandbox
+    assert secret.read_bytes() == b"SECRET"
+
+
+def test_preview_refuses_agent_created_escaping_symlink(tmp_path: Path) -> None:
+    """B1 defense: a produced file whose real path escapes the sandbox is refused."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "target.txt").write_bytes(b"OUT")
+    ws = tmp_path / "workspace"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "skills" / "token.md").write_text("OLD\n")
+
+    class EscapingRunner:
+        calls = 0
+
+        def run(self, task: AgentTask) -> AgentRunResult:
+            self.calls += 1
+            # the agent creates a NEW symlink inside the sandbox pointing outside it
+            os.symlink(str(outside / "target.txt"), str(Path(task.cwd or ".") / "sneaky"))
+            return AgentRunResult(trace=NormalizedTrace(trace_id="t"), success=True)
+
+    with pytest.raises(PreviewError, match="escapes the sandbox"):
+        produce_preview(
+            _agent_task_proposal(),
+            _agent(ws),
+            volume_client=FakeVolumeClient(),
+            volume_root=VOLUME_ROOT,
+            preview_writer=PreviewWriterSpy(),
+            agent_runner=EscapingRunner(),
+        )
+
+
+def test_commit_refuses_symlinked_parent_escape(tmp_path: Path) -> None:
+    """B2: a stored change-set whose target resolves outside (symlinked parent) is refused."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    ws = tmp_path / "workspace"
+    (ws / "skills").mkdir(parents=True)
+    # a live symlink DIR inside the workspace that escapes to `outside`
+    os.symlink(str(outside), str(ws / "linkdir"), target_is_directory=True)
+
+    vol = FakeVolumeClient()
+    snapshot_dir = f"{VOLUME_ROOT}/escape"
+    # produced change targets <ws>/linkdir/evil.txt → realpath resolves to <outside>/evil.txt
+    evil_target = str(ws / "linkdir" / "evil.txt")
+    ref = SnapshotRef(
+        change_id="escape",
+        volume_root=VOLUME_ROOT,
+        snapshot_dir=snapshot_dir,
+        manifest_path=f"{snapshot_dir}/{MANIFEST_FILENAME}",
+        files=[
+            FileSnapshot(
+                original_path=evil_target,
+                volume_path=f"{snapshot_dir}/blobs/deadbeef",
+                sha256="deadbeef",
+                size=3,
+            )
+        ],
+        created_at="t",
+    )
+    vol.upload(ref.manifest_path, ref.model_dump_json().encode("utf-8"))
+    prop = _agent_task_proposal(status=ProposalStatus.APPROVED, produced_change_ref=snapshot_dir)
+
+    with pytest.raises(CommitRefused, match="outside the target_workspace"):
+        commit_approved(
+            prop,
+            _agent(ws),
+            volume_client=vol,
+            volume_root=VOLUME_ROOT,
+            commit_recorder=CommitRecorderSpy(),
+            approver="a",
+            committed_at="t",
+        )
+    assert not (outside / "evil.txt").exists()  # nothing written through the symlink
+
+
+# ---------------------------------------------------------------------------
+# Cross-review fix — BLOCKER 3: a committed pure-add is revertible
+# ---------------------------------------------------------------------------
+
+
+def test_pure_add_commit_is_revertible(tmp_path: Path) -> None:
+    """B3: a pure-add commit records added_paths; revert deletes exactly them."""
+    runner = SpyRunner({"skills/brand_new.md": b"# brand new\n"})
+    result, agent, vol = _preview(tmp_path, runner=runner)
+    ws = Path(agent.target_workspace or "")
+    approved = result.proposal.model_copy(update={"status": ProposalStatus.APPROVED})
+    recorder = CommitRecorderSpy()
+
+    commit_result = commit_approved(
+        approved,
+        agent,
+        volume_client=vol,
+        volume_root=VOLUME_ROOT,
+        commit_recorder=recorder,
+        approver="a",
+        committed_at="t",
+    )
+    added = str(ws / "skills" / "brand_new.md")
+    assert commit_result.pre_change_ref is None  # nothing overwritten
+    assert commit_result.added_paths == [added]  # ...but the addition IS recorded
+    assert (ws / "skills" / "brand_new.md").exists()
+
+    record = recorder.records[0]
+    revert = revert_committed_change(record, volume_client=vol)
+
+    assert not (ws / "skills" / "brand_new.md").exists()  # the added file is gone
+    assert (ws / "skills" / "token.md").read_bytes() == b"# token skill\n\nOLD BODY\n"  # untouched
+    assert (ws / "keep.txt").read_bytes() == b"unchanged\n"  # untouched
+    assert revert.removed_added_paths == [added] and revert.n_removed == 1
+
+
+def test_revert_restores_overwritten_and_deletes_added(tmp_path: Path) -> None:
+    """B3: a mixed change reverts to restore modified files AND delete added ones."""
+    runner = SpyRunner(
+        {"skills/token.md": b"# token skill\n\nNEW BODY\n", "skills/added.md": b"# added\n"}
+    )
+    result, agent, vol = _preview(tmp_path, runner=runner)
+    ws = Path(agent.target_workspace or "")
+    approved = result.proposal.model_copy(update={"status": ProposalStatus.APPROVED})
+    recorder = CommitRecorderSpy()
+    commit_approved(
+        approved,
+        agent,
+        volume_client=vol,
+        volume_root=VOLUME_ROOT,
+        commit_recorder=recorder,
+        approver="a",
+        committed_at="t",
+    )
+    assert (ws / "skills" / "token.md").read_bytes() == b"# token skill\n\nNEW BODY\n"
+    assert (ws / "skills" / "added.md").exists()
+
+    revert = revert_committed_change(recorder.records[0], volume_client=vol)
+
+    assert (ws / "skills" / "token.md").read_bytes() == b"# token skill\n\nOLD BODY\n"  # restored
+    assert not (ws / "skills" / "added.md").exists()  # deleted
+    assert revert.n_restored == 1 and revert.n_removed == 1
+
+
+def test_revert_refuses_added_path_outside_workspace(tmp_path: Path) -> None:
+    """B3: revert never deletes outside the recorded workspace (fail-closed)."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.txt"
+    victim.write_bytes(b"KEEP ME")
+    record = CommittedChangeRecord(
+        proposal_id="p1",
+        agent_name="claude_code",
+        target_workspace=str(ws),
+        produced_change_ref=f"{VOLUME_ROOT}/p1",
+        pre_change_ref=None,
+        n_files=1,
+        changed_paths=[str(victim)],
+        added_paths=[str(victim)],
+        summary="s",
+        approver="a",
+        committed_at="t",
+    )
+    with pytest.raises(RevertError, match="outside the recorded workspace"):
+        revert_committed_change(record, volume_client=FakeVolumeClient())
+    assert victim.read_bytes() == b"KEEP ME"  # never deleted outside the workspace
+
+
+# ---------------------------------------------------------------------------
+# Cross-review fix — BLOCKER 4: preview_diff reflects the STORED snapshot bytes
+# ---------------------------------------------------------------------------
+
+
+def test_preview_diff_from_snapshot_ignores_post_snapshot_sandbox_mutation(tmp_path: Path) -> None:
+    """B4: the diff renders from the snapshot bytes, not a (mutable) sandbox re-read."""
+    ws = tmp_path / "workspace"
+    (ws / "skills").mkdir(parents=True)
+    (ws / "skills" / "token.md").write_text("OLD\n")
+
+    sandbox = tmp_path / "sandbox"
+    (sandbox / "skills").mkdir(parents=True)
+    (sandbox / "skills" / "token.md").write_bytes(b"STORED PREVIEW BYTES\n")
+
+    vol = FakeVolumeClient()
+    changes = [ex.FileChange(path="skills/token.md", change_type="modified")]
+    ref = ex._snapshot_produced(
+        changes,
+        sandbox_root=sandbox,
+        live_root=ws.resolve(),
+        volume_root=VOLUME_ROOT,
+        change_id="chg",
+        client=vol,
+    )
+    # a background process the agent left mutates the sandbox AFTER the snapshot
+    (sandbox / "skills" / "token.md").write_bytes(b"MUTATED AFTER SNAPSHOT\n")
+
+    diff, rendered = ex._render_preview_from_snapshot(ref, live_root=ws.resolve(), client=vol)
+
+    assert "STORED PREVIEW BYTES" in diff  # reflects the stored snapshot
+    assert "MUTATED AFTER SNAPSHOT" not in diff  # NOT the post-snapshot sandbox
+    # ...and it is exactly what commit would apply (the stored blob bytes)
+    assert vol.download(ref.files[0].volume_path) == b"STORED PREVIEW BYTES\n"
+    assert [c.path for c in rendered] == ["skills/token.md"]

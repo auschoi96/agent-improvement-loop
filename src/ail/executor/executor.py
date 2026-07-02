@@ -66,6 +66,7 @@ __all__ = [
     "PreviewError",
     "CommitRefused",
     "CommitRecordError",
+    "RevertError",
     "AgentRunner",
     "PreviewWriter",
     "CommitRecorder",
@@ -73,8 +74,10 @@ __all__ = [
     "CommittedChangeRecord",
     "PreviewResult",
     "CommitResult",
+    "RevertResult",
     "produce_preview",
     "commit_approved",
+    "revert_committed_change",
 ]
 
 #: The system prompt framing the sandboxed agent as the executor: it must carry out
@@ -160,6 +163,17 @@ class CommitRecordError(ExecutorError):
         )
 
 
+class RevertError(ExecutorError):
+    """A revert could not be completed cleanly — surfaced fail-loud, never silent.
+
+    Raised by :func:`revert_committed_change` when a recorded added file cannot be
+    deleted (the revert of an addition), or when a target resolves outside the
+    workspace. Restoring overwritten files is all-or-nothing (L6 restore); a delete
+    failure after that leaves a *partial* revert, which this names explicitly so a human
+    can reconcile — never a fake "reverted".
+    """
+
+
 # ---------------------------------------------------------------------------
 # Injectable seams (faked in tests → no live SDK / MLflow / Databricks call)
 # ---------------------------------------------------------------------------
@@ -216,12 +230,14 @@ class FileChange(_Model):
 class CommittedChangeRecord(_Model):
     """The audit record of one committed open-ended change — *what, from where, by whom*.
 
-    Handed to the :class:`CommitRecorder` seam. The two snapshot refs are load-bearing:
-    ``produced_change_ref`` is exactly the previewed change the human approved, and
-    ``pre_change_ref`` is the pre-commit snapshot of the live workspace — the revert
-    point (revert = L6 restore of it). ``pre_change_ref`` is ``None`` only when the
-    change is pure additions (no pre-existing files were overwritten, so there was
-    nothing to snapshot).
+    Handed to the :class:`CommitRecorder` seam. The revert channel is load-bearing and
+    has **two** parts (:func:`revert_committed_change`): ``pre_change_ref`` is the
+    pre-commit L6 snapshot of the files the change **overwrote** (revert = restore it),
+    and ``added_paths`` is the exact set of files the change **created** (revert = delete
+    them — L6 restore cannot delete, so a pure addition would otherwise be irreversible).
+    ``pre_change_ref`` is ``None`` only when the change is pure additions (nothing was
+    overwritten), in which case ``added_paths`` carries the whole revert. ``produced_change_ref``
+    is exactly the previewed change the human approved.
     """
 
     proposal_id: str
@@ -231,6 +247,7 @@ class CommittedChangeRecord(_Model):
     pre_change_ref: str | None = None
     n_files: int
     changed_paths: list[str] = Field(default_factory=list)
+    added_paths: list[str] = Field(default_factory=list)
     summary: str
     approver: str
     committed_at: str
@@ -255,10 +272,23 @@ class CommitResult(_Model):
     produced_change_ref: str
     pre_change_ref: str | None = None
     applied_paths: list[str] = Field(default_factory=list)
+    added_paths: list[str] = Field(default_factory=list)
     n_files: int
     approver: str
     committed_at: str
     lineage_recorded: bool = False
+
+
+class RevertResult(_Model):
+    """The outcome of :func:`revert_committed_change` — what was undone."""
+
+    proposal_id: str
+    agent_name: str
+    target_workspace: str
+    restored_from_pre_change_ref: str | None = None
+    n_restored: int = 0
+    removed_added_paths: list[str] = Field(default_factory=list)
+    n_removed: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +326,13 @@ def produce_preview(
     * the agent run errors;
     * the agent produced no change;
     * the change deletes files (the L6 restore substrate cannot apply a deletion);
+    * a produced file's real path escapes the sandbox (an escaping symlink);
     * the snapshot could not fully persist.
+
+    Symlink safety: escaping symlinks copied from the workspace are neutralized in the
+    sandbox before the agent runs (a write through one lands inside the sandbox, never
+    through to a live/outside file), and every produced file is verified to resolve
+    inside the sandbox before it is snapshotted.
 
     Args:
         proposal: The pending ``AGENT_TASK`` proposal (its ``plan`` drives the agent).
@@ -333,6 +369,11 @@ def produce_preview(
     sandbox = Path(sandbox_root) if sandbox_root is not None else Path(_new_sandbox_dir())
     try:
         _copy_workspace(workspace, sandbox)
+        # Neutralize any copied symlink whose target escapes the sandbox's real root, so a
+        # write through a pre-existing (workspace) symlink lands INSIDE the sandbox rather
+        # than through to a live/outside file — the agent must never mutate anything outside
+        # the sandbox copy's real tree during preview.
+        _neutralize_escaping_symlinks(sandbox)
 
         runner = agent_runner if agent_runner is not None else _default_agent_runner()
         task = AgentTask(
@@ -363,6 +404,9 @@ def produce_preview(
                 f"the executor produced no change for proposal {proposal.proposal_id!r} — writing "
                 "no preview (never a fabricated preview) (fail-closed)"
             )
+        # Defense-in-depth: refuse any produced file whose real path escapes the sandbox
+        # (an agent-created escaping symlink) — it must never be snapshotted/committed.
+        _require_produced_within_sandbox(changes, sandbox, proposal_id=proposal.proposal_id)
 
         produced_ref = _snapshot_produced(
             changes,
@@ -372,7 +416,13 @@ def produce_preview(
             change_id=proposal.proposal_id,
             client=volume_client,
         )
-        preview_diff = _render_preview_diff(changes, live_root=workspace, sandbox_root=sandbox)
+        # Render the diff (and the authoritative change list) from the STORED snapshot
+        # bytes, not a fresh sandbox re-read — so what the human previews == what commit
+        # applies (produced_change_ref), even if a background process the agent left
+        # mutates the sandbox after the snapshot.
+        preview_diff, changes = _render_preview_from_snapshot(
+            produced_ref, live_root=workspace, client=volume_client
+        )
     finally:
         if owns_sandbox:
             shutil.rmtree(sandbox, ignore_errors=True)
@@ -486,10 +536,12 @@ def commit_approved(
     targets = [f.original_path for f in produced.files]
     _require_paths_within(targets, workspace, proposal_id=proposal.proposal_id)
 
-    # 1) Snapshot the LIVE workspace FIRST — the revert point. Only the pre-existing
-    #    files the change will overwrite are captured (added files have no pre-state; a
-    #    pure-add change has no revert point, recorded honestly as pre_change_ref=None).
+    # 1) Snapshot the LIVE workspace FIRST — the revert point for OVERWRITTEN files. The
+    #    added files (no pre-state) are captured separately as ``added_paths`` so the
+    #    revert can DELETE them (L6 restore cannot delete) — a pure-add change is thus
+    #    still fully revertible even though ``pre_change_ref`` is None.
     existing = [p for p in targets if Path(p).is_file()]
+    added_paths = sorted(p for p in targets if not Path(p).is_file())
     pre_change_ref: SnapshotRef | None = None
     if existing:
         pre_change_ref = snapshot_paths(
@@ -513,6 +565,7 @@ def commit_approved(
         produced_change_ref=produced_ref_dir,
         pre_change_ref=pre_change_ref.snapshot_dir if pre_change_ref is not None else None,
         applied_paths=applied_paths,
+        added_paths=added_paths,
         n_files=len(applied_paths),
         approver=approver,
         committed_at=committed_at,
@@ -526,9 +579,11 @@ def commit_approved(
         pre_change_ref=pre_change_ref.snapshot_dir if pre_change_ref is not None else None,
         n_files=len(applied_paths),
         changed_paths=applied_paths,
+        added_paths=added_paths,
         summary=(
             f"committed approved AGENT_TASK {proposal.proposal_id}: {len(applied_paths)} file(s) "
-            f"applied to {workspace}"
+            f"applied to {workspace} ({len(added_paths)} added, "
+            f"{len(applied_paths) - len(added_paths)} overwritten)"
         ),
         approver=approver,
         committed_at=committed_at,
@@ -660,19 +715,30 @@ def _snapshot_produced(
     return remapped
 
 
-def _render_preview_diff(changes: list[FileChange], *, live_root: Path, sandbox_root: Path) -> str:
-    """A human-readable unified diff of the produced change (for review, not for apply).
+def _render_preview_from_snapshot(
+    produced_ref: SnapshotRef, *, live_root: Path, client: VolumeClient
+) -> tuple[str, list[FileChange]]:
+    """Render the preview diff + change list from the STORED snapshot bytes.
 
-    The concrete change the human reviews. The *apply* uses the snapshotted bytes, not
-    this diff, so a binary file is rendered as a marker rather than a byte diff.
+    The ``new`` side of every file comes from the snapshot blobs (``client.download``) —
+    the exact bytes ``produced_change_ref`` holds and that commit applies — not a fresh
+    sandbox re-read (which a background process the agent left could mutate between the
+    snapshot and the render). The ``old`` side is the live workspace (immutable during
+    preview). So the diff the human approves is byte-identical to what commit applies.
+    The apply uses the snapshot bytes, so a binary file is rendered as a marker.
     """
     parts: list[str] = []
-    for change in changes:
-        rel = change.path
-        old = b"" if change.change_type == "added" else (live_root / rel).read_bytes()
-        new = (sandbox_root / rel).read_bytes()
-        parts.append(_render_file_diff(rel, old, new, added=change.change_type == "added"))
-    return "".join(parts)
+    changes: list[FileChange] = []
+    root = str(live_root)
+    for f in sorted(produced_ref.files, key=lambda x: x.original_path):
+        rel = os.path.relpath(f.original_path, root)
+        live_path = live_root / rel
+        added = not live_path.is_file()
+        old = b"" if added else live_path.read_bytes()
+        new = client.download(f.volume_path)
+        parts.append(_render_file_diff(rel, old, new, added=added))
+        changes.append(FileChange(path=rel, change_type="added" if added else "modified"))
+    return "".join(parts), changes
 
 
 def _render_file_diff(rel: str, old: bytes, new: bytes, *, added: bool) -> str:
@@ -700,22 +766,133 @@ def _decode(data: bytes) -> str | None:
         return None
 
 
-def _require_paths_within(paths: list[str], workspace: Path, *, proposal_id: str) -> None:
-    """Refuse (fail-closed) if any stored target path is outside ``workspace``.
+def _within_root(path: str, root_real: str) -> bool:
+    """True iff ``path``'s **real** path (symlinks resolved) is inside ``root_real``.
 
-    Defends the live commit against a tampered manifest: a restore writes to each
-    entry's ``original_path``, so every one must resolve inside the workspace or the
-    commit would write outside the agent's own source.
+    Uses :func:`os.path.realpath`, which resolves symlinks in the existing prefix (a
+    non-existent leaf, e.g. an added file, is left lexical) — so a symlinked *parent*
+    that escapes the root is caught, not just a lexical ``..``.
     """
-    root = str(workspace)
+    rp = os.path.realpath(path)
+    return rp == root_real or rp.startswith(root_real + os.sep)
+
+
+def _require_paths_within(paths: list[str], workspace: Path, *, proposal_id: str) -> None:
+    """Refuse (fail-closed) if any stored target path resolves outside ``workspace``.
+
+    Defends the live commit against a tampered/symlinked manifest: a restore writes to
+    (and stages beside) each entry's ``original_path``, following symlinks, so a
+    ``<workspace>/link/evil`` with ``link`` a symlink escaping the workspace would write
+    outside. Containment is **realpath-based** (not lexical ``abspath``): every target's
+    real path — with symlinks in every parent component resolved — must be inside the
+    resolved workspace root, or the commit is refused.
+    """
+    root_real = os.path.realpath(workspace)
     for p in paths:
-        ap = os.path.abspath(p)
-        if ap != root and not ap.startswith(root + os.sep):
+        if not _within_root(p, root_real):
             raise CommitRefused(
-                f"the produced change-set for proposal {proposal_id!r} targets {ap!r}, outside "
-                f"the target_workspace {root!r} — refusing to write outside the workspace "
+                f"the produced change-set for proposal {proposal_id!r} targets {p!r} "
+                f"(real path {os.path.realpath(p)!r}), outside the target_workspace "
+                f"{root_real!r} — refusing to write outside the workspace (fail-closed)"
+            )
+
+
+def _neutralize_escaping_symlinks(sandbox_root: Path) -> None:
+    """Remove every symlink under ``sandbox_root`` whose target escapes the sandbox.
+
+    A copied (pre-existing) symlink that points at a live/outside path would let the
+    agent write **through** it during preview, mutating a file outside the sandbox. After
+    the copy, any such symlink is unlinked, so a write to that path instead creates a
+    real file inside the sandbox. Symlinks that resolve *inside* the sandbox are kept
+    (they cannot escape).
+    """
+    root_real = os.path.realpath(sandbox_root)
+    escaping: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(sandbox_root):  # followlinks=False (default)
+        for name in (*dirnames, *filenames):
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full) and not _within_root(full, root_real):
+                escaping.append(full)
+    for link in escaping:
+        os.unlink(link)
+
+
+def _require_produced_within_sandbox(
+    changes: list[FileChange], sandbox_root: Path, *, proposal_id: str
+) -> None:
+    """Refuse (fail-closed) if a produced file's real path escapes the sandbox root.
+
+    Complements :func:`_neutralize_escaping_symlinks`: catches an escaping symlink the
+    *agent itself* created, so a snapshot never captures (and a commit never applies) a
+    file that lives outside the sandbox copy's real tree.
+    """
+    root_real = os.path.realpath(sandbox_root)
+    for change in changes:
+        full = str(sandbox_root / change.path)
+        if not _within_root(full, root_real):
+            raise PreviewError(
+                f"the executor produced a change targeting {change.path!r} whose real path "
+                f"{os.path.realpath(full)!r} escapes the sandbox {root_real!r} for proposal "
+                f"{proposal_id!r} — refusing to snapshot a change outside the sandbox (fail-closed)"
+            )
+
+
+def revert_committed_change(
+    record: CommittedChangeRecord, *, volume_client: VolumeClient
+) -> RevertResult:
+    """Revert a committed open-ended change — restore overwritten files, delete added ones.
+
+    The two-part inverse of :func:`commit_approved` (``docs/EXECUTOR.md``): restore the
+    files the change **overwrote** from ``record.pre_change_ref`` (L6 restore,
+    all-or-nothing) **and** delete the files the change **created**
+    (``record.added_paths``) — because L6 restore cannot delete, a pure addition would
+    otherwise be irreversible. Restore runs first, then the deletes, so a delete failure
+    never leaves the overwritten files un-restored.
+
+    Fail-closed / fail-loud: every added path is realpath-contained to the recorded
+    workspace before anything is touched (never delete outside it); a delete that fails
+    raises :class:`RevertError` naming the partial state (never a fake "reverted").
+    """
+    root_real = os.path.realpath(record.target_workspace)
+    for p in record.added_paths:
+        if not _within_root(p, root_real):
+            raise RevertError(
+                f"refusing to delete {p!r} (real path {os.path.realpath(p)!r}) outside the "
+                f"recorded workspace {root_real!r} for proposal {record.proposal_id!r} "
                 "(fail-closed)"
             )
+
+    n_restored = 0
+    if record.pre_change_ref:
+        pre = load_snapshot_ref(record.pre_change_ref, client=volume_client)
+        restore_snapshot(pre, client=volume_client)
+        n_restored = len(pre.files)
+
+    removed: list[str] = []
+    failed: list[str] = []
+    for p in record.added_paths:
+        path = Path(p)
+        try:
+            if path.is_symlink() or path.exists():
+                path.unlink()
+            removed.append(p)
+        except OSError as exc:
+            failed.append(f"{p} ({exc})")
+    if failed:
+        raise RevertError(
+            f"reverting proposal {record.proposal_id!r}: restored {n_restored} overwritten "
+            f"file(s) but could NOT delete {len(failed)} added file(s): {failed}; the revert is "
+            "PARTIAL and needs manual reconciliation (fail-loud)"
+        )
+    return RevertResult(
+        proposal_id=record.proposal_id,
+        agent_name=record.agent_name,
+        target_workspace=record.target_workspace,
+        restored_from_pre_change_ref=record.pre_change_ref,
+        n_restored=n_restored,
+        removed_added_paths=sorted(removed),
+        n_removed=len(removed),
+    )
 
 
 def _default_agent_runner(mlflow_experiment: str | None = None) -> AgentRunner:
