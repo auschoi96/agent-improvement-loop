@@ -111,11 +111,36 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
 
     List-valued fields (trace refs, gate reasons) are stored as JSON arrays so a
     reader gets them back structured; every scalar is written verbatim.
+
+    ``proof`` is optional: an **evidence-first** proposal
+    (:func:`ail.loop.evidence_cycle.run_evidence_cycle`) carries ``proof=None`` (it
+    rests on its evidence + gate, proving is opt-in Tier-2 — see
+    ``docs/PRODUCT_ARCHITECTURE.md`` §3). All ten ``proof_*`` columns are then written
+    ``NULL`` (the columns already exist and are nullable, so the DDL and the app's
+    SELECT-only read are unchanged — a NULL proof column just reads back as "no
+    frozen-suite proof"). A *prove-before-propose* proposal
+    (:func:`ail.loop.controller.run_cycle`) still writes its full proof unchanged.
     """
     t = p.trigger
     c = p.change
     pr = p.proof
     g = p.gate_status
+    proof_cols: list[Any] = (
+        [None] * 10
+        if pr is None
+        else [
+            pr.objective_metric,
+            pr.proved_improvement,
+            pr.correctness_held,
+            pr.realized_savings_absolute,
+            pr.realized_savings_pct,
+            pr.n_promote,
+            pr.n_block,
+            pr.n_errored,
+            pr.suite_content_hash,
+            pr.suite_version,
+        ]
+    )
     return [
         p.agent_name,
         p.proposal_id,
@@ -141,16 +166,7 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
         c.diff,
         c.evolved_body_ref,
         c.revert_target,
-        pr.objective_metric,
-        pr.proved_improvement,
-        pr.correctness_held,
-        pr.realized_savings_absolute,
-        pr.realized_savings_pct,
-        pr.n_promote,
-        pr.n_block,
-        pr.n_errored,
-        pr.suite_content_hash,
-        pr.suite_version,
+        *proof_cols,
         g.readiness_tier,
         g.can_prove_improvement,
         g.judge_agreement,

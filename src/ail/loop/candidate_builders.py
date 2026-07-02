@@ -74,6 +74,7 @@ __all__ = [
     "is_token_reduction_goal",
     "token_efficiency_skill_change",
     "token_efficiency_candidate_builder",
+    "evidence_candidate_builder",
 ]
 
 #: The deterministic headline objective the token-efficiency skill is proven against
@@ -197,5 +198,50 @@ def token_efficiency_candidate_builder(
             return None
         seen.add(proposal_id)
         return Candidate(change=change, prover_input=token_efficiency_intervention())
+
+    return _build
+
+
+def evidence_candidate_builder() -> CandidateBuilder:
+    """Build the **evidence-first** token-efficiency candidate builder (no prove).
+
+    The counterpart of :func:`token_efficiency_candidate_builder` for the
+    evidence-first lane (:func:`ail.loop.evidence_cycle.run_evidence_cycle`, per
+    ``docs/PRODUCT_ARCHITECTURE.md`` §3/§7: the planner does **not** prove — proving
+    is opt-in Tier-2). It maps the *same* decision — a ``SKILL_UPDATE`` triggered by
+    the dominant L0 redundant-read waste pattern
+    (:attr:`~ail.loop.proposals.TriggerKind.REDUNDANT_READ_PATTERN`) on a
+    token-reduction goal — to the *same* concrete change
+    (:func:`token_efficiency_skill_change`), and declines every other action kind /
+    trigger / goal exactly as the proving builder does (fail-closed: no fabricated
+    candidate for a change the triggering evidence did not call for).
+
+    Two deliberate differences from :func:`token_efficiency_candidate_builder`:
+
+    * **No frozen-suite cost guard.** That builder skips (re-)building when the
+      proposal is already pending because building triggers an expensive real-agent
+      proof; the evidence lane never proves, so there is nothing costly to guard and
+      no ``pending_proposal_ids`` to thread. Idempotency is preserved downstream by
+      the agent-scoped atomic ``REPLACE`` in
+      :func:`ail.loop.publish_proposals.publish_agent_proposals` (a re-decided install
+      hashes to the same :func:`~ail.loop.proposals.derive_proposal_id`, so it
+      replaces its own row rather than duplicating).
+    * The carried ``prover_input`` (the proven
+      :func:`ail.optimize.lever.token_efficiency_intervention`) is **not** consumed by
+      this lane; it travels so a *later*, opt-in Tier-2 "verify on my suite" run has a
+      concrete target to prove against without re-deriving it.
+    """
+
+    def _build(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+        if decision.action_kind is not ActionKind.SKILL_UPDATE:
+            return None
+        if decision.trigger.kind is not TriggerKind.REDUNDANT_READ_PATTERN:
+            return None
+        if not is_token_reduction_goal(goal):
+            return None
+        return Candidate(
+            change=token_efficiency_skill_change(),
+            prover_input=token_efficiency_intervention(),
+        )
 
     return _build
