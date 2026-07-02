@@ -112,13 +112,18 @@ class TestGoalSteering:
 
 
 class TestReasoningEffortPassthrough:
-    def test_empty_effort_passes_none_to_auto_resolve(self, captured: dict[str, Any]) -> None:
+    @pytest.mark.parametrize("value", ["", "none", "NONE", "auto", "AUTO"])
+    def test_auto_sentinels_pass_none_to_auto_resolve(
+        self, captured: dict[str, Any], value: str
+    ) -> None:
+        # The footgun regression at the job boundary: empty / 'none' / 'auto' (any case)
+        # must be normalized to None (auto-resolve), NOT forwarded as a literal effort.
         job.main(
             [
                 "--experiment=EXP1",
                 "--warehouse-id=wh-1",
                 "--objective-metric=",
-                "--reasoning-effort=",
+                f"--reasoning-effort={value}",
             ]
         )
         assert captured["kwargs"]["reasoning_effort"] is None
@@ -133,6 +138,18 @@ class TestReasoningEffortPassthrough:
             ]
         )
         assert captured["kwargs"]["reasoning_effort"] == "high"
+
+    def test_bogus_effort_rejected_at_boundary(self, captured: dict[str, Any]) -> None:
+        # argparse choices reject a typo'd effort up front (fail loud, not silent).
+        with pytest.raises(SystemExit):
+            job.main(
+                [
+                    "--experiment=EXP1",
+                    "--warehouse-id=wh-1",
+                    "--objective-metric=",
+                    "--reasoning-effort=banana",
+                ]
+            )
 
 
 def test_requires_warehouse_id(monkeypatch: pytest.MonkeyPatch) -> None:

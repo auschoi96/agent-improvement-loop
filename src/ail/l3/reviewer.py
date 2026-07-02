@@ -61,6 +61,7 @@ __all__ = [
     "GUIDELINE_FEEDBACK_PREFIX",
     "guideline_feedback_name",
     "resolve_reasoning_effort",
+    "normalize_reasoning_effort",
     "build_engine_config",
     "build_review_prompt",
     "run_halo_review",
@@ -295,6 +296,36 @@ def resolve_reasoning_effort(model: str) -> str | None:
     return max_reasoning_effort_for_model(_normalize_model_for_reasoning(model))
 
 
+#: Case-insensitive reasoning-effort inputs that mean "no explicit override — let the
+#: resolver auto-detect from the model", NOT a literal HALO effort. ``none`` is included
+#: deliberately: as an operator input it reads as "auto", so we normalize it to
+#: auto-detect rather than injecting HALO's literal ``effort=none`` (which would DISABLE
+#: reasoning — the opposite of what someone typing "none" for "no override" expects). A
+#: caller that genuinely wants a level passes it explicitly (e.g. ``xhigh``).
+_AUTO_EFFORT_SENTINELS = frozenset({"", "none", "auto"})
+
+
+def normalize_reasoning_effort(value: str | None) -> str | None:
+    """Map an operator-supplied reasoning-effort input to an explicit override or ``None``.
+
+    Returns ``None`` — meaning "omit the override; auto-resolve from the model" — for
+    ``None``, empty/whitespace-only, and the case-insensitive sentinels ``none`` /
+    ``auto`` (:data:`_AUTO_EFFORT_SENTINELS`). Any other value is returned stripped as a
+    genuine explicit override, so an unrecognized effort still reaches — and fails loud
+    at — HALO's ``ReasoningEffort`` validation rather than silently passing.
+
+    This closes a footgun: a user setting ``--reasoning-effort none`` (or the bundle var
+    to ``none`` / ``auto`` / a quoted empty string) reads as "no override, auto-detect",
+    and must NOT inject a literal effort into HALO.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if stripped.lower() in _AUTO_EFFORT_SENTINELS:
+        return None
+    return stripped
+
+
 def build_engine_config(
     model: str,
     *,
@@ -314,13 +345,16 @@ def build_engine_config(
     provider; when ``None`` HALO's underlying OpenAI client falls back to the
     ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` environment variables.
 
-    ``reasoning_effort`` is set as an EXPLICIT override on the ``ModelConfig``. When
-    left ``None`` it is auto-resolved from the model via
-    :func:`resolve_reasoning_effort`, which normalizes Databricks FMAPI aliases so a
+    ``reasoning_effort`` is set as an EXPLICIT override on the ``ModelConfig``. It is
+    first passed through :func:`normalize_reasoning_effort`, so ``None`` / empty /
+    ``none`` / ``auto`` all mean "no override" and fall through to
+    :func:`resolve_reasoning_effort` — which normalizes Databricks FMAPI aliases so a
     reasoning family gets its documented max even when HALO's own hyphen-blind prefix
-    check would not match (e.g. ``databricks-gpt-5-5-pro`` → ``xhigh``). A
-    non-reasoning model resolves to ``None`` and receives no effort parameter, exactly
-    as before.
+    check would not match (e.g. ``databricks-gpt-5-5-pro`` → ``xhigh``). A non-reasoning
+    model resolves to ``None`` and receives no effort parameter, exactly as before. This
+    defensive normalization means no caller can accidentally inject the ``none`` / ``auto``
+    / empty literal as an effort; a genuine unrecognized value still fails loud at HALO's
+    ``ReasoningEffort`` validation.
 
     Imports HALO lazily — calling this without the ``l3`` extra installed raises
     :class:`ImportError` with install guidance.
@@ -336,7 +370,8 @@ def build_engine_config(
             "Install it with: pip install 'ail[l3]'"
         ) from exc
 
-    effort = reasoning_effort if reasoning_effort is not None else resolve_reasoning_effort(model)
+    normalized = normalize_reasoning_effort(reasoning_effort)
+    effort = normalized if normalized is not None else resolve_reasoning_effort(model)
     model_cfg = ModelConfig(
         name=model,
         temperature=temperature,

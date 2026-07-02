@@ -26,6 +26,7 @@ import os
 
 from ail.jobs.publish_job import resolve_job_auth
 from ail.l3.continuous import run_continuous_rlm
+from ail.l3.reviewer import normalize_reasoning_effort
 from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
 
 #: Most powerful VIABLE HALO judge on the Databricks gateway (see module docstring).
@@ -86,8 +87,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--reasoning-effort",
         default="",
-        choices=["", "none", "minimal", "low", "medium", "high", "xhigh"],
-        help="Explicit HALO reasoning-effort override; empty => auto-resolve from --judge-model.",
+        type=str.lower,
+        choices=["", "none", "auto", "minimal", "low", "medium", "high", "xhigh"],
+        help="Explicit HALO reasoning-effort override. Empty / 'none' / 'auto' (any case) "
+        "=> no override, auto-resolve from --judge-model (databricks-gpt-5-5-pro => xhigh).",
     )
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--max-reviews", type=int, default=2)
@@ -137,10 +140,14 @@ def main(argv: list[str] | None = None) -> int:
         token_secret_key=args.token_secret_key or None,
     )
     rubric = _build_rubric(args)
+    # Normalize the effort input HERE (the CLI/job boundary): empty / 'none' / 'auto'
+    # mean "no override, auto-resolve" and must become None rather than a literal effort
+    # injected into HALO. build_engine_config re-applies this defensively.
+    reasoning_effort = normalize_reasoning_effort(args.reasoning_effort)
     print(
         f"[ail.jobs.continuous_rlm] auth={auth_path} host={os.environ.get('DATABRICKS_HOST')} "
         f"experiment={args.experiment} judge_model={args.judge_model} "
-        f"reasoning_effort={args.reasoning_effort or 'auto'} rubric={rubric.rubric_id} "
+        f"reasoning_effort={reasoning_effort or 'auto'} rubric={rubric.rubric_id} "
         f"sample_rate={args.sample_rate} max_reviews={args.max_reviews}"
     )
     report = run_continuous_rlm(
@@ -155,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         reviewer_experiment_id=args.reviewer_experiment or None,
         max_turns=args.max_turns,
         temperature=args.temperature,
-        reasoning_effort=args.reasoning_effort or None,
+        reasoning_effort=reasoning_effort,
     )
     print(
         "[ail.jobs.continuous_rlm] "

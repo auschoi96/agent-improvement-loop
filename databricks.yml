@@ -118,9 +118,11 @@ variables:
     default: databricks-gpt-5-5-pro
   continuous_rlm_reasoning_effort:
     description: >-
-      Explicit HALO reasoning-effort override for the standalone RLM job (none | minimal
-      | low | medium | high | xhigh). Empty (the default) => auto-resolve from the judge
-      model, so databricks-gpt-5-5-pro gets xhigh despite HALO's hyphen-blind prefix check.
+      Explicit HALO reasoning-effort override for the standalone RLM job (minimal | low |
+      medium | high | xhigh). Empty (the default), 'none', or 'auto' (any case) all mean
+      NO override => auto-resolve from the judge model, so databricks-gpt-5-5-pro gets
+      xhigh despite HALO's hyphen-blind prefix check (setting 'none' does NOT disable
+      reasoning — it reads as auto).
     default: ''
   continuous_rlm_cron:
     description: >-

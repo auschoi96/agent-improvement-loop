@@ -518,6 +518,36 @@ class TestReasoningEffort:
         cfg = rv.build_engine_config("databricks-gpt-5-5-pro", reasoning_effort="medium")
         assert cfg.root_agent.model.reasoning_effort == "medium"
 
+    @pytest.mark.parametrize(
+        "value",
+        [None, "", "   ", "none", "NONE", "None", "auto", "AUTO", " Auto "],
+    )
+    def test_normalize_treats_auto_sentinels_as_no_override(self, value: str | None) -> None:
+        # Pure (no engine): empty/whitespace/none/auto (any case) => None ("auto-resolve").
+        assert rv.normalize_reasoning_effort(value) is None
+
+    @pytest.mark.parametrize("value", ["high", " xhigh ", "medium"])
+    def test_normalize_returns_genuine_effort_stripped(self, value: str) -> None:
+        assert rv.normalize_reasoning_effort(value) == value.strip()
+
+    @pytest.mark.parametrize("sentinel", ["none", "NONE", "auto", "AUTO", "", "  "])
+    def test_none_and_auto_sentinels_auto_resolve_not_literal_override(self, sentinel: str) -> None:
+        """The footgun regression: a 'none'/'auto'/empty effort must auto-resolve to
+        xhigh for databricks-gpt-5-5-pro, NOT inject the literal string into HALO."""
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        cfg = rv.build_engine_config("databricks-gpt-5-5-pro", reasoning_effort=sentinel)
+        assert cfg.root_agent.model.reasoning_effort == "xhigh"
+        assert cfg.root_agent.model.effective_reasoning_effort() == "xhigh"
+
+    def test_bogus_reasoning_effort_still_fails_loud(self) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        import pydantic
+
+        # A genuine unrecognized effort is NOT a sentinel: it reaches HALO's
+        # ReasoningEffort Literal and fails loud rather than silently passing.
+        with pytest.raises(pydantic.ValidationError):
+            rv.build_engine_config("databricks-gpt-5-5-pro", reasoning_effort="banana")
+
     def test_non_reasoning_model_gets_no_effort(self) -> None:
         pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
         cfg = rv.build_engine_config("databricks-claude-sonnet-4-6")

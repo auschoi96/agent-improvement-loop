@@ -49,10 +49,17 @@ We cannot edit HALO's `ModelConfig`, so we fix it in **our** config wrapper
 
 `reasoning_effort` is threaded (like `temperature`) through
 `build_engine_config → run_halo_review → review_trace → run_continuous_rlm`, and the
-job exposes `--reasoning-effort` for an explicit override; the default (empty/`None`)
-auto-resolves. Verified: `max_reasoning_effort_for_model("databricks-gpt-5-5-pro")` is
-`None`, but `resolve_reasoning_effort("databricks-gpt-5-5-pro") == "xhigh"` and the
-built `ModelConfig.effective_reasoning_effort() == "xhigh"`.
+job exposes `--reasoning-effort` for an explicit override. The input is normalized by
+`normalize_reasoning_effort` at the job boundary **and** defensively in
+`build_engine_config`: empty, `none`, and `auto` (any case) all mean "no override,
+auto-resolve" and become `None` — so `--reasoning-effort none` reads as *auto* and still
+yields `xhigh`, rather than injecting HALO's literal `effort=none` (which would disable
+reasoning). A genuine unrecognized value (e.g. `banana`) still fails loud at HALO's
+`ReasoningEffort` validation. Verified:
+`max_reasoning_effort_for_model("databricks-gpt-5-5-pro")` is `None`, but
+`resolve_reasoning_effort("databricks-gpt-5-5-pro") == "xhigh"` and the built
+`ModelConfig.effective_reasoning_effort() == "xhigh"` for `None` / empty / `none` /
+`auto` inputs alike.
 
 ## 2. Goal-steering (not a fixed rubric)
 
@@ -100,7 +107,7 @@ queueing, and idempotency so it never re-reviews handled traces.
 | var | default | purpose |
 |---|---|---|
 | `continuous_rlm_judge_model` | `databricks-gpt-5-5-pro` | HALO judge for the standalone job (most powerful viable) |
-| `continuous_rlm_reasoning_effort` | `''` (auto) | explicit effort override; empty ⇒ auto-resolve (→ `xhigh`) |
+| `continuous_rlm_reasoning_effort` | `''` (auto) | explicit effort override; empty / `none` / `auto` ⇒ auto-resolve (→ `xhigh`) |
 | `continuous_rlm_cron` | `0 0 */6 * * ?` | schedule (every 6h) |
 | `continuous_rlm_pause_status` | `UNPAUSED` | `PAUSED` ⇒ deployed-but-dormant |
 
