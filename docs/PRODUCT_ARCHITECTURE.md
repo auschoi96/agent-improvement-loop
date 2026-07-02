@@ -145,11 +145,16 @@ and runs it vs. the champion.
 | 9. Approve → execute | Approve → executor agent makes the change (versioned, revertible) | companion (executor) | apply exists; open-ended agent net-new |
 | 10. See impact & revert | Before/after by agent version; revert if it didn't help | app + DB | exists |
 
-## 11. Deliberately dropped (the simplifications)
+## 11. What changed vs. the earlier design (simplifications)
 
-- The **mandatory prove-gate**, the **unified serverless optimization cycle**, and **automated
-  gates on every change** are removed.
-- The **frozen suite + prover** are kept **only** as the opt-in Tier-2 verification.
+**Proving is kept.** It lives as the opt-in **Tier-2 verification** (see §3 and §7): the human can
+run a candidate on their frozen suite for a measured delta whenever they want harder evidence —
+especially valuable for a high-blast-radius executor change.
+
+What was *removed* is only proving as a **mandatory, automatic gate on every change** (the
+over-engineered part), along with the **unified serverless optimization cycle** and **automated
+promotion gates**. Everything now ships behind human approval; **proving is available on demand,
+not required.**
 
 ## 12. Build map (current → net-new)
 
