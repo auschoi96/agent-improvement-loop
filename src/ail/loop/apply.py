@@ -690,6 +690,35 @@ def _apply_metric_view(proposal: ProposedAction, warehouse_executor: WarehouseEx
     )
 
 
+_DIFF_HUNK_RE = re.compile(r"^@@ .* @@", re.MULTILINE)
+
+
+def _normalize_for_diff_compare(text: str) -> str:
+    """Whitespace/line-ending-insensitive form for the resolved-body-vs-diff check.
+
+    Strips outer whitespace, normalizes line endings (via ``splitlines``), and strips
+    each line — so a resolver that returns ``diff + "\\n"``, a trailing-whitespace
+    variant, or a CRLF/LF reflow of the diff is still recognized as "the diff", not a
+    resolved body.
+    """
+    return "\n".join(line.strip() for line in text.strip().splitlines())
+
+
+def _looks_like_unified_diff(text: str) -> bool:
+    """True iff ``text`` carries unambiguous unified-diff/patch markers.
+
+    Marker-based on purpose: a hunk header (``@@ ... @@``), a ``diff --git`` line, or the
+    ``--- a/`` + ``+++ b/`` file-header pair — structures a real prompt/skill body would
+    not contain. It deliberately never keys off bare ``+``/``-`` line prefixes
+    (legitimate body text may start a line with those), so it does not over-correct.
+    """
+    if _DIFF_HUNK_RE.search(text):
+        return True
+    if "diff --git " in text:
+        return True
+    return "--- a/" in text and "+++ b/" in text
+
+
 def _apply_prompt_body(
     proposal: ProposedAction,
     *,
@@ -706,17 +735,27 @@ def _apply_prompt_body(
             "diff); none provided — refusing to register a diff as a body (fail-closed)"
         )
     resolved = body_resolver(proposal)
-    # Defensively guard the resolved body: refuse an empty one, and refuse one that is
-    # exactly the proposal's diff — that would be a resolver wiring bug registering a
-    # diff as the skill body (the very thing this seam exists to prevent). Fail-closed.
+    # Defensively guard the resolved body (the resolver's contract is a FULL resolved
+    # body — never the diff, never a diff-shaped artifact). Refuse: an empty body; a body
+    # that IS the diff up to whitespace/line-ending normalization (catches diff + "\n", a
+    # trailing-whitespace variant, or a CRLF/LF reflow); or a body still carrying
+    # unified-diff/patch markers. This protects both proven and evidence-only prompt
+    # applies — the latter has no proof backstop, so an unresolved diff must never ship.
     if not resolved.body or not resolved.body.strip():
         raise ApplyRefused(
             f"body_resolver returned an empty body for proposal {proposal.proposal_id!r} — "
             "refusing to register an empty prompt body (fail-closed)"
         )
-    if proposal.change.diff is not None and resolved.body == proposal.change.diff:
+    diff = proposal.change.diff
+    normalized_body = _normalize_for_diff_compare(resolved.body)
+    if diff is not None and normalized_body == _normalize_for_diff_compare(diff):
         raise ApplyRefused(
             f"body_resolver returned the proposal's diff as the body for "
+            f"{proposal.proposal_id!r} — refusing to register a diff as a body (fail-closed)"
+        )
+    if _looks_like_unified_diff(resolved.body):
+        raise ApplyRefused(
+            f"body_resolver returned a diff-shaped body (unified-diff/patch markers) for "
             f"{proposal.proposal_id!r} — refusing to register a diff as a body (fail-closed)"
         )
     registered = register_prompt_body(

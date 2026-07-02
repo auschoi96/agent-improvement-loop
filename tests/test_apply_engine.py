@@ -792,3 +792,91 @@ def test_evidence_only_gepa_prompt_is_still_refused(tmp_path: Path) -> None:
     assert not seams.any_capability_called
     assert seams.gate_calls == []
     assert seams.lineage_records == []
+
+
+def test_evidence_only_revert_is_still_refused() -> None:
+    # REVERT is excluded from _EVIDENCE_ONLY_APPLYABLE_KINDS (its evidence-only apply is
+    # out of L7a scope), so a proof=None revert is still refused fail-closed — no proof,
+    # no allowlisted deterministic kind, nothing applied.
+    seams = Seams()
+    proposal = _revert_proposal(target="v1", proof_present=False)
+    assert proposal.proof is None
+    with pytest.raises(ApplyRefused, match="not an evidence-only-applyable"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []
+    assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# LANE L7a (blocking fix) — the resolved-body guard is robust: a body that IS the
+# diff up to normalization, or that still carries unified-diff MARKERS, is refused
+# on the evidence-only lane (no proof backstop); a legitimate body that merely
+# starts a line with '+'/'-' or mentions "diff" still applies (no over-correction).
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_only_resolver_near_diff_body_is_refused() -> None:
+    # A near-diff (diff + trailing newline) is non-empty and NOT byte-identical to the
+    # diff, but normalizes to it — refuse it (else an essentially-unresolved diff ships
+    # as the skill body). The diff here carries NO structure markers, so ONLY the
+    # normalized-equality check can catch it.
+    seams = Seams()
+    change = ProposedChange(
+        kind=ChangeKind.SKILL_DIFF, summary="skill", diff="line one\n-remove me\n+add me"
+    )
+    proposal = _proposal(ActionKind.SKILL_UPDATE, change, proof_present=False)
+    assert proposal.proof is None
+
+    def near_diff_resolver(p: ProposedAction) -> RegisterableBody:
+        assert p.change.diff is not None
+        return RegisterableBody(
+            body=p.change.diff + "\n", provenance=PromptProvenance(source=PromptSource.SEED)
+        )
+
+    with pytest.raises(ApplyRefused, match="diff as a body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=near_diff_resolver)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+def test_evidence_only_resolver_diff_structure_body_is_refused() -> None:
+    # A body that still carries a unified-diff hunk header (@@ ... @@) is diff-shaped, not
+    # a resolved body — refuse it even though it is NOT equal to the proposal's diff (so
+    # only the diff-structure detection can catch it).
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def diff_structure_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body="# Skill\n\n@@ -1,2 +1,3 @@\n context\n+added\n",
+            provenance=PromptProvenance(source=PromptSource.SEED),
+        )
+
+    with pytest.raises(ApplyRefused, match="diff-shaped body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=diff_structure_resolver)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+def test_evidence_only_resolver_legit_body_with_plus_line_still_applies() -> None:
+    # No over-correction: a real multi-line body that merely starts lines with '+' / '-'
+    # and mentions the word "diff" has NO unified-diff markers — it must still apply.
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def legit_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body=(
+                "# Read-cache skill\n\n"
+                "+ Reuse prior reads; do not re-read unchanged files.\n"
+                "- Never re-open a file already loaded.\n"
+                "Run a quick diff review before editing.\n"
+            ),
+            provenance=PromptProvenance(source=PromptSource.SEED, registration_reason="skill"),
+        )
+
+    result = _run(proposal, _approve(proposal), seams=seams, body_resolver=legit_resolver)
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert seams.registry.register_calls[0]["template"].startswith("# Read-cache skill")
+    assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]
