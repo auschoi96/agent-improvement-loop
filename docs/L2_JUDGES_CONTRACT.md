@@ -126,6 +126,18 @@ and adds only the judgement layer.
   specific waste (which repeated target / which boilerplate) so the verdict is
   actionable.
 
+### Authoring — `ail.judges.authoring`
+
+The **"describe a quality dimension in natural language → get a judge"** front
+door. `author_judge(name, description, *, experiment_id, scale=..., ...)` turns a
+plain-language description into a registered, MemAlign-alignable `{{ trace }}`
+judge **plus** the label schema whose `name` matches the judge name (the pairing
+`align()` needs). It is additive — it composes `make_scorer` and
+`create_aligned_scorer`, and does not change the scorers above or the
+`token_efficiency` computed-inputs exclusion. CLI: `ail-author-judge`. Full
+details, the two hard conventions, and the large-trace/Designer-Critic seams are
+in **`docs/JUDGE_AUTHORING.md`**.
+
 ### Alignment (MemAlign) — `ail.judges.alignment`
 
 ```python
