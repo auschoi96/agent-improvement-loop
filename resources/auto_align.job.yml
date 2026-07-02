@@ -1,0 +1,91 @@
+resources:
+  jobs:
+    auto_align:
+      name: ail-auto-align
+      description: >-
+        L2 — the auto-align trigger. On a schedule, per judged dimension: count the
+        HUMAN-sourced labels named for the judge, and once at least
+        ${var.auto_align_label_floor} exist AND new labels have accrued since the
+        last alignment (a per-judge experiment-tag watermark), align the judge with
+        MemAlign on the disjoint Alignment Set, audit it on the held-out Human
+        Anchor, and register the aligned version — but only if its agreement clears
+        ${var.auto_align_agreement_floor}. An unmeasured or below-floor judge stays
+        DISTRUSTED (fail closed); a re-alignment that regresses below the prior
+        aligned version is rolled back (the prior stays live). Turns "a human adds
+        labels" into "the judge becomes trusted automatically". Reuses
+        ail.judges.{labeling,alignment,agreement,registration} — no new judge logic.
+      tags:
+        project: agent-improvement-loop
+        tier: L2
+        managed_by: dab
+
+      # run_as is inherited from the bundle level (databricks.yml -> `run_as:
+      # ${var.job_run_as}`), so the trigger shares the single framework identity
+      # (and thus one warehouse grant) with publish/apply/optimization. That
+      # identity needs CAN_USE on the trace-store warehouse and read on the MLflow
+      # trace store (labels + traces), plus registration rights for scheduled scorers.
+
+      # Scheduled cadence (default daily 06:00). Deliberately a schedule, not a
+      # table_update trigger: the trace store is a VIEW (cc_trace_unified /
+      # cc_trace_metadata), not a Delta table, so a table-update trigger is
+      # infeasible — the same reason the optimization cycle is scheduled. Override
+      # auto_align_pause_status to PAUSED to keep it deployed-but-dormant.
+      schedule:
+        quartz_cron_expression: ${var.auto_align_cron}
+        timezone_id: ${var.schedule_timezone}
+        pause_status: ${var.auto_align_pause_status}
+
+      # Idempotent by construction: the per-judge watermark skips a run with no new
+      # labels, and a promoted judge is only re-registered when it clears the floor
+      # and does not regress. MemAlign is expensive; never overlap runs.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      tasks:
+        - task_key: auto_align
+          environment_key: serverless
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-auto-align
+            named_parameters:
+              experiment: ${var.experiment_id}
+              # The v4 trace store serves reads through a SQL warehouse; the
+              # entrypoint exports this as MLFLOW_TRACING_SQL_WAREHOUSE_ID.
+              warehouse-id: ${var.warehouse_id}
+              # Empty => all built-in scorers (each judge with < label-floor labels
+              # simply skips), so unlabeled dimensions are harmless.
+              judges: ${var.auto_align_judges}
+              label-floor: ${var.auto_align_label_floor}
+              agreement-floor: ${var.auto_align_agreement_floor}
+              min-anchor-samples: ${var.auto_align_min_anchor_samples}
+              numeric-tolerance: ${var.auto_align_numeric_tolerance}
+              sampling-rate: ${var.auto_align_sampling_rate}
+              # Empty => MLflow's default judge model / default MemAlign. Set to
+              # drive the judge + reflection/embedding models through the gateway
+              # explicitly (embedding-model only takes effect with reflection-lm).
+              model: ${var.auto_align_judge_model}
+              reflection-lm: ${var.auto_align_reflection_lm}
+              embedding-model: ${var.auto_align_embedding_model}
+              # Empty by default -> the entrypoint mints a short-lived bearer from
+              # the run-as identity. Set both to read a stored token from a secret
+              # scope (production-hardened service-principal path).
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+
+      # Serverless compute. The `ail` wheel (+ core deps: mlflow, databricks-sdk,
+      # pydantic) is installed from the locally-built artifact; databricks-agents
+      # (scheduled-scorer registration) and dspy (MemAlign optimizer backend) are
+      # added because the trigger both aligns and registers — matching the `agents`
+      # and `align` extras in pyproject.toml.
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
+              - ../dist/*.whl
+              # Scheduled-scorer registration backend (pyproject `agents` extra).
+              - databricks-agents>=1.11,<2
+              # MemAlign optimizer backend (pyproject `align` extra).
+              - dspy>=3.2.1,<4

@@ -106,6 +106,58 @@ variables:
   rlm_max_turns:
     description: HALO max turns per agent arm for in-cycle RLM reviews.
     default: '40'
+  auto_align_cron:
+    description: >-
+      Quartz cron for the auto-align trigger. A schedule, not a trace-arrival
+      trigger: the trace store is a VIEW (no table_update possible). Default is
+      daily at 06:00 (before the 07:00 publish). Override for a different cadence.
+    default: '0 0 6 * * ?'
+  auto_align_pause_status:
+    description: UNPAUSED (the auto-align schedule is live) or PAUSED (deployed-but-dormant).
+    default: UNPAUSED
+  auto_align_label_floor:
+    description: >-
+      Minimum HUMAN labels a judge needs before its FIRST MemAlign alignment.
+      Below it the judge stays distrusted (unaligned). Default 20.
+    default: '20'
+  auto_align_agreement_floor:
+    description: >-
+      Minimum judge-vs-human agreement (on the held-out Human Anchor) to trust an
+      aligned judge. An unmeasured or below-floor judge stays DISTRUSTED and is not
+      promoted; a re-alignment that regresses below the prior version is rolled back.
+    default: '0.7'
+  auto_align_min_anchor_samples:
+    description: >-
+      Minimum scored anchor items below which the agreement measurement is treated
+      as insufficient (fail closed -> distrusted). Raise so a tiny anchor cannot
+      certify a judge. Default 1.
+    default: '1'
+  auto_align_numeric_tolerance:
+    description: >-
+      Absolute tolerance for float-label agreement (e.g. 1.0 for a 1-5 graded
+      judge, counting a within-one-grade score as agreement). Default 0.0 (exact).
+    default: '0.0'
+  auto_align_sampling_rate:
+    description: Scheduled-scorer sampling rate applied when a promoted judge is (re)registered.
+    default: '0.1'
+  auto_align_judges:
+    description: >-
+      Comma-separated judge names to auto-align (empty => all built-in scorers).
+      A judge with fewer than auto_align_label_floor labels simply skips.
+    default: ''
+  auto_align_judge_model:
+    description: >-
+      Judge model URI used to score the anchor (empty => MLflow's default judge
+      model for the Databricks-managed backend).
+    default: ''
+  auto_align_reflection_lm:
+    description: >-
+      MemAlign guideline-distillation model URI (empty => MLflow's default
+      MemAlign). Set to drive the reflection model through the gateway explicitly.
+    default: ''
+  auto_align_embedding_model:
+    description: MemAlign episodic-memory embedding model URI (only used with auto_align_reflection_lm).
+    default: ''
   token_secret_scope:
     description: >-
       Optional Databricks secret scope holding the run-as bearer token for the
