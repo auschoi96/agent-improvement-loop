@@ -101,6 +101,7 @@ __all__ = [
     "JudgeAutoAlignResult",
     "AutoAlignReport",
     "WatermarkStore",
+    "WatermarkReadError",
     "ExperimentTagWatermarkStore",
     "read_human_labels",
     "auto_align_judge",
@@ -245,6 +246,21 @@ class AutoAlignReport:
 # --- watermark store -------------------------------------------------------
 
 
+class WatermarkReadError(RuntimeError):
+    """Raised when an **existing** watermark cannot be read or parsed.
+
+    Deliberately distinct from "no watermark yet" (a legitimate first run, which
+    returns a fresh :class:`AutoAlignState`): a backend read failure or a malformed
+    tag means a *previously-aligned* judge's state is **unknown**. Downgrading that
+    to "never aligned" would fail **open** — it would let the trigger re-align the
+    same labels every run (breaking idempotency, wasting MemAlign cost) and drop
+    the last-known-good agreement bar so a regressed re-alignment gets promoted
+    (the rollback guard is skipped when ``prior_agreement`` is ``None``). So a read
+    that cannot certify the state raises this, and :func:`auto_align_judge` **fails
+    closed**: it skips the judge without aligning, promoting, or overwriting state.
+    """
+
+
 @runtime_checkable
 class WatermarkStore(Protocol):
     """The persistence seam for the per-judge watermark.
@@ -252,6 +268,11 @@ class WatermarkStore(Protocol):
     Injectable so the whole trigger is unit-testable with an in-memory store;
     :class:`ExperimentTagWatermarkStore` is the production implementation backed
     by experiment tags.
+
+    ``read`` returns a fresh :class:`AutoAlignState` only for a genuine first run
+    (no watermark recorded yet). If an **existing** watermark cannot be read or
+    parsed it must raise :class:`WatermarkReadError` rather than return a zeroed
+    state — a read error must never be silently downgraded to "never aligned".
     """
 
     def read(self, judge_name: str) -> AutoAlignState: ...
@@ -266,11 +287,15 @@ class ExperimentTagWatermarkStore:
     Mirrors :func:`ail.judges.registration._tag_alignment`: the scheduled-scorer
     API has no per-scorer metadata slot, so the watermark lives as three
     experiment tags per judge under :data:`AUTOALIGN_TAG_PREFIX`
-    (``label_count`` / ``agreement`` / ``aligned_at``). Reads are best-effort —
-    a missing/unreadable tag set yields a zeroed :class:`AutoAlignState` (so a
-    judge with no recorded watermark is treated as never-aligned); **writes are
-    not** swallowed, because losing a watermark write silently would make the
-    trigger re-align the same labels every run.
+    (``label_count`` / ``agreement`` / ``aligned_at``).
+
+    Reads **fail closed**: a genuine first run (none of the three tags present)
+    yields a zeroed :class:`AutoAlignState` (proceed), but a backend read failure
+    or a malformed/partial existing watermark raises :class:`WatermarkReadError`
+    rather than a zeroed state — a previously-aligned judge is never silently
+    downgraded to "never aligned". Writes are not swallowed either, because losing
+    a watermark write silently would make the trigger re-align the same labels
+    every run.
 
     ``client`` is injectable (any object exposing ``get_experiment`` /
     ``set_experiment_tag``); when ``None`` an :class:`mlflow.MlflowClient` is built
@@ -304,13 +329,38 @@ class ExperimentTagWatermarkStore:
     def read(self, judge_name: str) -> AutoAlignState:
         try:
             experiment = self._mlflow_client().get_experiment(self.experiment_id)
-            tags: Mapping[str, str] = dict(getattr(experiment, "tags", None) or {})
-        except Exception:  # noqa: BLE001 - unreadable tags -> never-aligned (fail closed)
+        except Exception as exc:  # noqa: BLE001 - backend read failed: state unknown -> fail closed
+            raise WatermarkReadError(
+                f"could not read the auto-align watermark for judge {judge_name!r} from "
+                f"experiment {self.experiment_id}: {exc}"
+            ) from exc
+        tags: Mapping[str, str] = dict(getattr(experiment, "tags", None) or {})
+        count_tag = tags.get(self._key(judge_name, "label_count"))
+        agreement_tag = tags.get(self._key(judge_name, "agreement"))
+        aligned_at_tag = tags.get(self._key(judge_name, "aligned_at"))
+
+        # No watermark tags at all -> a genuine first run; proceed with fresh state.
+        if count_tag is None and agreement_tag is None and aligned_at_tag is None:
             return AutoAlignState()
+
+        # A watermark EXISTS. Every field must parse, else it is malformed/partial:
+        # do NOT downgrade a previously-aligned judge to "never aligned" -> fail closed.
+        label_count = _parse_int(count_tag)
+        if label_count is None:
+            raise WatermarkReadError(
+                f"auto-align watermark for judge {judge_name!r} exists but its label_count "
+                f"tag is missing or malformed ({count_tag!r}); failing closed"
+            )
+        agreement = _parse_optional_float(agreement_tag)
+        if agreement is _MALFORMED:
+            raise WatermarkReadError(
+                f"auto-align watermark for judge {judge_name!r} exists but its agreement "
+                f"tag is malformed ({agreement_tag!r}); failing closed"
+            )
         return AutoAlignState(
-            label_count=_as_int(tags.get(self._key(judge_name, "label_count"))),
-            agreement=_as_float(tags.get(self._key(judge_name, "agreement"))),
-            aligned_at=tags.get(self._key(judge_name, "aligned_at")) or None,
+            label_count=label_count,
+            agreement=agreement,
+            aligned_at=aligned_at_tag or None,
         )
 
     def write(self, judge_name: str, state: AutoAlignState) -> None:
@@ -328,22 +378,36 @@ class ExperimentTagWatermarkStore:
         )
 
 
-def _as_int(value: str | None) -> int:
+#: Sentinel distinguishing "the agreement tag is present but unparseable" (a
+#: malformed watermark that must fail closed) from a legitimately absent/empty bar
+#: (``None`` — never promoted). Returned by :func:`_parse_optional_float`.
+_MALFORMED: Any = object()
+
+
+def _parse_int(value: str | None) -> int | None:
+    """The int a watermark ``label_count`` tag holds, or ``None`` if absent/malformed."""
     if value is None:
-        return 0
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
-        return 0
+        return None
 
 
-def _as_float(value: str | None) -> float | None:
+def _parse_optional_float(value: str | None) -> float | None:
+    """Parse a watermark ``agreement`` tag.
+
+    ``None`` for an absent or empty tag (no last-known-good bar recorded yet), a
+    ``float`` for a parseable value, or the :data:`_MALFORMED` sentinel when the
+    tag is present but unparseable (so :meth:`ExperimentTagWatermarkStore.read`
+    can fail closed instead of silently dropping the rollback bar).
+    """
     if value is None or value == "":
         return None
     try:
         return float(value)
     except (TypeError, ValueError):
-        return None
+        return _MALFORMED
 
 
 # --- reading human labels off the experiment's traces ----------------------
@@ -494,9 +558,35 @@ def auto_align_judge(
         labeler_id=cfg.labeler_id,
     )
     count = len(labels)
-    state = store.read(spec.name)
+
+    # Read the watermark FAIL-CLOSED: an existing-but-unreadable/malformed watermark
+    # raises, and we skip this judge WITHOUT aligning, promoting, or overwriting
+    # state — never downgrading a previously-aligned judge to "never aligned".
+    try:
+        state = store.read(spec.name)
+    except WatermarkReadError as exc:
+        return JudgeAutoAlignResult(
+            judge_name=spec.name,
+            status=AutoAlignStatus.FAILED,
+            label_count=count,
+            watermark=0,
+            prior_agreement=None,
+            promoted=False,
+            error=str(exc),
+            notes=(
+                "existing auto-align watermark is unreadable/malformed; skipped WITHOUT "
+                f"aligning or promoting, prior state left intact (fail closed): {exc}",
+            ),
+        )
     watermark = state.label_count
     prior_agreement = state.agreement
+
+    def _persist(new_state: AutoAlignState) -> None:
+        # A dry run (register=False) computes + reports but must NOT persist the
+        # watermark or the last-known-good agreement bar, so a later real run with
+        # the same labels still promotes. A real run persists as usual.
+        if register:
+            store.write(spec.name, new_state)
 
     def _result(
         status: AutoAlignStatus,
@@ -553,7 +643,7 @@ def auto_align_judge(
         held = AutoAlignState(
             label_count=count, agreement=prior_agreement, aligned_at=state.aligned_at
         )
-        store.write(spec.name, held)
+        _persist(held)
         return _result(
             AutoAlignStatus.HELD_DISTRUSTED,
             new_state=held,
@@ -575,7 +665,7 @@ def auto_align_judge(
         held = AutoAlignState(
             label_count=count, agreement=prior_agreement, aligned_at=state.aligned_at
         )
-        store.write(spec.name, held)
+        _persist(held)
         reason = (
             "unmeasured (insufficient anchor data)"
             if agreement.insufficient_data
@@ -594,7 +684,7 @@ def auto_align_judge(
         held = AutoAlignState(
             label_count=count, agreement=prior_agreement, aligned_at=state.aligned_at
         )
-        store.write(spec.name, held)
+        _persist(held)
         return _result(
             AutoAlignStatus.ROLLED_BACK,
             agreement=agreement,
@@ -618,8 +708,12 @@ def auto_align_judge(
     promoted_state = AutoAlignState(
         label_count=count, agreement=agreement.agreement_rate, aligned_at=generated_at
     )
-    store.write(spec.name, promoted_state)
-    verb = "registered" if register else "measured (register=False, not registered)"
+    _persist(promoted_state)
+    verb = (
+        "registered and persisted"
+        if register
+        else "measured only (register=False: not registered, not persisted)"
+    )
     return _result(
         AutoAlignStatus.ALIGNED,
         promoted=True,

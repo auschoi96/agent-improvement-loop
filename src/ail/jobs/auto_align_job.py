@@ -149,7 +149,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--no-register",
         action="store_true",
-        help="Run the full decision but do not register promoted judges (dry run).",
+        help="Dry run: run the full decision but register nothing and persist no watermark state.",
     )
     parser.add_argument(
         "--token-secret-scope",

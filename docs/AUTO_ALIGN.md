@@ -84,16 +84,25 @@ simplest correct fail-closed move.
 ### The watermark
 
 The watermark advances to the current label count on **every** cadence that ran
-alignment — including a held or rolled-back one — so the same labels are never
-re-aligned repeatedly; a future cadence retries only once **more** labels accrue.
-The last-known-good agreement bar advances **only** on a promotion.
+alignment **and persisted** — including a held or rolled-back one — so the same
+labels are never re-aligned repeatedly; a future cadence retries only once
+**more** labels accrue. The last-known-good agreement bar advances **only** on a
+promotion. A dry run (`--no-register`) computes and reports the decision but
+persists **nothing**, so a later real run with the same labels still promotes.
 
 It is persisted as three experiment tags per judge under `ail.autoalign.<name>.`
 (`label_count` / `agreement` / `aligned_at`) — mirroring
 `ail.judge.<name>.aligned` from registration, because the scheduled-scorer API
 exposes no per-scorer metadata slot. The store (`WatermarkStore`) is injectable;
-`ExperimentTagWatermarkStore` is the production implementation, and reads fail
-closed to a never-aligned state.
+`ExperimentTagWatermarkStore` is the production implementation.
+
+**Reads fail closed.** A genuine first run (no watermark tags yet) reads as a
+fresh never-aligned state and proceeds. But a backend read failure or a
+malformed / partial *existing* watermark raises `WatermarkReadError`, and the
+trigger **skips that judge** for the run (reported as `FAILED`) without aligning,
+promoting, or overwriting state. A read error is never silently downgraded to
+"never aligned" — doing so would re-align the same labels every run and drop the
+rollback bar (letting a regressed re-alignment get promoted).
 
 ## Scheduled, not event-triggered
 
@@ -135,7 +144,7 @@ ail-auto-align \
     --experiment 660599403165942 \
     --warehouse-id <sql-warehouse-id> \
     --label-floor 20 --agreement-floor 0.7 \
-    --no-register            # dry run: run the full decision, register nothing
+    --no-register            # dry run: run the full decision; register + persist nothing
 
 databricks bundle deploy -t dais_demo --profile dais-demo   # deploys resources/auto_align.job.yml
 ```

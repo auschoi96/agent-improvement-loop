@@ -37,6 +37,7 @@ from ail.judges.auto_align import (
     AutoAlignStatus,
     ExperimentTagWatermarkStore,
     JudgeAutoAlignResult,
+    WatermarkReadError,
     auto_align_judge,
     auto_align_scorers,
     read_human_labels,
@@ -340,7 +341,10 @@ class TestRollback:
 
 
 class TestRegisterFalse:
-    def test_promotes_and_advances_state_without_registering(self, seams: dict[str, Any]) -> None:
+    def test_dry_run_computes_but_does_not_persist_state(self, seams: dict[str, Any]) -> None:
+        # A dry run reports the decision (ALIGNED) but must NOT persist the
+        # watermark or the last-known-good agreement bar, so a later REAL run with
+        # the same labels still promotes.
         seams["labels"] = 25
         seams["score"] = _agreement(0.85)
         store = _MemStore()
@@ -349,7 +353,74 @@ class TestRegisterFalse:
         assert result.promoted is True
         assert result.registration is None
         assert seams["register_calls"] == []  # no scheduled scorer created
-        assert store.data["correctness"].agreement == 0.85  # bar still advanced
+        # Reported in the result for the operator...
+        assert result.state is not None
+        assert result.state.agreement == 0.85
+        # ...but NOT written to the store.
+        assert store.writes == []
+        assert "correctness" not in store.data
+
+    def test_dry_run_does_not_advance_watermark_on_rollback(self, seams: dict[str, Any]) -> None:
+        # A held/rolled-back dry run must not advance the watermark either.
+        seams["labels"] = 40
+        seams["score"] = _agreement(0.75)  # trusted but < prior 0.9 -> rollback
+        store = _MemStore({"correctness": AutoAlignState(label_count=25, agreement=0.9)})
+        result = _run(store, seams, register=False)
+        assert result.status is AutoAlignStatus.ROLLED_BACK
+        assert store.writes == []  # prior state untouched
+        assert store.data["correctness"] == AutoAlignState(label_count=25, agreement=0.9)
+
+
+# --- watermark read fails closed (never downgrade to 'never aligned') ------
+
+
+class _RaisingStore:
+    """A store whose read RAISES (an existing-but-unreadable watermark)."""
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, AutoAlignState]] = []
+
+    def read(self, judge_name: str) -> AutoAlignState:
+        raise WatermarkReadError(f"existing watermark for {judge_name!r} is unreadable")
+
+    def write(self, judge_name: str, state: AutoAlignState) -> None:  # pragma: no cover
+        self.writes.append((judge_name, state))
+
+
+class TestWatermarkReadFailsClosed:
+    def test_unreadable_watermark_skips_without_aligning_or_promoting(
+        self, seams: dict[str, Any]
+    ) -> None:
+        # Plenty of labels + a would-be-trusting score: if the read fell back to
+        # 'never aligned' this judge would (wrongly) align and promote. It must not.
+        seams["labels"] = 40
+        seams["score"] = _agreement(0.9)
+        store = _RaisingStore()
+        result = _run(store, seams)
+        assert result.status is AutoAlignStatus.FAILED
+        assert result.error is not None and "unreadable" in result.error
+        assert result.promoted is False
+        assert seams["align_calls"] == []  # NEVER aligned (fail closed)
+        assert seams["register_calls"] == []  # NEVER promoted
+        assert store.writes == []  # prior state left intact (no overwrite)
+
+    def test_orchestrator_isolates_unreadable_watermark_as_failed(
+        self, seams: dict[str, Any]
+    ) -> None:
+        seams["labels"] = 40
+        seams["score"] = _agreement(0.9)
+        store = _RaisingStore()
+        report = auto_align_scorers(
+            "exp1",
+            source=object(),
+            store=store,
+            scorers={"correctness": CORRECTNESS},
+            now="2026-07-02T00:00:00+00:00",
+        )
+        assert report.n_failed == 1
+        assert report.n_aligned == 0
+        assert seams["align_calls"] == []
+        assert store.writes == []
 
 
 # --- reading human labels (the L1 name-matching read side) -----------------
@@ -553,15 +624,52 @@ class TestExperimentTagWatermarkStore:
         assert got.aligned_at == "t0"
 
     def test_missing_tags_read_as_never_aligned(self) -> None:
+        # A genuine first run (no watermark tags at all) -> fresh state, proceed.
         store = ExperimentTagWatermarkStore(experiment_id="exp1", client=_FakeMlflowClient())
         got = store.read("correctness")
         assert got == AutoAlignState(label_count=0, agreement=None, aligned_at=None)
 
-    def test_unreadable_experiment_fails_closed_to_zero_state(self) -> None:
+    def test_unreadable_experiment_raises_fail_closed(self) -> None:
+        # A backend read failure -> state unknown -> raise (NOT a zeroed state).
         store = ExperimentTagWatermarkStore(
             experiment_id="exp1", client=_FakeMlflowClient(raise_on_read=True)
         )
-        assert store.read("correctness") == AutoAlignState()
+        with pytest.raises(WatermarkReadError):
+            store.read("correctness")
+
+    def test_malformed_label_count_raises_fail_closed(self) -> None:
+        # An EXISTING watermark whose label_count is malformed must NOT read as
+        # 'never aligned' (which would re-align + drop the rollback bar).
+        client = _FakeMlflowClient(
+            tags={
+                "ail.autoalign.correctness.label_count": "not-an-int",
+                "ail.autoalign.correctness.agreement": "0.9",
+                "ail.autoalign.correctness.aligned_at": "t0",
+            }
+        )
+        store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
+        with pytest.raises(WatermarkReadError):
+            store.read("correctness")
+
+    def test_malformed_agreement_raises_fail_closed(self) -> None:
+        client = _FakeMlflowClient(
+            tags={
+                "ail.autoalign.correctness.label_count": "25",
+                "ail.autoalign.correctness.agreement": "high",  # present but unparseable
+                "ail.autoalign.correctness.aligned_at": "t0",
+            }
+        )
+        store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
+        with pytest.raises(WatermarkReadError):
+            store.read("correctness")
+
+    def test_partial_watermark_missing_label_count_raises(self) -> None:
+        # A watermark EXISTS (agreement present) but label_count is absent: partial
+        # / truncated write -> fail closed rather than assume count 0.
+        client = _FakeMlflowClient(tags={"ail.autoalign.correctness.agreement": "0.9"})
+        store = ExperimentTagWatermarkStore(experiment_id="exp1", client=client)
+        with pytest.raises(WatermarkReadError):
+            store.read("correctness")
 
     def test_none_agreement_serializes_to_empty(self) -> None:
         client = _FakeMlflowClient()
