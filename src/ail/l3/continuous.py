@@ -1,13 +1,19 @@
-"""Event-triggered L3/RLM runner for newly-arrived traces.
+"""Scheduled L3/RLM runner over recent traces.
 
-Databricks Jobs supplies the arrival trigger (table update on the UC-backed
-MLflow trace table). This module owns the cost guards inside each firing:
+A Databricks Job fires this on a *schedule* (not a trace-arrival trigger: the
+UC-backed MLflow trace store is a VIEW, ``cc_trace_unified`` / ``cc_trace_metadata``,
+so a ``table_update`` trigger is infeasible — see ``resources/continuous_rlm.job.yml``).
+Each firing scans the most recent traces and owns the cost guards:
 
 * skip any trace that already carries an ``rlm_*`` assessment;
 * deterministically sample trace ids, then rank the sampled set by token count;
 * cap the number of HALO reviews performed by one run; and
 * delegate every selected trace to :func:`ail.l3.reviewer.review_trace`, preserving
   the existing fail-closed parser/attach behavior.
+
+The review is steered by a :class:`~ail.l3.rubric.ReviewRubric`: pass a goal-derived
+rubric (:func:`ail.l3.goal_rubric.rubric_from_goal`) to focus the review on the user's
+stated goal, or leave the :data:`~ail.l3.rubric.DEFAULT_RUBRIC` default.
 """
 
 from __future__ import annotations
@@ -50,7 +56,7 @@ REVIEW_FAILED_FEEDBACK_NAME = "rlm_review_failed"
 
 @dataclass(slots=True)
 class ContinuousRlmRunReport:
-    """Summary for one arrival-triggered RLM job run."""
+    """Summary for one scheduled RLM job run."""
 
     experiment_id: str
     judge_model: str
@@ -174,9 +180,16 @@ def run_continuous_rlm(
     reviewer_experiment_id: str | None = None,
     max_turns: int | None = None,
     temperature: float | None = None,
+    reasoning_effort: str | None = None,
     use_responses_api: bool = False,
 ) -> ContinuousRlmRunReport:
-    """Run one near-real-time RLM pass over newly-arrived trace candidates."""
+    """Run one bounded RLM pass over the most recent trace candidates.
+
+    ``rubric`` steers what the review focuses on (a goal-derived rubric from
+    :func:`ail.l3.goal_rubric.rubric_from_goal`, else :data:`ail.l3.rubric.DEFAULT_RUBRIC`);
+    ``reasoning_effort`` is an optional explicit HALO effort override (``None`` =
+    auto-resolve from ``judge_model``, so ``databricks-gpt-5-5-pro`` gets ``xhigh``).
+    """
     if not 0 <= sample_rate <= 1:
         raise ValueError("--sample-rate must be between 0 and 1")
     if max_reviews < 1:
@@ -223,6 +236,7 @@ def run_continuous_rlm(
                 attach=attach,
                 source=src,
                 temperature=temperature,
+                reasoning_effort=reasoning_effort,
                 use_responses_api=use_responses_api,
                 **extra,  # type: ignore[arg-type]
             )

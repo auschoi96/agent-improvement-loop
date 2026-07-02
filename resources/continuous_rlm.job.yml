@@ -1,0 +1,91 @@
+resources:
+  jobs:
+    continuous_rlm:
+      name: ail-continuous-rlm-scheduled
+      description: >-
+        L3 — the dedicated, high-powered RLM (HALO) deep-reviewer. Each firing runs
+        one bounded ail.l3.continuous pass over the most recent traces: it skips any
+        trace that already carries an rlm_* assessment (idempotent), deterministically
+        samples the rest, ranks the sample by token count, caps the reviews per run,
+        and attaches per-guideline / assets / overall LLM_JUDGE feedback (fail-closed:
+        a degenerate review is marked rlm_review_failed, never a fabricated pass).
+        The review runs on the most powerful VIABLE judge (databricks-gpt-5-5-pro) and
+        is STEERED BY THE USER'S GOAL (objective_metric/direction/target/guardrails →
+        a goal-derived rubric) rather than a fixed rubric. This is the standalone
+        reviewer that was retired when its work was folded into the optimization cycle;
+        re-established here on the top model + goal-steering. Idempotency keeps it from
+        double-reviewing traces the in-cycle sonnet reviewer already handled.
+      tags:
+        project: agent-improvement-loop
+        tier: L3
+        managed_by: dab
+
+      # run_as is inherited from the bundle level (databricks.yml -> `run_as:
+      # ${var.job_run_as}`), so this job shares the single framework identity (and thus
+      # one warehouse grant) with the other jobs. That identity needs CAN_USE on the
+      # trace-store warehouse and read/write on the MLflow trace store.
+
+      # Scheduled cadence (default every 6h). This is deliberately a schedule, NOT a
+      # table_update trigger: the trace store is a VIEW (cc_trace_unified /
+      # cc_trace_metadata), not a Delta table, so trace-arrival triggering is infeasible
+      # (the reason the original standalone RLM trigger job was retired). Override
+      # continuous_rlm_pause_status to PAUSED to keep it deployed-but-dormant.
+      schedule:
+        quartz_cron_expression: ${var.continuous_rlm_cron}
+        timezone_id: ${var.schedule_timezone}
+        pause_status: ${var.continuous_rlm_pause_status}
+
+      # Idempotent (already-reviewed traces are skipped; failed reviews are marked and
+      # never retried unboundedly). HALO is expensive; never overlap runs.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+
+      tasks:
+        - task_key: continuous_rlm
+          environment_key: serverless
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-continuous-rlm
+            named_parameters:
+              experiment: ${var.experiment_id}
+              warehouse-id: ${var.warehouse_id}
+              # Most powerful VIABLE judge. Effort is auto-resolved from this alias
+              # (databricks-gpt-5-5-pro => xhigh) unless continuous_rlm_reasoning_effort
+              # is set to override it explicitly.
+              judge-model: ${var.continuous_rlm_judge_model}
+              reasoning-effort: ${var.continuous_rlm_reasoning_effort}
+              # RLM sampling knobs (the existing ail.l3.continuous scheme; shared vars).
+              max-results: ${var.rlm_max_results}
+              max-reviews: ${var.rlm_max_reviews_per_run}
+              sample-rate: ${var.rlm_sample_rate}
+              min-tokens: ${var.rlm_min_tokens}
+              reviewer-experiment: ${var.experiment_id}
+              max-turns: ${var.rlm_max_turns}
+              # Goal-steering: the review rubric is derived from the operator's goal so
+              # HALO judges and recommends toward what the user is optimizing for. Empty
+              # objective-metric => the default five-guideline rubric (no goal).
+              agent: ${var.agent_name}
+              objective-metric: ${var.objective_metric}
+              goal-direction: ${var.goal_direction}
+              goal-target: ${var.goal_target}
+              goal-target-kind: ${var.goal_target_kind}
+              guardrail-judge: ${var.guardrail_judge}
+              # Empty by default -> the entrypoint mints a short-lived bearer from the
+              # run-as identity. Set both to read a stored token from a secret scope
+              # (production-hardened service-principal path).
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+
+      # Serverless compute. The `ail` wheel (+ deps: mlflow, databricks-sdk, pydantic)
+      # is installed from the locally-built artifact; halo-engine is added because this
+      # job runs the L3/RLM reviewer in-process.
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
+              - ../dist/*.whl
+              # HALO is optional for the core package; the RLM reviewer needs it.
+              - halo-engine>=0.1.26,<0.2

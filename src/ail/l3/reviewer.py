@@ -42,7 +42,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
 from ail.ingest.base import TraceSource
@@ -53,12 +53,14 @@ from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
 
 if TYPE_CHECKING:
     from engine.engine_config import EngineConfig
+    from engine.model_config import ReasoningEffort
 
 __all__ = [
     "OVERALL_FEEDBACK_NAME",
     "ASSETS_FEEDBACK_NAME",
     "GUIDELINE_FEEDBACK_PREFIX",
     "guideline_feedback_name",
+    "resolve_reasoning_effort",
     "build_engine_config",
     "build_review_prompt",
     "run_halo_review",
@@ -245,6 +247,54 @@ def build_review_prompt(trace_id: str, rubric: ReviewRubric = DEFAULT_RUBRIC) ->
     return sentinel_re.sub(lambda m: substitutions[m.group(0)], _PROMPT_TEMPLATE)
 
 
+def _normalize_model_for_reasoning(model: str) -> str:
+    """Normalize a Databricks FMAPI model alias to the form HALO's effort check reads.
+
+    HALO's :func:`engine.model_config.max_reasoning_effort_for_model` keys reasoning
+    effort off *dotted* OpenAI family prefixes — ``gpt-5.4`` / ``gpt-5.5`` /
+    ``gpt-5.1-codex-max`` map to ``xhigh``, other ``gpt-5`` / o-series map to
+    ``high``. Databricks serving endpoints expose the same families under a
+    provider-prefixed, *hyphenated* alias (``databricks-gpt-5-5-pro``) that matches
+    none of those prefixes — it does not even start with ``gpt-5`` — so the strongest
+    effort would silently never auto-apply. We (a) drop a leading ``databricks-``
+    provider segment and (b) restore the dotted minor version on the gpt-5 family
+    (``gpt-5-5`` → ``gpt-5.5``) so HALO's own table, not a hardcoded guess here,
+    decides the effort.
+    """
+    n = model.strip().lower()
+    if n.startswith("databricks-"):
+        n = n[len("databricks-") :]
+    # Restore the dotted minor version so a hyphenated gpt-5 alias matches HALO's
+    # dotted family prefixes: gpt-5-5-pro → gpt-5.5-pro, gpt-5-1-codex-max →
+    # gpt-5.1-codex-max. Only the first hyphen after ``gpt-5`` is a version dot.
+    match = re.match(r"^(gpt-5)-(\d+)(.*)$", n)
+    if match:
+        n = f"{match.group(1)}.{match.group(2)}{match.group(3)}"
+    return n
+
+
+def resolve_reasoning_effort(model: str) -> str | None:
+    """Reasoning effort HALO should send for ``model`` (honoring Databricks aliases).
+
+    Delegates to HALO's authoritative
+    :func:`~engine.model_config.max_reasoning_effort_for_model` after normalizing the
+    Databricks alias (:func:`_normalize_model_for_reasoning`), so this stays in
+    lockstep with HALO's family→effort table and never hardcodes an effort. Returns
+    ``None`` for non-reasoning families (e.g. Claude), so the parameter is simply
+    omitted for them.
+
+    HALO's :class:`~engine.model_config.ModelConfig` is an EXTERNAL library we do not
+    edit, and its prefix check misses the hyphenated Databricks alias — so the caller
+    sets the resolved effort as an EXPLICIT ``ModelConfig.reasoning_effort`` override,
+    which HALO honors ahead of its own auto-detection (see
+    ``ModelConfig.effective_reasoning_effort``). Imports HALO lazily so importing this
+    module needs no ``l3`` extra.
+    """
+    from engine.model_config import max_reasoning_effort_for_model
+
+    return max_reasoning_effort_for_model(_normalize_model_for_reasoning(model))
+
+
 def build_engine_config(
     model: str,
     *,
@@ -254,6 +304,7 @@ def build_engine_config(
     max_depth: int = _DEFAULT_MAX_DEPTH,
     max_parallel: int = _DEFAULT_MAX_PARALLEL,
     temperature: float | None = None,
+    reasoning_effort: str | None = None,
 ) -> EngineConfig:
     """Build a HALO :class:`EngineConfig` from a model + OpenAI-compatible endpoint.
 
@@ -262,6 +313,14 @@ def build_engine_config(
     synthesis, and compaction. ``base_url`` / ``api_key`` are threaded onto the
     provider; when ``None`` HALO's underlying OpenAI client falls back to the
     ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` environment variables.
+
+    ``reasoning_effort`` is set as an EXPLICIT override on the ``ModelConfig``. When
+    left ``None`` it is auto-resolved from the model via
+    :func:`resolve_reasoning_effort`, which normalizes Databricks FMAPI aliases so a
+    reasoning family gets its documented max even when HALO's own hyphen-blind prefix
+    check would not match (e.g. ``databricks-gpt-5-5-pro`` → ``xhigh``). A
+    non-reasoning model resolves to ``None`` and receives no effort parameter, exactly
+    as before.
 
     Imports HALO lazily — calling this without the ``l3`` extra installed raises
     :class:`ImportError` with install guidance.
@@ -277,7 +336,12 @@ def build_engine_config(
             "Install it with: pip install 'ail[l3]'"
         ) from exc
 
-    model_cfg = ModelConfig(name=model, temperature=temperature)
+    effort = reasoning_effort if reasoning_effort is not None else resolve_reasoning_effort(model)
+    model_cfg = ModelConfig(
+        name=model,
+        temperature=temperature,
+        reasoning_effort=cast("ReasoningEffort | None", effort),
+    )
     return EngineConfig(
         root_agent=AgentConfig(name="l3-reviewer", model=model_cfg, maximum_turns=max_turns),
         subagent=AgentConfig(name="l3-reviewer-subagent", model=model_cfg, maximum_turns=max_turns),
@@ -328,6 +392,7 @@ def run_halo_review(
     max_depth: int = _DEFAULT_MAX_DEPTH,
     max_parallel: int = _DEFAULT_MAX_PARALLEL,
     temperature: float | None = None,
+    reasoning_effort: str | None = None,
     telemetry: bool = False,
     use_responses_api: bool = False,
     disable_agent_tracing: bool = True,
@@ -365,6 +430,7 @@ def run_halo_review(
         max_depth=max_depth,
         max_parallel=max_parallel,
         temperature=temperature,
+        reasoning_effort=reasoning_effort,
     )
     messages = [AgentMessage(role="user", content=prompt)]
     output_items = run_engine(messages, config, Path(trace_path), telemetry=telemetry)
@@ -611,6 +677,7 @@ def review_trace(
     max_depth: int = _DEFAULT_MAX_DEPTH,
     max_parallel: int = _DEFAULT_MAX_PARALLEL,
     temperature: float | None = None,
+    reasoning_effort: str | None = None,
     use_responses_api: bool = False,
     tracking_uri: str = "databricks",
     registry_uri: str = "databricks-uc",
@@ -651,6 +718,11 @@ def review_trace(
             tests.
         jsonl_path: Where to write the HALO input JSONL. ``None`` uses a temp file.
         max_turns / max_depth / max_parallel / temperature: HALO bounds + sampling.
+        reasoning_effort: Explicit HALO reasoning-effort override (one of HALO's
+            ``ReasoningEffort`` levels). Leave ``None`` (default) to auto-resolve from
+            ``model`` via :func:`resolve_reasoning_effort` — which lets a Databricks
+            reasoning alias like ``databricks-gpt-5-5-pro`` still get ``xhigh`` despite
+            HALO's hyphen-blind prefix check; non-reasoning models resolve to ``None``.
         use_responses_api: Leave ``False`` for Databricks FMAPI / any
             chat-completions endpoint (the default); set ``True`` only for an
             endpoint that implements the OpenAI Responses API.
@@ -699,6 +771,7 @@ def review_trace(
             max_depth=max_depth,
             max_parallel=max_parallel,
             temperature=temperature,
+            reasoning_effort=reasoning_effort,
             use_responses_api=use_responses_api,
         )
         # Parse INSIDE the reviewer-trace context: a degenerate HALO report

@@ -85,9 +85,9 @@ variables:
       deploying this bundle with a configured goal IS that confirmation. Set to
       anything else to keep the cycle deployed-but-fail-loud on the unconfirmed goal.
     default: 'true'
-  # RLM sampling knobs — reused by the IN-CYCLE L3/RLM reviewer inside
-  # ail-optimization-cycle (formerly served the retired standalone continuous_rlm
-  # trigger job). Also the planner endpoint (rlm_judge_model doubles as planner-model).
+  # RLM sampling knobs — shared by the IN-CYCLE L3/RLM reviewer inside
+  # ail-optimization-cycle AND the standalone scheduled ail-continuous-rlm job.
+  # Also the planner endpoint (rlm_judge_model doubles as optimization_cycle planner-model).
   rlm_judge_model:
     description: Databricks FMAPI serving endpoint used by HALO for in-cycle RLM reviews (and the planner).
     default: databricks-claude-sonnet-4-6
@@ -106,6 +106,30 @@ variables:
   rlm_max_turns:
     description: HALO max turns per agent arm for in-cycle RLM reviews.
     default: '40'
+  # Standalone scheduled ail-continuous-rlm job — the dedicated high-powered RLM
+  # deep-reviewer (distinct from the lighter in-cycle sonnet reviewer above). It reuses
+  # the shared rlm_* sampling knobs and the shared goal vars (objective_metric etc.) but
+  # runs on its own model, schedule, and pause switch.
+  continuous_rlm_judge_model:
+    description: >-
+      HALO judge serving endpoint for the standalone scheduled RLM job. Defaults to the
+      most powerful VIABLE judge: databricks-gpt-5-5-pro (Databricks Claude endpoints
+      reject HALO's always-on parallel_tool_calls; gpt-5-6 does not exist on the gateway).
+    default: databricks-gpt-5-5-pro
+  continuous_rlm_reasoning_effort:
+    description: >-
+      Explicit HALO reasoning-effort override for the standalone RLM job (none | minimal
+      | low | medium | high | xhigh). Empty (the default) => auto-resolve from the judge
+      model, so databricks-gpt-5-5-pro gets xhigh despite HALO's hyphen-blind prefix check.
+    default: ''
+  continuous_rlm_cron:
+    description: >-
+      Quartz cron for the standalone RLM job (sec min hour day-of-month month day-of-week).
+      Default every 6h. A schedule, not a trace-arrival trigger: the trace store is a VIEW.
+    default: '0 0 */6 * * ?'
+  continuous_rlm_pause_status:
+    description: UNPAUSED (the standalone RLM schedule is live) or PAUSED (deployed-but-dormant).
+    default: UNPAUSED
   token_secret_scope:
     description: >-
       Optional Databricks secret scope holding the run-as bearer token for the
