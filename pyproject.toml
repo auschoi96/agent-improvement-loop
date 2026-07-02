@@ -67,6 +67,14 @@ ail-continuous-rlm = "ail.jobs.continuous_rlm:main"
 # the LLM-agent planner), then PENDING-proposal publish. Propose-only; applies
 # nothing (a human approves the apply in the app, lane 3).
 ail-optimization-cycle = "ail.jobs.optimization_cycle:main"
+# LOCAL sibling of ail-optimization-cycle: runs the SAME cycle spine on a laptop —
+# where the Claude Agent SDK prover (ClaudeCodeAdapter) can actually execute — with
+# the REAL frozen-suite proof, readiness+judge gate, and PENDING-proposal publish to
+# the same agent_proposed_actions table the app reads. Surfaces every step (RLM
+# findings, Lane A/B plan + why, candidate, baseline-vs-candidate proof, gate,
+# proposals) as it runs. Static env-token auth; fail-closed; a human approves in the
+# app. See docs/LOCAL_RUNNER.md.
+ail-local-cycle = "ail.jobs.local_cycle:main"
 # Scheduled auto-align trigger: per judged dimension, align the judge with MemAlign
 # once enough human labels exist, re-align as more accrue, guard trust with the
 # agreement floor, and roll back a regression. Turns "a human adds labels" into
