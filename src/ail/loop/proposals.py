@@ -79,6 +79,12 @@ class ActionKind(StrEnum):
     INSTRUCTION_UPDATE = "instruction_update"
     GEPA_PROMPT = "gepa_prompt"
     REVERT = "revert"
+    #: An **open-ended** change an agent produces (a LATER executor lane, L7b-2) —
+    #: not a pre-specified METRIC_VIEW/SKILL/INSTRUCTION/GEPA/REVERT, but "whatever the
+    #: target agent needs" (new tool, new/edited/deleted skill, new table, metric view,
+    #: cached examples, a multi-file refactor). L7b-1 defines only the representation;
+    #: it does **not** run an agent or execute the change (apply fails closed on it).
+    AGENT_TASK = "agent_task"
 
 
 class RiskClass(StrEnum):
@@ -146,6 +152,11 @@ class ChangeKind(StrEnum):
     INSTRUCTION_DIFF = "instruction_diff"
     EVOLVED_BODY_REF = "evolved_body_ref"
     REVERT_REF = "revert_ref"
+    #: The change form for :attr:`ActionKind.AGENT_TASK`: an NL ``plan`` (the intended
+    #: change + why, from the evidence — required) plus, filled by the executor (L7b-2)
+    #: in a sandbox *before* approval, a concrete ``preview_diff`` the human reviews and
+    #: a ``produced_change_ref`` (an L6 snapshot / UC Volume ref) to commit on approval.
+    AGENT_TASK_PLAN = "agent_task_plan"
 
 
 #: Default risk class per action kind. A metric view is additive; every change to
@@ -157,6 +168,9 @@ _DEFAULT_RISK_CLASS: dict[ActionKind, RiskClass] = {
     ActionKind.INSTRUCTION_UPDATE: RiskClass.AGENT_CHANGE,
     ActionKind.GEPA_PROMPT: RiskClass.AGENT_CHANGE,
     ActionKind.REVERT: RiskClass.AGENT_CHANGE,
+    # An open-ended agent-produced change is, by definition, a change to the agent —
+    # the highest-blast-radius kind; always AGENT_CHANGE (never an additive asset).
+    ActionKind.AGENT_TASK: RiskClass.AGENT_CHANGE,
 }
 
 
@@ -173,15 +187,20 @@ _ACTION_CHANGE_KIND: dict[ActionKind, ChangeKind] = {
     ActionKind.INSTRUCTION_UPDATE: ChangeKind.INSTRUCTION_DIFF,
     ActionKind.GEPA_PROMPT: ChangeKind.EVOLVED_BODY_REF,
     ActionKind.REVERT: ChangeKind.REVERT_REF,
+    ActionKind.AGENT_TASK: ChangeKind.AGENT_TASK_PLAN,
 }
 
 #: Which payload field on :class:`ProposedChange` each change kind must populate.
+#: For :attr:`ChangeKind.AGENT_TASK_PLAN` the required field is the NL ``plan`` — the
+#: concrete ``preview_diff`` / ``produced_change_ref`` are filled later by the executor
+#: (L7b-2), so they are NOT required at proposal time (a plan-only proposal is valid).
 _CHANGE_PAYLOAD_FIELD: dict[ChangeKind, str] = {
     ChangeKind.METRIC_VIEW_SQL: "sql",
     ChangeKind.SKILL_DIFF: "diff",
     ChangeKind.INSTRUCTION_DIFF: "diff",
     ChangeKind.EVOLVED_BODY_REF: "evolved_body_ref",
     ChangeKind.REVERT_REF: "revert_target",
+    ChangeKind.AGENT_TASK_PLAN: "plan",
 }
 
 
@@ -245,6 +264,17 @@ class ProposedChange(_Model):
             body (required for ``EVOLVED_BODY_REF``) — the body itself lives in the
             prompt registry / candidate artifact, not inlined here.
         revert_target: The version/asset to revert to (required for ``REVERT_REF``).
+        plan: For an ``AGENT_TASK_PLAN`` change — the **NL intended change + why**,
+            drawn from the evidence (**required** for that kind; the reviewer reads it
+            to understand what the executor intends before any concrete change exists).
+        preview_diff: For an ``AGENT_TASK_PLAN`` change — the **concrete produced
+            change preview** (a diff / change-set) the human reviews before approving.
+            ``None`` until the executor (L7b-2) produces it in a sandbox pre-approval;
+            L7b-1 only defines the slot. The user decision (``docs/PRODUCT_ARCHITECTURE.md``
+            §7): the human previews the *real* change, not just the NL plan.
+        produced_change_ref: For an ``AGENT_TASK_PLAN`` change — an L6 snapshot / UC
+            Volume ref to the produced change-set, used to **commit on approval**.
+            ``None`` until the executor (L7b-2) fills it; L7b-1 only defines the slot.
     """
 
     kind: ChangeKind
@@ -253,6 +283,9 @@ class ProposedChange(_Model):
     diff: str | None = None
     evolved_body_ref: str | None = None
     revert_target: str | None = None
+    plan: str | None = None
+    preview_diff: str | None = None
+    produced_change_ref: str | None = None
 
     @model_validator(mode="after")
     def _require_payload(self) -> ProposedChange:
@@ -412,6 +445,11 @@ def derive_proposal_id(*, agent_name: str, action_kind: ActionKind, change: Prop
     it. Two materially different changes (different SQL/diff/ref/target) hash to
     different ids.
     """
+    # ``plan`` is the AGENT_TASK's content-identifying field (its ``sql``/``diff``/refs
+    # are all None), so include it — else two different agent-task plans would collide on
+    # the same id. ``preview_diff`` / ``produced_change_ref`` are deliberately excluded:
+    # the executor (L7b-2) fills them *after* the id is minted, so keying on them would
+    # move a proposal's identity out from under the row it already published.
     payload = " ".join(
         [
             agent_name,
@@ -421,6 +459,7 @@ def derive_proposal_id(*, agent_name: str, action_kind: ActionKind, change: Prop
             change.diff or "",
             change.evolved_body_ref or "",
             change.revert_target or "",
+            change.plan or "",
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

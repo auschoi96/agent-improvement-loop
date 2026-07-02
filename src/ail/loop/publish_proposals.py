@@ -81,6 +81,12 @@ PROPOSAL_COLUMNS: list[str] = [
     "change_diff",
     "change_evolved_body_ref",
     "change_revert_target",
+    # what — AGENT_TASK payload (additive, nullable): the NL plan, plus the executor-
+    # filled (L7b-2) concrete-change preview + produced change-set ref. All NULL for a
+    # non-AGENT_TASK proposal, and for an AGENT_TASK the preview/ref are NULL until L7b-2.
+    "change_plan",
+    "change_preview_diff",
+    "change_produced_change_ref",
     # proof
     "proof_objective_metric",
     "proof_proved_improvement",
@@ -166,6 +172,9 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
         c.diff,
         c.evolved_body_ref,
         c.revert_target,
+        c.plan,
+        c.preview_diff,
+        c.produced_change_ref,
         *proof_cols,
         g.readiness_tier,
         g.can_prove_improvement,
@@ -209,6 +218,9 @@ def _ddl(catalog: str, schema: str) -> list[str]:
             change_diff STRING,
             change_evolved_body_ref STRING,
             change_revert_target STRING,
+            change_plan STRING,
+            change_preview_diff STRING,
+            change_produced_change_ref STRING,
             proof_objective_metric STRING,
             proof_proved_improvement BOOLEAN,
             proof_correctness_held BOOLEAN,

@@ -47,6 +47,36 @@ def test_unknown_field_is_rejected() -> None:
         Agent.model_validate({"agent_name": "x", "experiment_id": "1", "experimnt_id": "typo"})
 
 
+def test_agent_target_workspace_absent_is_none() -> None:
+    # Optional at the model level: "not configured yet" is a clean None (a registry entry
+    # is valid before the executor is wired). The seed agent leaves it unset.
+    agent = Agent(agent_name="x", experiment_id="1")
+    assert agent.target_workspace is None
+    assert DEFAULT_REGISTRY.get("claude_code").target_workspace is None
+
+
+def test_agent_target_workspace_present_is_carried() -> None:
+    # User-provided (the target agent's own repo the executor edits + snapshots). L7b-1
+    # only carries it; it neither runs the executor nor validates the path exists.
+    agent = Agent(agent_name="x", experiment_id="1", target_workspace="/repos/my-agent")
+    assert agent.target_workspace == "/repos/my-agent"
+
+
+def test_agent_target_workspace_typo_is_loud() -> None:
+    # extra='forbid': a near-miss field name (target_workspaces) fails rather than being
+    # silently dropped, so a misconfigured executor target is caught at load time.
+    with pytest.raises(ValueError):
+        Agent.model_validate(
+            {"agent_name": "x", "experiment_id": "1", "target_workspaces": "/repos/typo"}
+        )
+
+
+def test_agent_target_workspace_round_trips_json() -> None:
+    agent = Agent(agent_name="x", experiment_id="1", target_workspace="/repos/my-agent")
+    restored = Agent.model_validate_json(agent.model_dump_json())
+    assert restored == agent
+
+
 def test_agent_cohort_uses_agent_tag_by_default() -> None:
     cohort = DEFAULT_REGISTRY.get("claude_code").cohort()
     assert cohort.name == "claude_code"

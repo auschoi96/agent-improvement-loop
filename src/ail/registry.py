@@ -83,6 +83,13 @@ class Agent(_Config):
             tag_value}`` equality clauses (AND'd). ``None`` means the whole
             experiment is the agent's cohort. Built into a :class:`ail.cohorts.Cohort`
             by :meth:`cohort`.
+        target_workspace: The path / repo the **open-ended executor** (a LATER lane,
+            L7b-2) will edit and snapshot — the target agent's own source. User-provided
+            and **optional at the model level** (``None`` cleanly represents "not
+            configured yet", so a registry entry is valid before the executor is wired),
+            but **REQUIRED for the executor**: an ``AGENT_TASK`` cannot be executed
+            against an agent with no ``target_workspace``. L7b-1 only *carries* this
+            field; it neither runs the executor nor validates the path exists.
     """
 
     agent_name: str = Field(min_length=1)
@@ -90,6 +97,7 @@ class Agent(_Config):
     description: str = ""
     judge_config: dict[str, Any] | None = None
     tag_filter: dict[str, str] | None = None
+    target_workspace: str | None = None
 
     def cohort(self) -> Cohort:
         """The :class:`~ail.cohorts.Cohort` selecting this agent's traces.

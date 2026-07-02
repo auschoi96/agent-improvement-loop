@@ -115,6 +115,41 @@ def _metric_view_change() -> ProposedChange:
     )
 
 
+def _agent_task_change(
+    *,
+    plan: str = "Add a read-cache tool so the agent stops re-reading unchanged files.",
+    preview_diff: str | None = None,
+    produced_change_ref: str | None = None,
+) -> ProposedChange:
+    return ProposedChange(
+        kind=ChangeKind.AGENT_TASK_PLAN,
+        summary="agent-produced read-cache tool",
+        plan=plan,
+        preview_diff=preview_diff,
+        produced_change_ref=produced_change_ref,
+    )
+
+
+def _agent_task_proposal(change: ProposedChange | None = None) -> ProposedAction:
+    change = change or _agent_task_change()
+    return ProposedAction(
+        proposal_id=derive_proposal_id(
+            agent_name="claude_code", action_kind=ActionKind.AGENT_TASK, change=change
+        ),
+        agent_name="claude_code",
+        action_kind=ActionKind.AGENT_TASK,
+        risk_class=default_risk_class(ActionKind.AGENT_TASK),
+        objective_metric="total_tokens",
+        goal_cohort="claude_code",
+        trigger=TriggerSignal(kind=TriggerKind.AGENT_PLANNER, summary="planner proposed a task"),
+        change=change,
+        # An AGENT_TASK proposal rests on its evidence + gate (proving is opt-in Tier-2);
+        # it carries no frozen-suite proof at plan time.
+        proof=None,
+        gate_status=GateStatus(readiness_tier="ready_to_prove", gated=True),
+    )
+
+
 # -- ProposedChange / ProposedAction validators ----------------------------
 
 
@@ -148,6 +183,103 @@ def test_default_risk_class_mapping() -> None:
     assert default_risk_class(ActionKind.GEPA_PROMPT) is RiskClass.AGENT_CHANGE
     assert default_risk_class(ActionKind.INSTRUCTION_UPDATE) is RiskClass.AGENT_CHANGE
     assert default_risk_class(ActionKind.REVERT) is RiskClass.AGENT_CHANGE
+    # An open-ended agent-produced change is always the higher-blast-radius AGENT_CHANGE.
+    assert default_risk_class(ActionKind.AGENT_TASK) is RiskClass.AGENT_CHANGE
+
+
+# -- AGENT_TASK representation (L7b-1: the open-ended executor's proposal shape) --
+
+
+def test_agent_task_change_requires_non_empty_plan() -> None:
+    # The NL plan is the AGENT_TASK's required payload (what the agent intends + why);
+    # preview_diff / produced_change_ref are filled later by the executor (L7b-2).
+    with pytest.raises(ValidationError, match="must set a non-empty 'plan'"):
+        ProposedChange(kind=ChangeKind.AGENT_TASK_PLAN, summary="x")
+    with pytest.raises(ValidationError, match="must set a non-empty 'plan'"):
+        ProposedChange(kind=ChangeKind.AGENT_TASK_PLAN, summary="x", plan="")
+
+
+def test_agent_task_change_valid_with_plan_only_preview_and_ref_none() -> None:
+    # A plan-only change is valid: the preview + produced-change ref are None until the
+    # executor (L7b-2) produces the concrete change in a sandbox pre-approval.
+    change = _agent_task_change()
+    assert change.plan and change.plan.strip()
+    assert change.preview_diff is None
+    assert change.produced_change_ref is None
+
+
+def test_agent_task_change_carries_preview_and_ref_when_produced() -> None:
+    change = _agent_task_change(
+        preview_diff="--- a/tool.py\n+++ b/tool.py\n@@ -1 +1,2 @@\n+read_cache()\n",
+        produced_change_ref="/Volumes/cat/sch/ail_snapshots/prop-1/change.tar",
+    )
+    assert change.preview_diff is not None
+    assert change.produced_change_ref == "/Volumes/cat/sch/ail_snapshots/prop-1/change.tar"
+
+
+def test_agent_task_proposal_constructs_and_validates() -> None:
+    proposal = _agent_task_proposal()
+    assert proposal.action_kind is ActionKind.AGENT_TASK
+    assert proposal.change.kind is ChangeKind.AGENT_TASK_PLAN
+    assert proposal.risk_class is RiskClass.AGENT_CHANGE
+    assert proposal.status is ProposalStatus.PENDING
+    assert proposal.proof is None  # rests on evidence + gate, not a frozen-suite proof
+
+
+def test_agent_task_action_requires_agent_task_plan_change() -> None:
+    # An AGENT_TASK action carrying a metric-view SQL change (not a plan) is rejected —
+    # the action↔change cross-check is symmetric with the pre-specified kinds.
+    with pytest.raises(ValidationError, match="requires a change of kind 'agent_task_plan'"):
+        ProposedAction(
+            proposal_id="x",
+            agent_name="claude_code",
+            action_kind=ActionKind.AGENT_TASK,
+            risk_class=RiskClass.AGENT_CHANGE,
+            objective_metric="total_tokens",
+            goal_cohort="claude_code",
+            trigger=TriggerSignal(kind=TriggerKind.AGENT_PLANNER, summary="x"),
+            change=_metric_view_change(),
+            gate_status=GateStatus(readiness_tier="ready_to_prove"),
+        )
+
+
+def test_agent_task_id_keys_on_plan_not_preview_or_ref() -> None:
+    # Two different plans -> different ids (no collision when sql/diff/refs are all None).
+    a = derive_proposal_id(
+        agent_name="claude_code",
+        action_kind=ActionKind.AGENT_TASK,
+        change=_agent_task_change(plan="Add a read-cache tool."),
+    )
+    b = derive_proposal_id(
+        agent_name="claude_code",
+        action_kind=ActionKind.AGENT_TASK,
+        change=_agent_task_change(plan="Delete the stale metric view."),
+    )
+    assert a != b
+    # The executor (L7b-2) later fills preview_diff / produced_change_ref; that must NOT
+    # move the id out from under the already-published row.
+    same_plan_with_preview = derive_proposal_id(
+        agent_name="claude_code",
+        action_kind=ActionKind.AGENT_TASK,
+        change=_agent_task_change(
+            plan="Add a read-cache tool.",
+            preview_diff="--- a\n+++ b\n@@ @@\n+x",
+            produced_change_ref="/Volumes/x/y/z.tar",
+        ),
+    )
+    assert same_plan_with_preview == a
+
+
+def test_agent_task_proposal_round_trips_through_json() -> None:
+    # Round-trip with the executor-filled preview + ref populated (the post-L7b-2 shape).
+    proposal = _agent_task_proposal(
+        _agent_task_change(
+            preview_diff="--- a/tool.py\n+++ b/tool.py\n@@ -1 +1,2 @@\n+read_cache()\n",
+            produced_change_ref="/Volumes/cat/sch/ail_snapshots/prop-1/change.tar",
+        )
+    )
+    restored = ProposedAction.model_validate_json(proposal.model_dump_json())
+    assert restored == proposal
 
 
 # -- ProofSummary.from_phase2_artifact (fail-closed) -----------------------

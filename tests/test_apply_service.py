@@ -218,6 +218,22 @@ def _skill_update_proposal(
     return _proposal(ActionKind.SKILL_UPDATE, change)
 
 
+def _agent_task_proposal(
+    *,
+    plan: str = "Add a read-cache tool; the agent re-reads unchanged files (5 traces).",
+    preview_diff: str | None = None,
+    produced_change_ref: str | None = None,
+) -> ProposedAction:
+    change = ProposedChange(
+        kind=ChangeKind.AGENT_TASK_PLAN,
+        summary="agent-produced read-cache tool",
+        plan=plan,
+        preview_diff=preview_diff,
+        produced_change_ref=produced_change_ref,
+    )
+    return _proposal(ActionKind.AGENT_TASK, change)
+
+
 def _approve(p: ProposedAction, *, approver: str = "reviewer@databricks.com") -> ApprovalDecision:
     return ApprovalDecision(
         proposal_id=p.proposal_id,
@@ -531,6 +547,37 @@ def test_row_to_proposal_reconstructs_none_proof_for_evidence_only() -> None:
     assert restored.proof is None
     assert restored.action_kind is ActionKind.METRIC_VIEW
     assert restored.change.sql == METRIC_VIEW_SQL
+
+
+def test_row_to_proposal_round_trips_agent_task_losslessly() -> None:
+    # L7b-1: an AGENT_TASK proposal (NL plan + the executor-filled preview_diff +
+    # produced_change_ref) reconstructs losslessly from the flat agent_proposed_actions
+    # row — the three new nullable columns survive the proposal↔row round-trip.
+    original = _agent_task_proposal(
+        preview_diff="--- a/tool.py\n+++ b/tool.py\n@@ -1 +1,2 @@\n+read_cache()\n",
+        produced_change_ref="/Volumes/cat/sch/ail_snapshots/prop-1/change.tar",
+    )
+    flat = _proposal_row(original, generated_at="2026-06-30T00:00:00+00:00")
+    row = dict(zip(PROPOSAL_COLUMNS, [None if v is None else str(v) for v in flat], strict=True))
+    restored = _row_to_proposal(row)
+    assert restored.action_kind is ActionKind.AGENT_TASK
+    assert restored.change.kind is ChangeKind.AGENT_TASK_PLAN
+    assert restored.change == original.change  # plan + preview_diff + produced_change_ref
+    assert restored.change.plan == original.change.plan
+    assert restored.change.preview_diff == original.change.preview_diff
+    assert restored.change.produced_change_ref == original.change.produced_change_ref
+
+
+def test_row_to_proposal_round_trips_agent_task_plan_only_preview_ref_none() -> None:
+    # Before the executor (L7b-2) runs, preview_diff / produced_change_ref are None; they
+    # must round-trip back as None (never ""), so a plan-only proposal stays plan-only.
+    original = _agent_task_proposal()  # preview_diff=None, produced_change_ref=None
+    flat = _proposal_row(original, generated_at="2026-06-30T00:00:00+00:00")
+    row = dict(zip(PROPOSAL_COLUMNS, [None if v is None else str(v) for v in flat], strict=True))
+    restored = _row_to_proposal(row)
+    assert restored.change.plan == original.change.plan
+    assert restored.change.preview_diff is None
+    assert restored.change.produced_change_ref is None
 
 
 # ---------------------------------------------------------------------------

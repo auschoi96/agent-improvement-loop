@@ -826,6 +826,12 @@ def _row_to_proposal(row: dict[str, Any]) -> ProposedAction:
         diff=_s(row, "change_diff"),
         evolved_body_ref=_s(row, "change_evolved_body_ref"),
         revert_target=_s(row, "change_revert_target"),
+        # AGENT_TASK payload (nullable): the NL plan is required for an AGENT_TASK_PLAN
+        # change; preview_diff / produced_change_ref stay None until the executor (L7b-2)
+        # fills them. All None for a non-AGENT_TASK proposal — round-trips losslessly.
+        plan=_s(row, "change_plan"),
+        preview_diff=_s(row, "change_preview_diff"),
+        produced_change_ref=_s(row, "change_produced_change_ref"),
     )
     # Reconstruct proof=None for an evidence-first proposal (all proof_* columns NULL),
     # so it round-trips as evidence-only and the apply engine applies it on evidence +
