@@ -78,6 +78,20 @@ from ail.loop.decision_rules import (
     decide,
     objective_target_met,
 )
+from ail.loop.planner import (
+    DEFAULT_CONFIDENCE_FLOOR,
+    DEFAULT_PLANNER_MODEL,
+    CombinedDecisions,
+    Planner,
+    PlannerCycleResult,
+    PlannerLLM,
+    PlanParseError,
+    agent_planner,
+    build_planner_prompt,
+    combined_decisions,
+    parse_plan,
+    run_cycle_with_planner,
+)
 from ail.loop.proposals import (
     ActionKind,
     ChangeKind,
@@ -160,4 +174,17 @@ __all__ = [
     "CycleResult",
     "evaluate_gate",
     "run_cycle",
+    # planner (lane B) + layered A+B
+    "DEFAULT_PLANNER_MODEL",
+    "DEFAULT_CONFIDENCE_FLOOR",
+    "PlanParseError",
+    "PlannerLLM",
+    "Planner",
+    "CombinedDecisions",
+    "PlannerCycleResult",
+    "build_planner_prompt",
+    "parse_plan",
+    "agent_planner",
+    "combined_decisions",
+    "run_cycle_with_planner",
 ]

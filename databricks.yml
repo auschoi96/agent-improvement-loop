@@ -20,14 +20,6 @@ variables:
   warehouse_id:
     description: SQL warehouse id used to create + (atomically) populate the L0 UC Delta tables.
     default: 7d1d3dbb3ba65f2a
-  trace_store_table:
-    description: >-
-      UC Delta table where MLflow traces land for experiment_id. Continuous RLM
-      uses a Databricks Jobs table_update trigger on this table. Workspace-specific
-      with no safe default, so it is intentionally empty: a deploy MUST set it (e.g.
-      --var trace_store_table=catalog.mlflow_traces.cc_<experiment>) and fails loud
-      otherwise, rather than silently triggering on some other workspace's table.
-    default: ''
   catalog:
     description: Unity Catalog catalog that holds the L0 tables.
     default: austin_choi_omni_agent_catalog
@@ -45,26 +37,74 @@ variables:
   schedule_pause_status:
     description: UNPAUSED (schedule is live — the living-dashboard default) or PAUSED.
     default: UNPAUSED
-  rlm_trigger_pause_status:
-    description: UNPAUSED (continuous RLM trace-arrival trigger is live) or PAUSED.
+  optimization_cycle_cron:
+    description: >-
+      Quartz cron for the unified optimization cycle (sec min hour day-of-month month
+      day-of-week). Default is hourly. This is a schedule, not a trace-arrival trigger:
+      the trace store is a VIEW, so the retired continuous_rlm table_update trigger was
+      infeasible.
+    default: '0 0 * * * ?'
+  optimization_cycle_pause_status:
+    description: UNPAUSED (the optimization cycle schedule is live) or PAUSED (dormant).
     default: UNPAUSED
+  agent_name:
+    description: Agent the optimization cycle scopes its cohort + proposals to.
+    default: claude_code
+  objective_metric:
+    description: The optimization cycle's objective metric (the goal's target metric).
+    default: total_tokens
+  goal_direction:
+    description: >-
+      Optimization direction for the objective metric: 'minimize' (default) or
+      'maximize'.
+    default: minimize
+  goal_target:
+    description: >-
+      The goal's target movement (relative fraction by default; e.g. -0.30 = a 30%
+      reduction for a minimize objective).
+    default: '-0.30'
+  goal_target_kind:
+    description: >-
+      How goal_target is read: 'relative' (a fractional movement vs the baseline,
+      the default) or 'absolute' (a target metric value).
+    default: relative
+  objective_baseline:
+    description: >-
+      Baseline value a relative objective target is measured against. Empty (the
+      default) => the cycle treats the objective as not-yet-met rather than
+      fabricating a baseline.
+    default: ''
+  guardrail_judge:
+    description: >-
+      Optional judge guardrail as 'name:threshold' (e.g. 'modularity:4.0'). Empty
+      (the default) => no judge guardrail; a blank value is ignored by the cycle.
+    default: ''
+  goal_confirmed:
+    description: >-
+      'true' marks the operator-configured goal human-confirmed so the cycle runs;
+      deploying this bundle with a configured goal IS that confirmation. Set to
+      anything else to keep the cycle deployed-but-fail-loud on the unconfirmed goal.
+    default: 'true'
+  # RLM sampling knobs — reused by the IN-CYCLE L3/RLM reviewer inside
+  # ail-optimization-cycle (formerly served the retired standalone continuous_rlm
+  # trigger job). Also the planner endpoint (rlm_judge_model doubles as planner-model).
   rlm_judge_model:
-    description: Databricks FMAPI serving endpoint used by HALO for continuous RLM reviews.
+    description: Databricks FMAPI serving endpoint used by HALO for in-cycle RLM reviews (and the planner).
     default: databricks-claude-sonnet-4-6
   rlm_sample_rate:
-    description: Deterministic trace-id sample rate for continuous RLM review.
+    description: Deterministic trace-id sample rate for the in-cycle RLM review.
     default: '0.10'
   rlm_max_reviews_per_run:
-    description: Hard cap on HALO reviews performed by one trigger firing.
+    description: Hard cap on HALO reviews performed by one cycle firing.
     default: '2'
   rlm_min_tokens:
-    description: Token floor for continuous RLM candidates; set 0 to allow small traces.
+    description: Token floor for in-cycle RLM candidates; set 0 to allow small traces.
     default: '50000'
   rlm_max_results:
-    description: Max recent traces scanned per trigger firing before idempotency/sampling.
+    description: Max recent traces scanned per cycle firing before idempotency/sampling.
     default: '100'
   rlm_max_turns:
-    description: HALO max turns per agent arm for continuous RLM reviews.
+    description: HALO max turns per agent arm for in-cycle RLM reviews.
     default: '40'
   token_secret_scope:
     description: >-

@@ -34,6 +34,7 @@ for, so a cycle runs with **no** live MLflow, agent, or warehouse call.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
@@ -201,6 +202,7 @@ def run_cycle(
     gate: Gate,
     decision_thresholds: DecisionThresholds | None = None,
     now: str | None = None,
+    decisions: Sequence[Decision] | None = None,
 ) -> CycleResult:
     """Run one detect→decide→prove→gate→propose cycle; return the proposals to emit.
 
@@ -222,6 +224,18 @@ def run_cycle(
         decision_thresholds: Adjustable decision-rule bars (defaults applied).
         now: ISO-8601 stamp for ``created_at`` (defaults to now; supplied in tests
             for reproducibility).
+        decisions: **Optional decision-set override** — an injection seam, not a
+            pipeline change. When ``None`` (the default) the cycle detects its own
+            decisions the usual way, by running the deterministic **Lane A** rules
+            (:func:`ail.loop.decision_rules.decide`) over ``feedback_source()``.
+            When supplied, the cycle uses exactly this list *instead* of calling
+            ``decide`` — the mechanism the layered A+B planner
+            (:func:`ail.loop.planner.run_cycle_with_planner`) uses to feed the
+            de-duped **A ∪ B** union through this same proven build→prove→gate→emit
+            pipeline without forking it. The pipeline below (fault isolation,
+            fail-closed proof + gate, propose-only) is identical either way; only
+            the *source* of the decisions differs. ``feedback_source`` is still
+            invoked (it is the contract) even when the decisions are supplied.
 
     Raises:
         ValueError: if ``goal`` is not human-confirmed.
@@ -234,7 +248,11 @@ def run_cycle(
 
     stamp = now or datetime.now(UTC).isoformat()
     feedback = feedback_source()
-    decisions = decide(feedback, goal, thresholds=decision_thresholds)
+    decisions = (
+        decide(feedback, goal, thresholds=decision_thresholds)
+        if decisions is None
+        else list(decisions)
+    )
 
     # Readiness is per goal/cohort, identical for every decision this cycle, so
     # compute it once. (The certifying-judge check below is per-decision.)
