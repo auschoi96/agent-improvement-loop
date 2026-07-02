@@ -199,6 +199,24 @@ def test_agent_task_change_requires_non_empty_plan() -> None:
         ProposedChange(kind=ChangeKind.AGENT_TASK_PLAN, summary="x", plan="")
 
 
+@pytest.mark.parametrize("blank_plan", ["   ", "\n\t", "\n  \t\n"])
+def test_agent_task_change_rejects_whitespace_only_plan(blank_plan: str) -> None:
+    # A whitespace-only plan carries no meaningful intended-change text (and would make
+    # derive_proposal_id key on whitespace) — the payload check is a STRIPPED non-empty
+    # check, not merely a falsy check.
+    with pytest.raises(ValidationError, match="must set a non-empty 'plan'"):
+        ProposedChange(kind=ChangeKind.AGENT_TASK_PLAN, summary="x", plan=blank_plan)
+
+
+def test_whitespace_only_payload_rejected_for_other_kinds_too() -> None:
+    # The stripped non-empty check applies to every payload kind, not just plan — a
+    # whitespace-only SQL / diff is as meaningless as an empty one (fail-closed).
+    with pytest.raises(ValidationError, match="must set a non-empty 'sql'"):
+        ProposedChange(kind=ChangeKind.METRIC_VIEW_SQL, summary="x", sql="   ")
+    with pytest.raises(ValidationError, match="must set a non-empty 'diff'"):
+        ProposedChange(kind=ChangeKind.SKILL_DIFF, summary="x", diff="\n\t")
+
+
 def test_agent_task_change_valid_with_plan_only_preview_and_ref_none() -> None:
     # A plan-only change is valid: the preview + produced-change ref are None until the
     # executor (L7b-2) produces the concrete change in a sandbox pre-approval.

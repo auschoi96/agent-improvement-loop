@@ -189,6 +189,16 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
 
 
 def _ddl(catalog: str, schema: str) -> list[str]:
+    # MIGRATION NOTE (existing deployments): this is CREATE TABLE IF NOT EXISTS, so the
+    # AGENT_TASK columns (change_plan / change_preview_diff / change_produced_change_ref)
+    # land only on a FRESH table — an ALREADY-created ``agent_proposed_actions`` is not
+    # ALTERed (same known pattern as the proof_* columns). Before L7b-2 publishes an
+    # AGENT_TASK, an operator with a pre-existing table must add those three columns
+    # (nullable STRING) once, e.g.:
+    #   ALTER TABLE `<catalog>`.`<schema>`.agent_proposed_actions
+    #     ADD COLUMNS (change_plan STRING, change_preview_diff STRING,
+    #                  change_produced_change_ref STRING);
+    # No auto-ALTER is done here (out of scope). See docs/DEPLOY.md.
     fqn = f"`{catalog}`.`{schema}`"
     return [
         f"CREATE SCHEMA IF NOT EXISTS {fqn} "

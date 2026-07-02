@@ -290,7 +290,13 @@ class ProposedChange(_Model):
     @model_validator(mode="after")
     def _require_payload(self) -> ProposedChange:
         field = _CHANGE_PAYLOAD_FIELD[self.kind]
-        if not getattr(self, field):
+        value = getattr(self, field)
+        # A payload must carry actual content: reject missing, empty, AND whitespace-only.
+        # Every payload field is an optional string, so the stripped check applies
+        # uniformly — a whitespace-only diff / SQL / ref / target is as meaningless as an
+        # empty one, and a whitespace-only ``plan`` would make an AGENT_TASK carry no real
+        # intended-change text (and key ``derive_proposal_id`` on whitespace).
+        if value is None or not value.strip():
             raise ValueError(
                 f"ProposedChange of kind {self.kind.value!r} must set a non-empty "
                 f"{field!r}; refusing an empty change (fail-closed)."
