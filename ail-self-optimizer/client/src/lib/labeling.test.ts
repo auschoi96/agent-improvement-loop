@@ -53,7 +53,7 @@ describe('buildLabelRequest — omits the labeler (server resolves it), fail-clo
       trace_id: 't1',
       name: 'correctness',
       value: 'pass',
-      reason: 'clear evidence',
+      rationale: 'clear evidence',
     });
     expect('labeler' in req).toBe(false);
     expect('approver' in req).toBe(false);

@@ -103,7 +103,7 @@ export interface LabelRequest {
   trace_id: string;
   name: string;
   value: unknown;
-  reason?: string;
+  rationale?: string;
 }
 
 // Build the POST body for the authenticated label route. The labeler is NOT included:
@@ -126,7 +126,7 @@ export function buildLabelRequest(
     trace_id: target.trace_id,
     name: name.trim(),
     value: typeof value === 'string' ? value.trim() : value,
-    ...(rationale && rationale.trim() ? { reason: rationale.trim() } : {}),
+    ...(rationale && rationale.trim() ? { rationale: rationale.trim() } : {}),
   };
 }
 
