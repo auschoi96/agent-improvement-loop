@@ -210,6 +210,29 @@ def test_none_for_unwired_action_kinds() -> None:
         assert build(decision, goal=goal, agent=agent) is None
 
 
+def test_none_for_skill_update_with_non_redundant_read_trigger() -> None:
+    # A SKILL_UPDATE not triggered by the genuine redundant-read waste signal must NOT
+    # be hijacked into the token-efficiency skill: the intervention cannot faithfully
+    # prove a change the triggering evidence did not call for (e.g. a Lane B planner
+    # proposal intending some *other* skill). Fail-closed -> None.
+    agent = _agent()
+    goal = _token_goal()
+    build = token_efficiency_candidate_builder(pending_proposal_ids=frozenset())
+    for trigger_kind in [
+        TriggerKind.AGENT_PLANNER,
+        TriggerKind.JUDGE_DIMENSION_BELOW_THRESHOLD,
+        TriggerKind.RLM_RECOMMENDED_ASSET,
+    ]:
+        decision = Decision(
+            ActionKind.SKILL_UPDATE,
+            default_risk_class(ActionKind.SKILL_UPDATE),
+            TriggerSignal(kind=trigger_kind, summary="a different skill", metric="total_tokens"),
+        )
+        assert build(decision, goal=goal, agent=agent) is None
+    # sanity: the genuine redundant-read-triggered decision still builds
+    assert build(_skill_decision(), goal=goal, agent=agent) is not None
+
+
 def test_none_for_non_token_reduction_goal() -> None:
     # The skill is proven on total_tokens; a goal it does not speak to → no candidate.
     agent = _agent()

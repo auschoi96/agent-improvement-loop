@@ -29,8 +29,14 @@ recurring L0 redundant-read / boilerplate waste pattern and returns a
 context-compaction skill target", which is exactly what the token-efficiency skill
 does (avoid re-reading files already read in-session, batch related shell commands,
 drop repeated ``cd``/setup boilerplate). So this builder consumes that existing,
-evidence-grounded, deterministic decision rather than duplicating the rule; a Lane B
-planner ``SKILL_UPDATE`` proposal is consumed identically. The builder additionally
+evidence-grounded, deterministic decision rather than duplicating the rule. It keys
+on the decision's **trigger**: only a ``SKILL_UPDATE`` triggered by that redundant-read
+waste signal (:attr:`~ail.loop.proposals.TriggerKind.REDUNDANT_READ_PATTERN`) is built
+into the token-efficiency candidate. A ``SKILL_UPDATE`` with any *other* trigger — e.g.
+a Lane B ``AGENT_PLANNER`` proposal intending some other skill, or a judge-dimension
+trigger — returns ``None`` (fail-closed): the token-efficiency intervention cannot
+faithfully prove a change the triggering evidence did not call for, so it declines
+rather than misattributing this skill onto that decision. The builder additionally
 gates on the goal being **token-reduction** (:func:`is_token_reduction_goal`) so the
 frozen-suite ``total_tokens`` proof actually speaks to the goal's objective; the
 proof gate downstream is the ultimate guard that the skill helps *this* suite.
@@ -53,7 +59,13 @@ from collections.abc import Collection
 from ail.goals.compiler import CompiledGoal
 from ail.loop.controller import Candidate, CandidateBuilder
 from ail.loop.decision_rules import Decision
-from ail.loop.proposals import ActionKind, ChangeKind, ProposedChange, derive_proposal_id
+from ail.loop.proposals import (
+    ActionKind,
+    ChangeKind,
+    ProposedChange,
+    TriggerKind,
+    derive_proposal_id,
+)
 from ail.optimize.lever import token_efficiency_intervention, token_efficiency_skill
 from ail.registry import Agent
 
@@ -158,6 +170,14 @@ def token_efficiency_candidate_builder(
         # skill install. metric_view (additive, no intervention), gepa_prompt (heavy GEPA
         # run), instruction_update and revert have no wired prover input -> None.
         if decision.action_kind is not ActionKind.SKILL_UPDATE:
+            return None
+        # Build the token-efficiency candidate ONLY for the genuine redundant-read waste
+        # signal that skill actually addresses. A SKILL_UPDATE with any other trigger
+        # (e.g. a Lane B AGENT_PLANNER proposal intending some *other* skill, or a
+        # judge-dimension trigger) is NOT something the token-efficiency intervention
+        # can faithfully prove — mapping it here would prove/propose this skill in place
+        # of the one the evidence called for (a misattribution). Decline, fail-closed.
+        if decision.trigger.kind is not TriggerKind.REDUNDANT_READ_PATTERN:
             return None
         # Only propose it for the objective it is proven against, so the frozen-suite
         # total_tokens proof actually speaks to the goal.
