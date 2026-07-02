@@ -1,0 +1,12 @@
+{
+  "$schema": "https://databricks.github.io/appkit/schemas/plugin-manifest.schema.json",
+  "name": "labeling",
+  "displayName": "Labeling",
+  "description": "Authenticated write-path for the in-app labeling page (L4). Reads the registered judges for an experiment and each dimension's label progress toward the readiness floor, and records a HUMAN label on a trace by reusing ail.judges.labeling.record_label — an mlflow.log_feedback named for the judge (the name-match MemAlign aligns by). Records the authenticated labeler; the client identity is never trusted. Fail-closed — never a fabricated 'labeled'.",
+  "version": "0.1.0",
+  "stability": "beta",
+  "resources": {
+    "required": [],
+    "optional": []
+  }
+}

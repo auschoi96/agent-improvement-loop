@@ -26,6 +26,7 @@ import {
   GitCompareArrows,
   LayoutDashboard,
   Plus,
+  Tags,
   type LucideProps,
 } from 'lucide-react';
 import {
@@ -44,6 +45,7 @@ const ICONS: Record<NavKey, ComponentType<LucideProps>> = {
   overview: LayoutDashboard,
   compare: GitCompareArrows,
   approvals: ClipboardCheck,
+  labeling: Tags,
   activity: Activity,
   lineage: GitBranch,
   'add-agent': Plus,
