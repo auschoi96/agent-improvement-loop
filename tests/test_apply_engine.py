@@ -186,7 +186,21 @@ def _proposal(
     status: ProposalStatus = ProposalStatus.PENDING,
     proved_improvement: bool = True,
     correctness_held: bool = True,
+    proof_present: bool = True,
 ) -> ProposedAction:
+    # proof_present=False mints an evidence-first proposal (proof=None): it rests on its
+    # evidence + gate status alone (ail.loop.evidence_cycle), no frozen-suite proof.
+    proof = (
+        ProofSummary(
+            objective_metric="total_tokens",
+            proved_improvement=proved_improvement,
+            correctness_held=correctness_held,
+            realized_savings_pct=35.4,
+            n_promote=3,
+        )
+        if proof_present
+        else None
+    )
     return ProposedAction(
         proposal_id=proposal_id,
         agent_name="claude_code",
@@ -201,13 +215,7 @@ def _proposal(
             trace_refs=["t1", "t2"],
         ),
         change=change,
-        proof=ProofSummary(
-            objective_metric="total_tokens",
-            proved_improvement=proved_improvement,
-            correctness_held=correctness_held,
-            realized_savings_pct=35.4,
-            n_promote=3,
-        ),
+        proof=proof,
         gate_status=GateStatus(readiness_tier="ready_to_prove", gated=True),
     )
 
@@ -687,3 +695,231 @@ def test_routing_refuses_change_kind_action_kind_mismatch() -> None:
         _run(malformed, _approve(malformed), seams=seams)
     assert not seams.any_capability_called
     assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# LANE L7a — an approved evidence-only (proof=None) proposal of a DETERMINISTIC
+# kind APPLIES on its evidence + gate status alone (docs/PRODUCT_ARCHITECTURE.md
+# §3/§7). The gate re-check is still the wall; a proof-dependent kind (GEPA) and a
+# stale/non-pending/mismatched decision are still refused; proven applies unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_approve_evidence_only_metric_view_applies() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal(proof_present=False)
+    assert proposal.proof is None  # evidence-first: no frozen-suite proof
+    result = _run(proposal, _approve(proposal), seams=seams)
+
+    # the CREATE DDL still reached the warehouse verbatim; the gate was re-checked
+    assert seams.warehouse_sql == [METRIC_VIEW_SQL]
+    assert len(seams.gate_calls) == 1
+    # applied, status advanced, lineage recorded
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert result.proposal.status is ProposalStatus.APPLIED
+    assert result.created_view == "cat.sch.mv_token_waste"
+    assert result.lineage_recorded is True
+    # the audit record honestly reflects an evidence-only apply (no proven delta)
+    rec = seams.lineage_records[0]
+    assert rec.proved_improvement is False
+    assert rec.realized_savings_pct is None
+
+
+def test_approve_evidence_only_skill_update_applies() -> None:
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+    assert proposal.proof is None
+    result = _run(proposal, _approve(proposal), seams=seams, body_resolver=_resolver)
+
+    # a full body (not the diff) registered + champion re-pointed, on evidence alone
+    assert len(seams.registry.register_calls) == 1
+    assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]
+    assert len(seams.gate_calls) == 1
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert result.proposal.status is ProposalStatus.APPLIED
+    assert result.new_version == 1
+    assert result.champion_alias == CHAMPION_ALIAS
+
+
+def test_evidence_only_still_refused_when_gate_recheck_fails() -> None:
+    # The wall holds: an evidence-only proposal whose apply-time gate no longer holds
+    # is refused, not applied — exactly as a proven proposal would be.
+    seams = Seams(
+        gate_result=GateRecheckResult(ok=False, reasons=["readiness dropped below the wall"])
+    )
+    proposal = _metric_view_proposal(proof_present=False)
+    with pytest.raises(ApplyRefused, match="gate re-check failed"):
+        _run(proposal, _approve(proposal), seams=seams)
+    # the gate WAS consulted, but nothing was applied
+    assert len(seams.gate_calls) == 1
+    assert not seams.any_capability_called
+    assert seams.lineage_records == []
+
+
+@pytest.mark.parametrize(
+    "status", [ProposalStatus.APPLIED, ProposalStatus.REJECTED, ProposalStatus.SUPERSEDED]
+)
+def test_evidence_only_non_pending_is_still_refused(status: ProposalStatus) -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal(proof_present=False, status=status)
+    with pytest.raises(ApplyRefused, match="not pending"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []  # short-circuits before the gate re-check
+
+
+def test_evidence_only_decision_mismatch_is_still_refused() -> None:
+    seams = Seams()
+    proposal = _metric_view_proposal(proof_present=False, proposal_id="prop-A")
+    other_decision = _approve(_metric_view_proposal(proof_present=False, proposal_id="prop-B"))
+    with pytest.raises(ApplyRefused, match="references proposal"):
+        _run(proposal, other_decision, seams=seams)
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []
+
+
+def test_evidence_only_gepa_prompt_is_still_refused(tmp_path: Path) -> None:
+    # GEPA's apply re-runs the held-out improvement check — it is proof-DEPENDENT, so an
+    # evidence-only (proof=None) GEPA proposal must STILL be refused (no blanket accept),
+    # even though its candidate artifact exists and would otherwise register.
+    seams = Seams()
+    candidate = _improving_candidate_json(tmp_path)
+    proposal = _gepa_proposal(candidate, proof_present=False)
+    assert proposal.proof is None
+    with pytest.raises(ApplyRefused, match="not an evidence-only-applyable"):
+        _run(proposal, _approve(proposal), seams=seams)
+    # refused before any capability ran and before the gate re-check
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []
+    assert seams.lineage_records == []
+
+
+def test_evidence_only_revert_is_still_refused() -> None:
+    # REVERT is excluded from _EVIDENCE_ONLY_APPLYABLE_KINDS (its evidence-only apply is
+    # out of L7a scope), so a proof=None revert is still refused fail-closed — no proof,
+    # no allowlisted deterministic kind, nothing applied.
+    seams = Seams()
+    proposal = _revert_proposal(target="v1", proof_present=False)
+    assert proposal.proof is None
+    with pytest.raises(ApplyRefused, match="not an evidence-only-applyable"):
+        _run(proposal, _approve(proposal), seams=seams)
+    assert not seams.any_capability_called
+    assert seams.gate_calls == []
+    assert seams.lineage_records == []
+
+
+# ---------------------------------------------------------------------------
+# LANE L7a (blocking fix) — the resolved-body guard is robust: a body that IS the
+# diff up to normalization, or that still carries unified-diff MARKERS, is refused
+# on the evidence-only lane (no proof backstop); a legitimate body that merely
+# starts a line with '+'/'-' or mentions "diff" still applies (no over-correction).
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_only_resolver_near_diff_body_is_refused() -> None:
+    # A near-diff (diff + trailing newline) is non-empty and NOT byte-identical to the
+    # diff, but normalizes to it — refuse it (else an essentially-unresolved diff ships
+    # as the skill body). The diff here carries NO structure markers, so ONLY the
+    # normalized-equality check can catch it.
+    seams = Seams()
+    change = ProposedChange(
+        kind=ChangeKind.SKILL_DIFF, summary="skill", diff="line one\n-remove me\n+add me"
+    )
+    proposal = _proposal(ActionKind.SKILL_UPDATE, change, proof_present=False)
+    assert proposal.proof is None
+
+    def near_diff_resolver(p: ProposedAction) -> RegisterableBody:
+        assert p.change.diff is not None
+        return RegisterableBody(
+            body=p.change.diff + "\n", provenance=PromptProvenance(source=PromptSource.SEED)
+        )
+
+    with pytest.raises(ApplyRefused, match="diff as a body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=near_diff_resolver)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+def test_evidence_only_resolver_diff_structure_body_is_refused() -> None:
+    # A body that still carries a unified-diff hunk header (@@ ... @@) is diff-shaped, not
+    # a resolved body — refuse it even though it is NOT equal to the proposal's diff (so
+    # only the diff-structure detection can catch it).
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def diff_structure_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body="# Skill\n\n@@ -1,2 +1,3 @@\n context\n+added\n",
+            provenance=PromptProvenance(source=PromptSource.SEED),
+        )
+
+    with pytest.raises(ApplyRefused, match="diff-shaped body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=diff_structure_resolver)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+def test_evidence_only_resolver_legit_body_with_plus_line_still_applies() -> None:
+    # No over-correction: a real multi-line body that merely starts lines with '+' / '-'
+    # and mentions the word "diff" has NO unified-diff markers — it must still apply.
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def legit_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body=(
+                "# Read-cache skill\n\n"
+                "+ Reuse prior reads; do not re-read unchanged files.\n"
+                "- Never re-open a file already loaded.\n"
+                "Run a quick diff review before editing.\n"
+            ),
+            provenance=PromptProvenance(source=PromptSource.SEED, registration_reason="skill"),
+        )
+
+    result = _run(proposal, _approve(proposal), seams=seams, body_resolver=legit_resolver)
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert seams.registry.register_calls[0]["template"].startswith("# Read-cache skill")
+    assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]
+
+
+def test_evidence_only_resolver_generic_header_diff_body_is_refused() -> None:
+    # A GENERIC unified-diff body with plain headers (--- old / +++ new — NO a//b/
+    # prefixes, NO @@ hunk header, NO `diff --git` line) is still diff-shaped and must be
+    # refused. Guards the broadened, prefix-agnostic header-pair detection.
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def generic_header_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body="--- old_skill\n+++ new_skill\n context\n+added\n",
+            provenance=PromptProvenance(source=PromptSource.SEED),
+        )
+
+    with pytest.raises(ApplyRefused, match="diff-shaped body"):
+        _run(proposal, _approve(proposal), seams=seams, body_resolver=generic_header_resolver)
+    assert not seams.registry.any_write
+    assert seams.lineage_records == []
+
+
+def test_evidence_only_resolver_lone_horizontal_rule_body_still_applies() -> None:
+    # No over-correction: a legitimate body with a LONE `---` markdown horizontal rule
+    # (not immediately followed by a `+++ ` line) is not a diff header pair — it must
+    # still apply, even alongside a leading '-' line and the word "diff".
+    seams = Seams()
+    proposal = _skill_update_proposal(proof_present=False)
+
+    def lone_rule_resolver(p: ProposedAction) -> RegisterableBody:
+        return RegisterableBody(
+            body=(
+                "# Read-cache skill\n\n"
+                "Reuse prior reads; do not re-read unchanged files.\n\n"
+                "---\n\n"
+                "- Run a quick diff review before editing.\n"
+            ),
+            provenance=PromptProvenance(source=PromptSource.SEED, registration_reason="skill"),
+        )
+
+    result = _run(proposal, _approve(proposal), seams=seams, body_resolver=lone_rule_resolver)
+    assert result.outcome is ApplyOutcome.APPLIED
+    assert seams.registry.register_calls[0]["template"].startswith("# Read-cache skill")
+    assert seams.registry.alias_calls == [(FULL_PROMPT_NAME, CHAMPION_ALIAS, 1)]
