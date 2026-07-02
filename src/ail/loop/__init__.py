@@ -78,6 +78,10 @@ from ail.loop.decision_rules import (
     decide,
     objective_target_met,
 )
+from ail.loop.evidence_cycle import (
+    EvidenceCycleResult,
+    run_evidence_cycle,
+)
 from ail.loop.planner import (
     DEFAULT_CONFIDENCE_FLOOR,
     DEFAULT_PLANNER_MODEL,
@@ -187,4 +191,7 @@ __all__ = [
     "agent_planner",
     "combined_decisions",
     "run_cycle_with_planner",
+    # evidence-first cycle (local companion planner lane; no proving)
+    "EvidenceCycleResult",
+    "run_evidence_cycle",
 ]
