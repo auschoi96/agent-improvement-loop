@@ -37,6 +37,7 @@ from ail.versioning import (
     MANIFEST_FILENAME,
     SNAPSHOT_TAG_PREFIX,
     FileSnapshot,
+    RestoreCleanupError,
     RestoreError,
     RestoreRollbackError,
     SnapshotRef,
@@ -623,9 +624,58 @@ def test_staging_failure_leaves_tree_byte_for_byte_untouched(
 
     monkeypatch.setattr(tempfile, "mkstemp", fake_mkstemp)
 
-    with pytest.raises(RestoreError, match="nothing written back"):
+    with pytest.raises(RestoreError, match="nothing written back") as exc:
         restore_snapshot(ref, client=client)
 
+    # Clean cleanup -> the ORDINARY RestoreError, not the loud RestoreCleanupError.
+    assert type(exc.value) is RestoreError
     # Nothing created (no newdir), no temp files left, a/c untouched: identical to pre.
     assert _tree_state(tmp_path) == pre
     assert not (tmp_path / "newdir").exists()
+
+
+def test_staging_cleanup_failure_raises_loud_named_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If staging cleanup can't remove a temp, fail LOUD and NAME it — not a plain RestoreError."""
+    client = FakeVolumeClient()
+    a = _write(tmp_path / "a.txt", b"A-snapshot")
+    b = _write(tmp_path / "newdir" / "b.txt", b"B-snapshot")
+    c = _write(tmp_path / "c.txt", b"C-snapshot")
+    snapshot_paths([a, b, c], volume_root=VOLUME_ROOT, change_id="chg", client=client)
+    ref = load_snapshot_ref(f"{VOLUME_ROOT}/chg", client=client)
+    b.unlink()
+    b.parent.rmdir()
+
+    # Fail staging at the 2nd mkstemp (file b) so we enter the staging-cleanup path...
+    real_mkstemp = tempfile.mkstemp
+    state = {"calls": 0}
+
+    def fake_mkstemp(*args: Any, **kwargs: Any) -> Any:
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise OSError("simulated staging failure")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "mkstemp", fake_mkstemp)
+
+    # ...AND make the cleanup unlink of the staged temp itself fail, so it lingers.
+    real_unlink = os.unlink
+
+    def fake_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if str(path).endswith(".ail-restore"):
+            raise OSError("simulated cleanup unlink failure")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", fake_unlink)
+
+    with pytest.raises(RestoreCleanupError) as exc:
+        restore_snapshot(ref, client=client)
+
+    message = str(exc.value)
+    assert "REMAIN" in message  # loud: it does NOT claim nothing was written back
+    assert "Leaked temp files" in message
+    assert ".ail-restore" in message  # the exact lingering artifact is named
+    # The temp genuinely lingers on disk (its unlink was refused) — a real artifact.
+    leaked = list(tmp_path.glob(".a.txt.*.ail-restore"))
+    assert leaked, "the un-removable temp must still be on disk"
