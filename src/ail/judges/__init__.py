@@ -6,10 +6,14 @@ GenAI API, aligned with MemAlign, and audited against the Human Anchor. It
 exists to make subjective quality measurable *without* letting the judge and the
 agent co-adapt — the failure mode §2 calls out.
 
-Three capabilities, plus the disjoint-pool types that keep them honest:
+Capabilities, plus the disjoint-pool types that keep them honest:
 
 * **Scorers** (:mod:`ail.judges.scorers`) — ``make_judge`` wrappers for
   ``correctness`` (the Phase-2 guardrail), ``modularity``, and ``groundedness``.
+* **Authoring** (:mod:`ail.judges.authoring`) — turn a human's natural-language
+  quality description into a registered, MemAlign-alignable ``{{ trace }}`` judge
+  plus the name-matched label schema; the "explain what you're looking for → get a
+  judge" front door. Additive: it composes ``make_scorer`` + the registration path.
 * **Alignment** (:mod:`ail.judges.alignment`) — ``judge.align`` over MemAlign,
   consuming the Alignment Set only, on a cadence decoupled from optimization.
 * **Agreement** (:mod:`ail.judges.agreement`) — judge-vs-human agreement on the
@@ -37,6 +41,19 @@ from ail.judges.alignment import (
     align_judge,
     build_memalign_optimizer,
     unaligned_report,
+)
+from ail.judges.authoring import (
+    DEFAULT_SCALE,
+    TRACE_TEMPLATE_VAR,
+    AuthoredJudge,
+    CriteriaRefiner,
+    JudgeScale,
+    author_judge,
+    build_instructions,
+    build_judge_spec,
+    create_matching_label_schema,
+    normalize_judge_name,
+    refine_criteria,
 )
 from ail.judges.contract import (
     SCHEMA_VERSION,
@@ -122,6 +139,18 @@ __all__ = [
     "make_token_efficiency_judge",
     "build_token_efficiency_inputs",
     "with_rubric",
+    # authoring (NL description -> registered, alignable {{ trace }} judge + label schema)
+    "JudgeScale",
+    "DEFAULT_SCALE",
+    "TRACE_TEMPLATE_VAR",
+    "CriteriaRefiner",
+    "AuthoredJudge",
+    "normalize_judge_name",
+    "build_instructions",
+    "build_judge_spec",
+    "refine_criteria",
+    "create_matching_label_schema",
+    "author_judge",
     # alignment (MemAlign)
     "MemAlignConfig",
     "AlignmentOutcome",
