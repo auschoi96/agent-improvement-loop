@@ -61,10 +61,12 @@ from ail.loop.proposals import (
     default_risk_class,
 )
 from ail.loop.publish_proposals import PROPOSAL_COLUMNS, _proposal_row
-from ail.optimize.prompt_registry import DEFAULT_CATALOG, DEFAULT_PROMPT_NAME, DEFAULT_SCHEMA
+from ail.optimize.prompt_registry import DEFAULT_PROMPT_NAME
 from ail.readiness import ReadinessFacts
 
-FULL_PROMPT_NAME = f"{DEFAULT_CATALOG}.{DEFAULT_SCHEMA}.{DEFAULT_PROMPT_NAME}"
+TEST_CATALOG = "test_catalog"
+TEST_SCHEMA = "test_schema"
+FULL_PROMPT_NAME = f"{TEST_CATALOG}.{TEST_SCHEMA}.{DEFAULT_PROMPT_NAME}"
 METRIC_VIEW_SQL = (
     "CREATE OR REPLACE VIEW `cat`.`sch`.`mv_token_waste`\nWITH METRICS\nLANGUAGE YAML\nAS $$x$$"
 )
@@ -270,6 +272,8 @@ def _decide(
         body_resolver=body_resolver,
         decision_writer=h.decision_writer,
         status_writer=h.status_writer,
+        catalog=TEST_CATALOG,
+        schema=TEST_SCHEMA,
     )
 
 
@@ -429,7 +433,9 @@ def test_approve_skill_update_registers_resolved_body_and_sets_champion() -> Non
 
 def test_body_resolver_applies_diff_to_current_champion() -> None:
     registry = FakeRegistryClient(champion_body="line one\nline two\n")
-    resolver = build_body_resolver(registry_client=registry)
+    resolver = build_body_resolver(
+        registry_client=registry, catalog=TEST_CATALOG, schema=TEST_SCHEMA
+    )
     proposal = _skill_update_proposal(diff="@@ -1,1 +1,2 @@\n line one\n+inserted\n")
     resolved = resolver(proposal)
     assert resolved.body == "line one\ninserted\nline two"
@@ -439,7 +445,9 @@ def test_body_resolver_applies_diff_to_current_champion() -> None:
 
 def test_body_resolver_fails_closed_on_stale_diff() -> None:
     registry = FakeRegistryClient(champion_body="totally different\ncontent\n")
-    resolver = build_body_resolver(registry_client=registry)
+    resolver = build_body_resolver(
+        registry_client=registry, catalog=TEST_CATALOG, schema=TEST_SCHEMA
+    )
     proposal = _skill_update_proposal(diff="@@ -1,1 +1,2 @@\n line one\n+inserted\n")
     with pytest.raises(ValueError, match="does not match the source"):
         resolver(proposal)
@@ -450,7 +458,9 @@ def test_body_resolver_refuses_a_no_op_diff_equal_body() -> None:
     # to the champion — it must be refused (fail-closed), never registered as a fake
     # new version. Nothing is registered.
     registry = FakeRegistryClient(champion_body="line one\nline two\n")
-    resolver = build_body_resolver(registry_client=registry)
+    resolver = build_body_resolver(
+        registry_client=registry, catalog=TEST_CATALOG, schema=TEST_SCHEMA
+    )
     proposal = _skill_update_proposal(diff="@@ -1,2 +1,2 @@\n line one\n line two\n")
     with pytest.raises(ValueError, match="no-op"):
         resolver(proposal)
@@ -461,7 +471,9 @@ def test_body_resolver_refuses_diff_that_nets_to_current() -> None:
     # A diff that removes a line then re-adds the identical line nets to the champion
     # body — also a fake change; refuse it.
     registry = FakeRegistryClient(champion_body="alpha\nbeta\n")
-    resolver = build_body_resolver(registry_client=registry)
+    resolver = build_body_resolver(
+        registry_client=registry, catalog=TEST_CATALOG, schema=TEST_SCHEMA
+    )
     proposal = _skill_update_proposal(diff="@@ -1,2 +1,2 @@\n alpha\n-beta\n+beta\n")
     with pytest.raises(ValueError, match="no-op"):
         resolver(proposal)
