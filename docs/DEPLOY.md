@@ -32,6 +32,27 @@ can actually read traces.
 
 ---
 
+## Prerequisites (tooling)
+
+Install on the machine you deploy from (and, for the companion, on the host that
+runs it):
+
+- **Databricks CLI**, authenticated to the target workspace (`databricks auth login`).
+- **`uv`** — the bundles build the Python wheel with `uv build --wheel`, so `uv` is
+  a hard prerequisite for `databricks bundle deploy` (install:
+  `curl -LsSf https://astral.sh/uv/install.sh | sh`, or `pipx install uv`).
+- **Node.js + npm** — the `ail-self-optimizer` app is an AppKit (TypeScript/React)
+  app; its build shells out to `npm`. Required to deploy the app.
+- **Python 3.11+ with the framework installed** for the `ail-*` CLIs and the local
+  companion: `pip install -e .` for the core CLIs; add extras as needed —
+  `.[claude]` (companion / executor Claude Agent SDK), `.[align]` (MemAlign
+  auto-align), `.[l3]` (HALO / RLM review).
+- **Workspace authority** for the one-time admin steps (create/manage warehouse,
+  grant `CAN_USE`, create experiments, UC grants) — see
+  [§5](#5-admin-prerequisite-read-this-first).
+
+---
+
 ## 0. What deploys
 
 Two independent Declarative Automation Bundles (DABs), both resolving host + auth
@@ -514,3 +535,67 @@ deployment injects its own candidate builder), the cycle correctly **proposes no
 it cannot prove** — it reviews, plans, and fails closed rather than shipping an
 unproven or fabricated proposal. The moment a provable candidate exists it flows
 through the already-wired real prover unchanged.
+
+---
+
+## 9. Turn on the loop (evaluate + optimize)
+
+§0–§8 stand up the **infrastructure**. This section turns on the **loop** so the
+framework actually evaluates traces and proposes optimizations. Run these against
+the same `<EXPERIMENT_ID>` you deployed with.
+
+> Nothing here surfaces an improvement until the corpus reaches the readiness
+> gates (below). The app's readiness panel and `ail-readiness <EXPERIMENT_ID>`
+> report exactly how far you are — this is by design, not a failure.
+
+1. **Register the L2 judges** so they auto-score new traces:
+   ```bash
+   ail-register-scorers --experiment-id <EXPERIMENT_ID>
+   ```
+   Registers the built-in scheduled scorers (correctness, modularity, groundedness,
+   token_efficiency) at 0.1 sampling. They score on the monitoring cadence — the
+   `mlflow.monitoring.sqlWarehouseId` tag set by bootstrap (§3) is what lets them
+   read traces. Judges start **distrusted** until aligned (step 4).
+
+2. **Connect your agent's tracing** to the experiment so traces flow in — native
+   autolog (Claude Code, OpenAI, LangChain, …) or OTEL import. See
+   [`CONNECT_YOUR_AGENT.md`](CONNECT_YOUR_AGENT.md). No traces → nothing to evaluate.
+
+3. **(quality goals only) Author a judge** for a dimension you care about — describe
+   it in natural language and the tool creates an alignable `{{trace}}` judge with a
+   name-matched label schema:
+   ```bash
+   ail-author-judge --experiment-id <EXPERIMENT_ID> --description "<what good looks like>"
+   ```
+   Token/cost goals need no judge (they are deterministic L0 metrics).
+
+4. **(quality goals only) Label, then align.** Label ~20 traces along the judge's
+   dimension — in the app's labeling panel or the MLflow UI; the **label name must
+   match the judge name**. Then auto-align so the judge becomes *trusted* as labels
+   accrue (re-runs safely; rolls a regression back):
+   ```bash
+   ail-auto-align --experiment <EXPERIMENT_ID> --judges <judge_name>
+   ```
+   (Also deployable as a scheduled job via the bundle.)
+
+5. **Run the local companion** on a host that has the Claude Agent SDK (`.[claude]`).
+   It plans (evidence → proposals) and, on your approval, executes and optionally
+   proves. See [`COMPANION.md`](COMPANION.md):
+   ```bash
+   python -m ail.companion poll --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>
+   ```
+
+6. **Review + approve** in the app. Each proposal carries its evidence (judge + RLM
+   + L0); you approve; the companion applies it — recorded in the lineage timeline
+   and revertible (`ail-revert`).
+
+### Readiness gates — what unlocks when
+
+| Corpus | Unlocks |
+|---|---|
+| ~10 traces | L0 baseline + RLM / HALO diagnosis |
+| ~20 labels (per judged dimension) | a trusted, MemAlign-aligned judge |
+| ~50 traces | statistical power to *prove* a token/cost win (leaderboard amber → green) |
+
+Until a gate is met, the readiness wall reports "collecting / not ready" and the
+loop proposes nothing for that goal — honest, not broken.
