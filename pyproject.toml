@@ -54,6 +54,9 @@ ail-revert = "ail.jobs.revert_champion:main"
 # quality dimension into a registered, MemAlign-alignable {{ trace }} judge plus the
 # name-matched label schema. Reuses ail.judges.authoring; --no-register to preview.
 ail-author-judge = "ail.jobs.author_judge:main"
+# Register the built-in scheduled scorers against an explicit experiment. Thin CLI
+# over ail.judges.registration.register_scorers; no experiment/workspace default.
+ail-register-scorers = "ail.jobs.register_scorers_job:main"
 # Standalone SCHEDULED L3/RLM deep-reviewer (resources/continuous_rlm.job.yml): a
 # bounded runner that idempotently attaches rlm_* feedback only to sampled traces
 # without RLM assessments, on the most powerful viable judge (databricks-gpt-5-5-pro)
