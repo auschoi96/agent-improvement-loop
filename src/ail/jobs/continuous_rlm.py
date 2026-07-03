@@ -99,7 +99,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--reviewer-experiment", default="")
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--temperature", type=float, default=None)
-    # goal-steering (same knobs as ail-optimization-cycle). Empty --objective-metric
+    # goal-steering (same knobs reused by the local companion planner). Empty --objective-metric
     # => the default five-guideline rubric (no goal). The goal is used only to steer
     # the read-only review, so there is no confirmation gate.
     parser.add_argument("--agent", default="claude_code", help="Cohort the goal is bound to.")

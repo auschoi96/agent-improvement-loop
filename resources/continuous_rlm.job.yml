@@ -12,9 +12,9 @@ resources:
         The review runs on the most powerful VIABLE judge (databricks-gpt-5-5-pro) and
         is STEERED BY THE USER'S GOAL (objective_metric/direction/target/guardrails →
         a goal-derived rubric) rather than a fixed rubric. This is the standalone
-        reviewer that was retired when its work was folded into the optimization cycle;
-        re-established here on the top model + goal-steering. Idempotency keeps it from
-        double-reviewing traces the in-cycle sonnet reviewer already handled.
+        scheduled reviewer that feeds the local companion's plan/propose lane on the
+        top model + goal-steering. Idempotency keeps it from double-reviewing traces
+        that already carry RLM feedback.
       tags:
         project: agent-improvement-loop
         tier: L3

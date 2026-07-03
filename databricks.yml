@@ -37,21 +37,11 @@ variables:
   schedule_pause_status:
     description: UNPAUSED (schedule is live — the living-dashboard default) or PAUSED.
     default: UNPAUSED
-  optimization_cycle_cron:
-    description: >-
-      Quartz cron for the unified optimization cycle (sec min hour day-of-month month
-      day-of-week). Default is hourly. This is a schedule, not a trace-arrival trigger:
-      the trace store is a VIEW, so the retired continuous_rlm table_update trigger was
-      infeasible.
-    default: '0 0 * * * ?'
-  optimization_cycle_pause_status:
-    description: UNPAUSED (the optimization cycle schedule is live) or PAUSED (dormant).
-    default: UNPAUSED
   agent_name:
-    description: Agent the optimization cycle scopes its cohort + proposals to.
+    description: Agent the RLM/companion lanes scope their cohort + proposals to.
     default: claude_code
   objective_metric:
-    description: The optimization cycle's objective metric (the goal's target metric).
+    description: Objective metric used to steer RLM goal rubrics and local companion planning.
     default: total_tokens
   goal_direction:
     description: >-
@@ -68,48 +58,30 @@ variables:
       How goal_target is read: 'relative' (a fractional movement vs the baseline,
       the default) or 'absolute' (a target metric value).
     default: relative
-  objective_baseline:
-    description: >-
-      Baseline value a relative objective target is measured against. Empty (the
-      default) => the cycle treats the objective as not-yet-met rather than
-      fabricating a baseline.
-    default: ''
   guardrail_judge:
     description: >-
       Optional judge guardrail as 'name:threshold' (e.g. 'modularity:4.0'). Empty
-      (the default) => no judge guardrail; a blank value is ignored by the cycle.
+      (the default) => no judge guardrail; a blank value is ignored by RLM/companion lanes.
     default: ''
-  goal_confirmed:
-    description: >-
-      'true' marks the operator-configured goal human-confirmed so the cycle runs;
-      deploying this bundle with a configured goal IS that confirmation. Set to
-      anything else to keep the cycle deployed-but-fail-loud on the unconfirmed goal.
-    default: 'true'
-  # RLM sampling knobs — shared by the IN-CYCLE L3/RLM reviewer inside
-  # ail-optimization-cycle AND the standalone scheduled ail-continuous-rlm job.
-  # Also the planner endpoint (rlm_judge_model doubles as optimization_cycle planner-model).
-  rlm_judge_model:
-    description: Databricks FMAPI serving endpoint used by HALO for in-cycle RLM reviews (and the planner).
-    default: databricks-claude-sonnet-4-6
+  # RLM sampling knobs — used by the standalone scheduled ail-continuous-rlm job.
   rlm_sample_rate:
-    description: Deterministic trace-id sample rate for the in-cycle RLM review.
+    description: Deterministic trace-id sample rate for the scheduled RLM review.
     default: '0.10'
   rlm_max_reviews_per_run:
-    description: Hard cap on HALO reviews performed by one cycle firing.
+    description: Hard cap on HALO reviews performed by one scheduled RLM firing.
     default: '2'
   rlm_min_tokens:
-    description: Token floor for in-cycle RLM candidates; set 0 to allow small traces.
+    description: Token floor for RLM candidates; set 0 to allow small traces.
     default: '50000'
   rlm_max_results:
-    description: Max recent traces scanned per cycle firing before idempotency/sampling.
+    description: Max recent traces scanned per RLM firing before idempotency/sampling.
     default: '100'
   rlm_max_turns:
-    description: HALO max turns per agent arm for in-cycle RLM reviews.
+    description: HALO max turns per agent arm for scheduled RLM reviews.
     default: '40'
   # Standalone scheduled ail-continuous-rlm job — the dedicated high-powered RLM
-  # deep-reviewer (distinct from the lighter in-cycle sonnet reviewer above). It reuses
-  # the shared rlm_* sampling knobs and the shared goal vars (objective_metric etc.) but
-  # runs on its own model, schedule, and pause switch.
+  # deep-reviewer. It reuses the shared rlm_* sampling knobs and the shared goal vars
+  # (objective_metric etc.) but runs on its own model, schedule, and pause switch.
   continuous_rlm_judge_model:
     description: >-
       HALO judge serving endpoint for the standalone scheduled RLM job. Defaults to the
