@@ -24,6 +24,7 @@ from ail.jobs.bootstrap_grants import (
     DEFAULT_AUTO_STOP_MINS,
     DEFAULT_CLUSTER_SIZE,
     DEFAULT_WAREHOUSE_NAME,
+    REFERENCE_WORKSPACE_DEFAULTS,
     bootstrap,
     ensure_warehouse,
     grant_warehouse_can_use,
@@ -237,6 +238,27 @@ def test_bootstrap_skips_grant_when_no_sp() -> None:
     assert mlflow.tag_calls == [("EXP-1", MONITORING_WAREHOUSE_TAG, "wh-given")]
 
 
+def test_bootstrap_create_warehouse_reaches_create_path() -> None:
+    api = _FakeWarehousesAPI(listing=[], new_id="created-wh")
+    mlflow = _FakeMlflowClient()
+
+    result = bootstrap(
+        experiment_id="EXP-1",
+        warehouse_id=None,
+        framework_sp_id=None,
+        catalog="prod_catalog",
+        schema="prod_schema",
+        create_warehouse=True,
+        client=_FakeClient(api),
+        mlflow_client=mlflow,
+    )
+
+    assert result.warehouse_id == "created-wh"
+    assert result.warehouse_created is True
+    assert len(api.create_calls) == 1
+    assert mlflow.tag_calls == [("EXP-1", MONITORING_WAREHOUSE_TAG, "created-wh")]
+
+
 def test_bootstrap_rejects_blank_experiment() -> None:
     api = _FakeWarehousesAPI()
     with pytest.raises(SystemExit, match="experiment_id is empty"):
@@ -334,6 +356,75 @@ def test_workspace_value_guard_accepts_distinct_explicit_values() -> None:
     )
 
 
+def test_workspace_value_guard_rejects_case_variant_reference_values() -> None:
+    with pytest.raises(SystemExit, match="catalog is a reference workspace default"):
+        validate_workspace_values(
+            experiment_id="exp-prod-123",
+            warehouse_id="wh-prod-123",
+            catalog="Austin_Choi_Omni_Agent_Catalog",
+            schema="prod_ail_schema",
+        )
+
+
+def test_reference_defaults_use_default_schema_constant() -> None:
+    assert REFERENCE_WORKSPACE_DEFAULTS["schema"] == frozenset({bootstrap_grants.DEFAULT_SCHEMA})
+
+
+def test_create_warehouse_allows_missing_warehouse_only() -> None:
+    validate_workspace_values(
+        experiment_id="exp-prod-123",
+        warehouse_id=None,
+        catalog="prod_ail_catalog",
+        schema="prod_ail_schema",
+        warehouse_required=False,
+    )
+    with pytest.raises(SystemExit, match="warehouse_id is a placeholder"):
+        validate_workspace_values(
+            experiment_id="exp-prod-123",
+            warehouse_id="REPLACE_ME",
+            catalog="prod_ail_catalog",
+            schema="prod_ail_schema",
+            warehouse_required=False,
+        )
+
+
+def test_allow_reference_workspace_bypasses_only_reference_defaults() -> None:
+    validate_workspace_values(
+        experiment_id="660599403165942",
+        warehouse_id="7D1D3DBB3BA65F2A",
+        catalog="Austin_Choi_Omni_Agent_Catalog",
+        schema="Agent_Improvement_Loop",
+        allow_reference_workspace=True,
+    )
+
+    with pytest.raises(SystemExit, match="warehouse_id is empty"):
+        validate_workspace_values(
+            experiment_id="660599403165942",
+            warehouse_id="",
+            catalog="Austin_Choi_Omni_Agent_Catalog",
+            schema="Agent_Improvement_Loop",
+            allow_reference_workspace=True,
+        )
+
+    with pytest.raises(SystemExit, match="catalog is a placeholder"):
+        validate_workspace_values(
+            experiment_id="660599403165942",
+            warehouse_id="7D1D3DBB3BA65F2A",
+            catalog="REPLACE_ME",
+            schema="Agent_Improvement_Loop",
+            allow_reference_workspace=True,
+        )
+
+    with pytest.raises(SystemExit, match="schema is an unresolved bundle reference"):
+        validate_workspace_values(
+            experiment_id="660599403165942",
+            warehouse_id="7D1D3DBB3BA65F2A",
+            catalog="Austin_Choi_Omni_Agent_Catalog",
+            schema="${var.schema}",
+            allow_reference_workspace=True,
+        )
+
+
 # -- main wiring -----------------------------------------------------------
 
 
@@ -365,6 +456,10 @@ def test_main_collapses_empty_strings_to_none(monkeypatch: pytest.MonkeyPatch) -
     # Empty CLI strings collapse to None -> find-or-create / skip-grant.
     assert calls["warehouse_id"] is None
     assert calls["framework_sp_id"] is None
+    assert calls["catalog"] == ""
+    assert calls["schema"] == ""
+    assert calls["create_warehouse"] is False
+    assert calls["allow_reference_workspace"] is False
 
 
 def test_main_passes_through_provided_values(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -389,6 +484,9 @@ def test_main_passes_through_provided_values(monkeypatch: pytest.MonkeyPatch) ->
             "--framework-sp-id=sp-1",
             "--cluster-size=Small",
             "--auto-stop-mins=15",
+            "--catalog=cat-1",
+            "--schema=sch-1",
+            "--allow-reference-workspace",
         ]
     )
 
@@ -397,3 +495,37 @@ def test_main_passes_through_provided_values(monkeypatch: pytest.MonkeyPatch) ->
     assert calls["framework_sp_id"] == "sp-1"
     assert calls["cluster_size"] == "Small"
     assert calls["auto_stop_mins"] == 15
+    assert calls["catalog"] == "cat-1"
+    assert calls["schema"] == "sch-1"
+    assert calls["create_warehouse"] is False
+    assert calls["allow_reference_workspace"] is True
+
+
+def test_main_create_warehouse_prints_resolved_id(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = _FakeWarehousesAPI(listing=[], new_id="printed-wh")
+    mlflow = _FakeMlflowClient()
+
+    monkeypatch.setattr(bootstrap_grants, "_default_workspace_client", lambda: _FakeClient(api))
+    monkeypatch.setattr(
+        bootstrap_grants,
+        "configure_monitoring_warehouse",
+        lambda *args, **kwargs: None,
+    )
+
+    rc = main(
+        [
+            "--experiment=EXP2",
+            "--create-warehouse",
+            "--catalog=cat-1",
+            "--schema=sch-1",
+        ]
+    )
+
+    assert rc == 0
+    assert len(api.create_calls) == 1
+    assert mlflow.tag_calls == []
+    out = capsys.readouterr().out
+    assert "warehouse=printed-wh (created)" in out
+    assert "warehouse_id=printed-wh" in out

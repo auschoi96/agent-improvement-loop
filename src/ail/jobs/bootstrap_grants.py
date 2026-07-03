@@ -4,7 +4,8 @@
 scheduled scorers, but four operational facts still have to be true before any
 of them can read traces *through* a SQL warehouse:
 
-1. a warehouse exists — provided by the deployer, or provisioned here;
+1. a warehouse exists — provided by the deployer, or provisioned here only when
+   the deployer passes the explicit create flag;
 2. the single framework service principal has ``CAN_USE`` on it;
 3. every table the deployed app's SQL queries read exists (empty is fine), so the
    AppKit build's typegen ``DESCRIBE QUERY`` — and every runtime ``SELECT`` — has
@@ -25,10 +26,11 @@ Why this is not pure bundle YAML
 --------------------------------
 DABs **does** support an ``sql_warehouses`` resource and even ``permissions`` on
 it (verified via ``databricks bundle schema``). What it cannot express is the
-conditional the deployer actually wants — *"create a warehouse only if I did not
-supply one"*. A declared resource is always created; there is no ``count``/``if``
-in the bundle schema. So the **provide-or-create** branch (and the grant against
-a warehouse whose id is only known at runtime when we create it) lives here.
+operator-controlled conditional — *"use this existing warehouse, or explicitly
+create the framework warehouse first"*. A declared resource is always created;
+there is no ``count``/``if`` in the bundle schema. So the
+**provide-or-explicitly-create** branch (and the grant against a warehouse whose
+id is only known at runtime when we create it) lives here.
 
 The app's own grant is still handled natively: the ``ail-self-optimizer`` app
 declares the warehouse with ``permission: CAN_USE``, so the Apps platform
@@ -56,7 +58,7 @@ from typing import TYPE_CHECKING, Any
 
 from ail.compare.monitoring import MonitoringWarehouseConfig, configure_monitoring_warehouse
 from ail.jobs.bootstrap_tables import ensure_app_tables
-from ail.publish import DEFAULT_CATALOG, REFERENCE_EXPERIMENT
+from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA, REFERENCE_EXPERIMENT
 
 if TYPE_CHECKING:
     from mlflow import MlflowClient
@@ -80,7 +82,7 @@ REFERENCE_WORKSPACE_DEFAULTS: dict[str, frozenset[str]] = {
     "experiment_id": frozenset({REFERENCE_EXPERIMENT}),
     "warehouse_id": frozenset({"7d1d3dbb3ba65f2a"}),
     "catalog": frozenset({DEFAULT_CATALOG}),
-    "schema": frozenset({"agent_improvement_loop"}),
+    "schema": frozenset({DEFAULT_SCHEMA}),
 }
 
 PLACEHOLDER_VALUES = frozenset({"REPLACE_ME", "CHANGE_ME", "TODO", "TBD", "NONE", "NULL"})
@@ -97,17 +99,28 @@ class BootstrapResult:
     monitoring: MonitoringWarehouseConfig | None
 
 
-def _workspace_value_error(var_name: str, value: str | None) -> str | None:
+def _workspace_value_error(
+    var_name: str,
+    value: str | None,
+    *,
+    required: bool = True,
+    allow_reference_workspace: bool = False,
+) -> str | None:
     cleaned = (value or "").strip()
     if not cleaned:
-        return f"{var_name} is empty"
+        if required:
+            return f"{var_name} is empty"
+        return None
 
     upper = cleaned.upper()
     if upper in PLACEHOLDER_VALUES or (cleaned.startswith("<") and cleaned.endswith(">")):
         return f"{var_name} is a placeholder"
     if cleaned.startswith("${") and cleaned.endswith("}"):
         return f"{var_name} is an unresolved bundle reference"
-    if cleaned in REFERENCE_WORKSPACE_DEFAULTS.get(var_name, frozenset()):
+    reference_values = REFERENCE_WORKSPACE_DEFAULTS.get(var_name, frozenset())
+    if not allow_reference_workspace and cleaned.casefold() in {
+        reference.casefold() for reference in reference_values
+    }:
         return f"{var_name} is a reference workspace default"
     return None
 
@@ -118,15 +131,34 @@ def validate_workspace_values(
     warehouse_id: str | None,
     catalog: str,
     schema: str,
+    warehouse_required: bool = True,
+    allow_reference_workspace: bool = False,
 ) -> None:
     """Fail closed on workspace-specific deploy values before any workspace calls."""
     errors = [
         error
         for error in (
-            _workspace_value_error("experiment_id", experiment_id),
-            _workspace_value_error("warehouse_id", warehouse_id),
-            _workspace_value_error("catalog", catalog),
-            _workspace_value_error("schema", schema),
+            _workspace_value_error(
+                "experiment_id",
+                experiment_id,
+                allow_reference_workspace=allow_reference_workspace,
+            ),
+            _workspace_value_error(
+                "warehouse_id",
+                warehouse_id,
+                required=warehouse_required,
+                allow_reference_workspace=allow_reference_workspace,
+            ),
+            _workspace_value_error(
+                "catalog",
+                catalog,
+                allow_reference_workspace=allow_reference_workspace,
+            ),
+            _workspace_value_error(
+                "schema",
+                schema,
+                allow_reference_workspace=allow_reference_workspace,
+            ),
         )
         if error
     ]
@@ -227,6 +259,8 @@ def bootstrap(
     auto_stop_mins: int = DEFAULT_AUTO_STOP_MINS,
     catalog: str = "",
     schema: str = "",
+    create_warehouse: bool = False,
+    allow_reference_workspace: bool = False,
     client: Any | None = None,
     mlflow_client: MlflowClient | None = None,
 ) -> BootstrapResult:
@@ -234,8 +268,9 @@ def bootstrap(
 
     Args:
         experiment_id: MLflow experiment to tag with the monitoring warehouse.
-        warehouse_id: Existing warehouse to use; must be explicit at the bootstrap
-            boundary so reusable deploys cannot fall back to a reference workspace.
+        warehouse_id: Existing warehouse to use. Required unless
+            ``create_warehouse`` is true, so reusable deploys cannot accidentally
+            create or fall back to a reference workspace.
         framework_sp_id: Single framework SP to grant ``CAN_USE``; blank/``None``
             => skip the grant (the app SP is already granted via the app's
             resource declaration, and a job running as the deploying identity
@@ -244,6 +279,12 @@ def bootstrap(
             used only on the create path.
         catalog, schema: Unity Catalog location of the app's tables; the
             table-ensure step creates every app-read table here.
+        create_warehouse: Explicit opt-in to find-or-create the framework-managed
+            serverless warehouse by ``warehouse_name`` when ``warehouse_id`` is
+            omitted.
+        allow_reference_workspace: Explicit opt-in for the owner-only reference
+            workspace redeploy path. Bypasses only the reference-default check;
+            empty, placeholder, and unresolved bundle values remain fatal.
         client: Databricks ``WorkspaceClient`` (injectable for tests).
         mlflow_client: ``MlflowClient`` passed through to
             :func:`configure_monitoring_warehouse` (injectable for tests).
@@ -256,14 +297,19 @@ def bootstrap(
         warehouse_id=warehouse_id,
         catalog=catalog,
         schema=schema,
+        warehouse_required=not create_warehouse,
+        allow_reference_workspace=allow_reference_workspace,
     )
 
     if client is None:
         client = _default_workspace_client()
 
+    warehouse_to_resolve = (
+        None if create_warehouse and not (warehouse_id or "").strip() else warehouse_id
+    )
     resolved_id, created = ensure_warehouse(
         client,
-        warehouse_id=warehouse_id,
+        warehouse_id=warehouse_to_resolve,
         warehouse_name=warehouse_name,
         cluster_size=cluster_size,
         auto_stop_mins=auto_stop_mins,
@@ -302,7 +348,8 @@ def bootstrap(
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Post-deploy bootstrap: provide-or-create the framework SQL warehouse, "
+            "Post-deploy bootstrap: use an existing framework SQL warehouse or "
+            "explicitly create one, "
             "grant CAN_USE to the single framework service principal, and tag the "
             "MLflow experiment so scheduled scorers can read traces. Idempotent; "
             "run once as a workspace admin."
@@ -312,8 +359,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--warehouse-id",
         default=os.environ.get("AIL_WAREHOUSE_ID", ""),
-        help="Existing SQL warehouse id to use. Required; reference workspace "
-        "defaults and placeholders are refused before any workspace calls.",
+        help="Existing SQL warehouse id to use. Required unless --create-warehouse "
+        "is set; reference workspace defaults and placeholders are refused before "
+        "any workspace calls.",
+    )
+    parser.add_argument(
+        "--create-warehouse",
+        action="store_true",
+        help="Explicitly find-or-create the framework-managed serverless SQL "
+        "warehouse by --warehouse-name when --warehouse-id is omitted, and print "
+        "the resolved id for reuse in later deploy commands.",
     )
     parser.add_argument(
         "--framework-sp-id",
@@ -335,7 +390,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="",
         help="Schema (within --catalog) holding the app's tables (table-ensure step). Required.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--allow-reference-workspace",
+        action="store_true",
+        default=os.environ.get("AIL_ALLOW_REFERENCE") == "1",
+        help="Owner-only escape hatch: permit the known reference workspace values. "
+        "Empty, placeholder, and unresolved bundle values are still refused.",
+    )
+    args = parser.parse_args(argv)
+    if args.create_warehouse and (args.warehouse_id or "").strip():
+        parser.error("--create-warehouse cannot be combined with --warehouse-id")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -351,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
         auto_stop_mins=args.auto_stop_mins,
         catalog=args.catalog,
         schema=args.schema,
+        create_warehouse=args.create_warehouse,
+        allow_reference_workspace=args.allow_reference_workspace,
     )
     action = "created" if result.warehouse_created else "reused"
     grant = result.granted_sp_id or "(skipped — no framework_sp_id)"
@@ -361,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
         f"experiment={args.experiment} "
         f"monitoring_tag_set={result.monitoring is not None}"
     )
+    if args.create_warehouse:
+        print(f"[ail.jobs.bootstrap_grants] warehouse_id={result.warehouse_id}")
     return 0
 
 
