@@ -92,6 +92,13 @@ ail-auto-align = "ail.jobs.auto_align_job:main"
 # record) — it never re-runs the agent at commit. Databricks-native (no git). Requires a
 # STATIC DATABRICKS_TOKEN pinned to the workspace host (a --profile OAuth login is refused).
 ail-agent-executor = "ail.jobs.agent_executor:main"
+# One-command, durable companion bootstrap: collapses (mint static token) + (export
+# DATABRICKS_HOST/TOKEN, AIL_CATALOG/SCHEMA) + (`python -m ail.companion poll ...`) into a
+# single supervised loop. Per cycle it mints a FRESH static token from --profile, exports
+# it, and runs one poll pass — re-minting keeps a long run alive past OAuth token expiry.
+# --profile is used only to mint; it is never passed to the companion (which refuses OAuth).
+# Fail-closed: a failed mint exits non-zero and never runs the companion unauthenticated.
+ail-companion-start = "ail.companion.bootstrap:main"
 
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
