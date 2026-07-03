@@ -7,7 +7,8 @@ access is **turnkey** — deployers do not grant access by hand. It covers the t
 deploy decisions baked into the bundles:
 
 1. **Provide-or-create the warehouse** — accept an existing `warehouse_id`, or
-   provision a small serverless SQL warehouse if none is given.
+   explicitly provision a small serverless SQL warehouse with
+   `ail-bootstrap-grants --create-warehouse`.
 2. **One framework service principal** — the app, the publish job, and every
    future scheduled job (scorers / L3 / MemAlign) run as a **single** SP, so a
    single `CAN_USE` grant covers everything.
@@ -22,6 +23,12 @@ can actually read traces.
 > a workspace admin, or have an admin run the one-time grant/provision; thereafter
 > the framework is turnkey for everyone else. This is the Databricks permission
 > model — there is no bypass, and none should be added.
+
+> [!IMPORTANT]
+> `experiment_id`, `warehouse_id` / `sql_warehouse_id`, `catalog`, and `schema`
+> have **no reusable default**. Pass them explicitly for your workspace; the
+> bootstrap refuses empty, placeholder, or reference-workspace values before any
+> deploy-time workspace changes.
 
 ---
 
@@ -48,7 +55,8 @@ from the Databricks CLI profile at deploy time (nothing hardcoded):
 > the in-cycle reviewer.
 
 The **bootstrap** (`ail-bootstrap-grants`, §1/§3/§4) is a CLI an admin runs as part
-of deploy — it provisions/resolves the warehouse, **ensures the app's tables exist
+of deploy — it uses an explicit warehouse id or an explicit `--create-warehouse`
+opt-in, **ensures the app's tables exist
 (empty)**, grants `CAN_USE`, and tags the experiment. It is the conditional glue the
 bundles cannot express declaratively (see
 [§6 Capability gaps](#6-dab--apps-capability-gaps-found)), and its table-ensure step
@@ -78,18 +86,28 @@ databricks bundle deploy \
 
 `warehouse_id` (root bundle) and `sql_warehouse_id` (app bundle) **must be the
 same warehouse** — that is what lets one grant cover the whole framework. Both
-default to the reference workspace's warehouse so an unflagged deploy still works.
+must be provided explicitly for each workspace.
 
-### Auto-provision when none is given
+### No warehouse yet: create one explicitly
 
-If you do not have a warehouse, the bootstrap step provisions one — a small
-(`2X-Small`), serverless (`PRO`) warehouse with a 10-minute auto-stop, found-or-
-created **by name** (`ail-framework-serverless`) so re-runs never make a second
-one. Run the bootstrap with **no** `--warehouse-id`; it prints the id it created:
+If you do not have a warehouse, choose one of these paths:
+
+- Run the bootstrap once with `--create-warehouse`. It finds or creates a small
+  (`2X-Small`), serverless (`PRO`) warehouse with a 10-minute auto-stop by exact
+  name (`ail-framework-serverless`) and prints the resolved `warehouse_id`.
+- Create a SQL warehouse out-of-band, then use its id.
+
+After you have the id, pass it explicitly to subsequent bootstrap runs and both
+bundles:
 
 ```bash
-ail-bootstrap-grants --experiment <EXPERIMENT_ID> --framework-sp-id <FRAMEWORK_SP_ID>
-# -> [ail.jobs.bootstrap_grants] warehouse=<NEW_ID> (created) grant_can_use=<sp> ...
+# provision/resolve + print the id to reuse
+ail-bootstrap-grants --experiment <EXPERIMENT_ID> --create-warehouse \
+  --catalog <CATALOG> --schema <SCHEMA> --framework-sp-id <FRAMEWORK_SP_ID>
+
+# then reuse the printed id
+ail-bootstrap-grants --experiment <EXPERIMENT_ID> --warehouse-id <NEW_ID> \
+  --catalog <CATALOG> --schema <SCHEMA> --framework-sp-id <FRAMEWORK_SP_ID>
 ```
 
 Then deploy both bundles with `warehouse_id=<NEW_ID>` / `sql_warehouse_id=<NEW_ID>`
@@ -98,7 +116,7 @@ as above.
 > Why a CLI and not a bundle-declared warehouse: DABs **does** support an
 > `sql_warehouses` resource, but it cannot express *"create only if the deployer
 > did not supply one"* — see [§6](#6-dab--apps-capability-gaps-found). The
-> provide-or-create branch therefore lives in the idempotent bootstrap.
+> provide-or-explicitly-create branch therefore lives in the idempotent bootstrap.
 
 ---
 
@@ -162,7 +180,8 @@ keeps its auto-grant; both have `CAN_USE`).
 `ail-bootstrap-grants` (module `ail.jobs.bootstrap_grants`) is **idempotent** and
 does four things in one run:
 
-1. **Resolve the warehouse** — use `--warehouse-id`, else find-or-create (§1).
+1. **Resolve the warehouse** — use `--warehouse-id`, or, only when explicitly
+   requested, find-or-create by name with `--create-warehouse` (§1).
 2. **Ensure the app's tables exist (empty)** — create every UC table the deployed
    app's SQL queries read, using each writer module's **own** authoritative
    `_ddl()` `CREATE SCHEMA/TABLE IF NOT EXISTS` (module `ail.jobs.bootstrap_tables`;
@@ -181,11 +200,20 @@ does four things in one run:
 ail-bootstrap-grants \
   --experiment <EXPERIMENT_ID> \
   --warehouse-id <WAREHOUSE_ID> \
+  --catalog <CATALOG> --schema <SCHEMA> \
   --framework-sp-id <FRAMEWORK_SP_ID> --profile dais-demo
-# Omit --warehouse-id to auto-provision; omit --framework-sp-id to skip the grant
-# (e.g. on the pre-app run, before the App SP exists — see §4). --catalog/--schema
-# default to the framework catalog.schema the app reads.
+# Use --create-warehouse instead of --warehouse-id only for the one-time
+# provision/resolve path; it prints the warehouse id to reuse. Omit
+# --framework-sp-id to skip the grant (e.g. on the pre-app run, before the App SP
+# exists — see §4). --catalog/--schema are required workspace-specific values.
 ```
+
+> [!WARNING]
+> `--allow-reference-workspace` (or `AIL_ALLOW_REFERENCE=1`) is an owner-only
+> escape hatch for re-deploying the live reference demo. You almost never want
+> this: it bypasses only the known reference-workspace value check. Empty values,
+> placeholders such as `REPLACE_ME`, and unresolved bundle references such as
+> `${var.catalog}` remain fatal.
 
 The App's own `CAN_USE` is **not** done here — it is granted natively by the Apps
 platform from the `permission: CAN_USE` declaration in
@@ -239,12 +267,13 @@ the app for the tables (no SP grant yet, since the App SP does not exist), and o
 databricks bundle validate -t dais_demo --profile dais-demo
 databricks bundle deploy   -t dais_demo --profile dais-demo
 
-# 2. BOOTSTRAP FIRST [ADMIN]: (provide-or-create wh) + ensure the app's tables
+# 2. BOOTSTRAP FIRST [ADMIN]: (explicit warehouse) + ensure the app's tables
 #    (empty) + tag experiment. No --framework-sp-id yet (the App SP is created in
 #    step 3). This is what lets step 3's app build typegen resolve on a clean
 #    workspace — with ZERO manual DDL.
 ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
-  --warehouse-id <WAREHOUSE_ID> --profile dais-demo
+  --warehouse-id <WAREHOUSE_ID> \
+  --catalog <CATALOG> --schema <SCHEMA> --profile dais-demo
 
 # 3. deploy the app (creates its SP + auto-grants CAN_USE on the warehouse). Its
 #    build typegen now DESCRIBEs tables that EXIST (step 2). Point it at the apply
@@ -261,7 +290,8 @@ SP=$(databricks apps get ail-self-optimizer -o json --profile dais-demo \
 # 5. bootstrap AGAIN (idempotent) to grant CAN_USE to that SP (wh reused, tables
 #    no-op, tag no-op), then re-deploy the jobs to run as that SP.
 ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
-  --warehouse-id <WAREHOUSE_ID> --framework-sp-id "$SP" --profile dais-demo
+  --warehouse-id <WAREHOUSE_ID> --framework-sp-id "$SP" \
+  --catalog <CATALOG> --schema <SCHEMA> --profile dais-demo
 databricks bundle deploy -t dais_demo_sp --var framework_sp_id="$SP" --profile dais-demo
 ```
 
@@ -418,11 +448,10 @@ superseded) is **refused**, so a duplicated/retried trigger never double-applies
    or `databricks.yml` — that would tie `main` to one workspace.
 
    `DATABRICKS_WAREHOUSE_ID` (already injected from the app's `sql-warehouse`
-   resource) is reused to read the result row back. Optional overrides:
-   `AIL_APPLY_CATALOG` / `AIL_APPLY_SCHEMA` (default the framework
-   `austin_choi_omni_agent_catalog.agent_improvement_loop`),
-   `AIL_APPLY_JOB_TIMEOUT_MS` (default 300000), `AIL_APPLY_JOB_POLL_MS` (default
-   3000).
+   resource) is reused to read the result row back. Set `AIL_APPLY_CATALOG` /
+   `AIL_APPLY_SCHEMA` to the same workspace-specific `<CATALOG>` / `<SCHEMA>`
+   used for the bundles. Optional timing overrides: `AIL_APPLY_JOB_TIMEOUT_MS`
+   (default 300000), `AIL_APPLY_JOB_POLL_MS` (default 3000).
 
 Without `AIL_APPLY_TRANSPORT=job` / `AIL_APPLY_JOB_ID`, the app falls back to the
 subprocess bridge — correct for local dev, but on the Node-only deployed image that
