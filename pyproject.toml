@@ -73,15 +73,8 @@ ail-suite-freeze = "ail.jobs.suite_freeze:main"
 # bounded runner that idempotently attaches rlm_* feedback only to sampled traces
 # without RLM assessments, on the most powerful viable judge (databricks-gpt-5-5-pro)
 # and steered by the user's goal. It is SCHEDULED, not trace-arrival-triggered (the
-# trace store is a VIEW, so table_update is infeasible — the reason its original
-# trigger job was retired). The same reviewer also runs INSIDE ail-optimization-cycle
-# on the lighter in-cycle model; both remain runnable by hand.
+# trace store is a VIEW, so table_update is infeasible).
 ail-continuous-rlm = "ail.jobs.continuous_rlm:main"
-# Unified, scheduled optimization cycle: one cadence over one sampled trace set —
-# in-cycle RLM review, then the layered A+B loop controller (deterministic rules +
-# the LLM-agent planner), then PENDING-proposal publish. Propose-only; applies
-# nothing (a human approves the apply in the app, lane 3).
-ail-optimization-cycle = "ail.jobs.optimization_cycle:main"
 # Local companion planner (EVIDENCE-FIRST, no proving): the deployer-run planner lane
 # (docs/PRODUCT_ARCHITECTURE.md §4/§7). Reads an agent's judge/RLM/L0 evidence, plans
 # (Lane A rules + the LLM Lane-B planner), gates on readiness + judge trust ONLY (no

@@ -1,15 +1,14 @@
-"""``ail-optimization-cycle`` — the unified, scheduled optimization cycle.
+"""Shared seams from the retired serverless optimization cycle.
 
-This is the single scheduled runner that unifies **L3/RLM review** and the
-**layered A+B loop controller** onto **one cadence over one trace set**
-(``docs/LOOP_CONTROLLER.md`` lane 2). On each firing it:
+The serverless job entry point was retired, but companion/RLM code still imports
+the shared seams in this module. The retained orchestration helper models the old
+cycle shape for tests and reuse:
 
 1. **reviews** the cycle's sampled/recent trace set with the *existing*
    :mod:`ail.l3.continuous` RLM reviewer — reusing its sampling knobs
    (``max-results`` / ``sample-rate`` / ``min-tokens``), its idempotency (skip
    traces already carrying ``rlm_*``), and its fail-closed failed-marker. This
-   is the same reviewer the retired standalone job ran; here it runs *in-cycle*
-   so review and planning always see the same window. A review failure is
+   is the same reviewer the scheduled RLM job runs. A review failure is
    recorded and **never blocks the cycle** (per-trace faults are isolated by the
    reviewer itself; a total review failure is caught here);
 2. **plans** over the *now-fresh* feedback: the deterministic **Lane A** rules
@@ -26,30 +25,27 @@ This is the single scheduled runner that unifies **L3/RLM review** and the
    atomically replacing this agent's slice — so a superseded pending proposal
    disappears and the write is idempotent.
 
-**Nothing here applies a change.** The controller emits only PENDING proposals;
-a human approves the live apply in the app (lane 3). This module wires seams and
-publishes; it registers no version, sets no alias, and runs no ``CREATE``.
+**Nothing here applies a change.** The retained controller helper emits only
+PENDING proposals; a human approves the live apply in the app (lane 3). This
+module wires seams and publishes; it registers no version, sets no alias, and
+runs no ``CREATE``.
 
 **Injectable seams = testable.** :func:`run_optimization_cycle` takes the RLM
 step, feedback source, candidate builder, prover, gate, planner, and publish
 function as parameters (the controller's own philosophy), so a whole cycle runs
-in tests with fakes — no live MLflow / agent / warehouse. :func:`main` wires the
-**real** defaults.
+in tests with fakes — no live MLflow / agent / warehouse.
 
-Auth mirrors :mod:`ail.jobs.publish_job` / :mod:`ail.jobs.continuous_rlm`
-(:func:`resolve_job_auth`); no hardcoded host.
+The local companion now provides the live plan → propose → execute path.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ail.goals.compiler import CompiledGoal, GoalTarget, Guardrail
-from ail.jobs.publish_job import resolve_job_auth
 from ail.l3.cohort_review import aggregate_assets
 from ail.l3.continuous import ContinuousRlmRunReport, run_continuous_rlm
 from ail.l3.contract import HaloReviewVerdict, RankedAsset
@@ -71,7 +67,6 @@ from ail.loop.planner import (
 from ail.loop.proposals import ProposalStatus, ProposedAction
 from ail.loop.publish_proposals import PROPOSALS_TABLE, publish_agent_proposals
 from ail.metrics.contract import L0MetricsReport
-from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA
 from ail.readiness import ReadinessStatus, compute_readiness
 from ail.registry import Agent
 
@@ -83,7 +78,6 @@ __all__ = [
     "redundant_reads_from_l0",
     "build_feedback_bundle",
     "run_optimization_cycle",
-    "main",
 ]
 
 
@@ -483,7 +477,7 @@ def _default_publish(agent: Agent, args: argparse.Namespace) -> PublishFn:
 
 
 # ---------------------------------------------------------------------------
-# Config resolution + CLI entrypoint.
+# Config resolution helpers reused by local companion / RLM lanes.
 # ---------------------------------------------------------------------------
 
 
@@ -529,119 +523,3 @@ def _build_goal(args: argparse.Namespace) -> CompiledGoal:
     )
     confirmed = str(args.goal_confirmed).strip().lower() in {"1", "true", "yes"}
     return goal.confirm() if confirmed else goal
-
-
-def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Run one unified optimization cycle: in-cycle RLM review over the sampled "
-            "trace set, then the layered A+B loop controller (propose-only), then "
-            "publish PENDING proposals. Applies nothing."
-        )
-    )
-    parser.add_argument("--agent", default="claude_code", help="Agent name (proposal scope).")
-    parser.add_argument("--experiment", required=True)
-    parser.add_argument("--warehouse-id", default=os.environ.get("AIL_WAREHOUSE_ID"))
-    parser.add_argument("--profile", default=os.environ.get("DATABRICKS_CONFIG_PROFILE"))
-    parser.add_argument("--catalog", default=DEFAULT_CATALOG)
-    parser.add_argument("--schema", default=DEFAULT_SCHEMA)
-    # in-cycle RLM sampling knobs (the existing ail.l3.continuous scheme; no new one)
-    parser.add_argument("--judge-model", required=True)
-    parser.add_argument("--max-results", type=int, default=100)
-    parser.add_argument("--max-reviews", type=int, default=2)
-    parser.add_argument("--sample-rate", type=float, default=0.10)
-    parser.add_argument("--min-tokens", type=int, default=50_000)
-    parser.add_argument("--reviewer-experiment", default="")
-    parser.add_argument("--max-turns", type=int, default=40)
-    parser.add_argument("--temperature", type=float, default=None)
-    # goal (operator-configured; confirmed by --confirm-goal)
-    parser.add_argument("--objective-metric", default="total_tokens")
-    parser.add_argument("--goal-direction", default="minimize", choices=["minimize", "maximize"])
-    parser.add_argument("--goal-target", type=float, default=-0.30)
-    parser.add_argument("--goal-target-kind", default="relative", choices=["relative", "absolute"])
-    parser.add_argument(
-        "--guardrail-judge",
-        action="append",
-        default=None,
-        help="Judge guardrail as 'name:threshold' (repeatable).",
-    )
-    parser.add_argument(
-        "--objective-baseline",
-        type=_opt_float,
-        default=None,
-        help="Baseline value a relative objective target is measured against "
-        "(empty => treated as not-yet-met, no fabricated baseline).",
-    )
-    parser.add_argument(
-        "--goal-confirmed",
-        default=os.environ.get("AIL_CONFIRM_GOAL", "false"),
-        help="'true' to mark the operator-configured goal human-confirmed (required to run; "
-        "a scheduled job's bundle-authored goal is confirmed by the operator who deploys it). "
-        "Anything else leaves it unconfirmed and run_cycle refuses to run (fail-loud).",
-    )
-    parser.add_argument("--planner-model", default=None)
-    parser.add_argument(
-        "--token-secret-scope",
-        default=os.environ.get("AIL_TOKEN_SECRET_SCOPE", ""),
-    )
-    parser.add_argument(
-        "--token-secret-key",
-        default=os.environ.get("AIL_TOKEN_SECRET_KEY", ""),
-    )
-    args = parser.parse_args(argv)
-    if not args.warehouse_id:
-        parser.error("--warehouse-id is required (or set AIL_WAREHOUSE_ID)")
-    return args
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    auth_path = resolve_job_auth(
-        token_secret_scope=args.token_secret_scope or None,
-        token_secret_key=args.token_secret_key or None,
-    )
-    agent = Agent(agent_name=args.agent, experiment_id=args.experiment)
-    goal = _build_goal(args)
-
-    planner: Planner
-    if args.planner_model:
-        from functools import partial
-
-        planner = partial(agent_planner, model=args.planner_model)
-    else:
-        planner = agent_planner
-
-    print(
-        f"[ail.jobs.optimization_cycle] auth={auth_path} "
-        f"host={os.environ.get('DATABRICKS_HOST')} agent={agent.agent_name} "
-        f"experiment={args.experiment} objective={goal.objective_metric} "
-        f"sample_rate={args.sample_rate} max_reviews={args.max_reviews}"
-    )
-
-    report = run_optimization_cycle(
-        agent,
-        goal,
-        rlm_step=_default_rlm_step(args),
-        feedback_source=_default_feedback_source(agent, args),
-        candidate_builder=_default_candidate_builder(agent, args),
-        prover=_default_prover(args),
-        gate=_default_gate(args),
-        planner=planner,
-        publish_fn=_default_publish(agent, args),
-    )
-
-    rlm = report.rlm
-    print(
-        "[ail.jobs.optimization_cycle] "
-        f"rlm_reviewed={rlm.n_reviewed if rlm else 0} "
-        f"rlm_failed={rlm.n_failed if rlm else 0} rlm_error={report.rlm_error} "
-        f"decisions_a={report.plan.n_from_a} decisions_b={report.plan.n_from_b} "
-        f"deduped={report.plan.n_deduped} planner_error={report.plan.planner_error} "
-        f"proposals={len(report.cycle.proposals)} skipped={len(report.cycle.skipped)} "
-        f"published={report.n_published}"
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
