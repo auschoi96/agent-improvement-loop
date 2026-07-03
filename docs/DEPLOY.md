@@ -60,20 +60,16 @@ from the Databricks CLI profile at deploy time (nothing hardcoded):
 
 | Bundle | Path | Contains | run-as |
 |--------|------|----------|--------|
-| `ail-scheduled-publish` | repo root `databricks.yml` + `resources/*.yml` | the scheduled L0 publish job, the **scheduled `ail-optimization-cycle` job** (§8), **and** the on-demand `ail-apply-service` job (§7) | bundle-level `run_as` (§2) |
+| `ail-scheduled-publish` | repo root `databricks.yml` + `resources/*.yml` | the scheduled L0 publish job, the scheduled `ail-continuous-rlm` review job, the scheduled auto-align job, **and** the on-demand `ail-apply-service` job (§7) | bundle-level `run_as` (§2) |
 | `ail-self-optimizer` | `ail-self-optimizer/databricks.yml` | the L0 leaderboard App (incl. the approve/reject write-path) | the App's auto-provisioned SP (fixed by the platform) |
 
-> **Retired:** the standalone arrival-triggered `continuous_rlm` job
-> (`resources/continuous_rlm.job.yml`) was **removed**. Its `table_update` trigger
-> was infeasible — the MLflow trace store is exposed as **views**
-> (`cc_trace_unified` / `cc_trace_metadata`), not Delta tables, so a table-update
-> trigger can never fire. The RLM reviewer itself is **not** gone: it now runs
-> **in-cycle** inside `ail-optimization-cycle` (§8) and remains runnable by hand via
-> the `ail-continuous-rlm` console entry. The bundle variables that served only the
-> retired trigger (`rlm_trigger_pause_status`, `trace_store_table`) were removed; the
-> RLM sampling knobs (`rlm_judge_model`, `rlm_sample_rate`, `rlm_max_reviews_per_run`,
-> `rlm_min_tokens`, `rlm_max_results`, `rlm_max_turns`) were **repurposed** to drive
-> the in-cycle reviewer.
+> **Retired:** the serverless `ail-optimization-cycle` job
+> (`resources/optimization_cycle.job.yml`, entry point `ail-optimization-cycle`) was
+> **removed**. The plan → propose → execute path now runs through the local companion
+> (`python -m ail.companion` / `ail-companion-start`), which can use the Claude Agent
+> SDK and does not clobber app-visible proposals from a competing scheduled job. The
+> shared `ail.jobs.optimization_cycle` Python module remains as an importable library
+> for companion/RLM seams such as feedback assembly, goal building, and proving helpers.
 
 The **bootstrap** (`ail-bootstrap-grants`, §1/§3/§4) is a CLI an admin runs as part
 of deploy — it uses an explicit warehouse id or an explicit `--create-warehouse`
@@ -496,58 +492,33 @@ fails closed rather than silently applying via a bridge it can't run).
 
 ---
 
-## 8. The optimization cycle (`ail-optimization-cycle`) — the unified lane-2 runner
+## 8. Local companion plan → propose → execute path
 
-`ail-optimization-cycle` (`resources/optimization_cycle.job.yml`, entry point
-`ail-optimization-cycle`) is the scheduled runner that unifies **L3/RLM review** and
-the **layered A+B loop controller** onto **one cadence over one sampled trace set**.
-It is deployed by the **root** `ail-scheduled-publish` bundle alongside the publish
-and apply jobs, is a serverless `python_wheel_task`, `max_concurrent_runs: 1` with
-`queue.enabled: true`, and inherits the bundle-level `run_as` (§2) — the same single
-framework SP. It installs `halo-engine` in its serverless env because it runs the
-L3/RLM reviewer in-process.
+The serverless `ail-optimization-cycle` job is retired. Do **not** deploy or run a
+scheduled optimization-cycle job; fresh root-bundle deploys no longer create one. The
+proposal path is now the local companion (`python -m ail.companion`), started by the
+deployer on compute that has the Claude Agent SDK and Databricks credentials.
 
-Each firing:
+The companion path:
 
-1. **reviews** the sampled recent traces with the existing `ail.l3.continuous`
-   reviewer (reusing its sampling knobs, idempotency, and fail-closed failed-marker);
-   a review failure is recorded and never blocks the cycle;
-2. **plans** over the now-fresh feedback with **both** the deterministic decision
-   rules and the LLM-agent planner (`ail.loop.planner`), de-duped into one union;
-3. **proves + gates + proposes** by driving the union through the unchanged loop
-   controller (real prover + readiness gate); and
-4. **publishes** the resulting **PENDING** proposals to `agent_proposed_actions`
-   (atomic per-agent `REPLACE`, idempotent). It **applies nothing** — a human
-   approves the live change via the app's approve/reject path (§7).
+1. **plans** from fresh evidence (L0 metrics, trusted judges, and RLM feedback) using
+   deterministic decision rules plus the LLM planner;
+2. **publishes** PENDING proposals to `agent_proposed_actions` for app review;
+3. **executes** only after approval, through the companion/executor path rather than a
+   serverless scheduled job; and
+4. **proves** on demand when the user requests suite-backed verification.
 
-### Schedule + configuration (bundle variables)
+Use `ail-companion-start` for the durable one-command flow, or run the manual command
+shown in §9:
 
-- `optimization_cycle_cron` (default hourly `0 0 * * * ?`), `schedule_timezone`,
-  `optimization_cycle_pause_status` (`UNPAUSED` → live; `PAUSED` → deployed-dormant).
-  It is a **schedule, not a trace-arrival trigger** — the trace store is exposed as
-  **views**, so a `table_update` trigger (the retired `continuous_rlm` job) can never
-  fire.
-- `agent_name`, `objective_metric`, `goal_target`, and `goal_confirmed`. The
-  controller refuses to run on an **unconfirmed** goal; for a scheduled job, the
-  operator authoring the goal in the bundle **is** the human confirmation, so
-  `goal_confirmed` defaults to `true`. Set it to anything else to keep the cycle
-  deployed but **fail-loud** on the unconfirmed goal.
-- The in-cycle RLM sampling knobs reuse the `rlm_*` variables (`rlm_judge_model`,
-  `rlm_sample_rate`, `rlm_max_reviews_per_run`, `rlm_min_tokens`, `rlm_max_results`,
-  `rlm_max_turns`); `rlm_judge_model` also drives the planner endpoint.
+```bash
+python -m ail.companion poll --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>
+```
 
-### Known limitation (upstream, not this job)
-
-The real prover is `ail.optimize.phase2.run_phase2_comparison` (frozen-suite,
-correctness-held — no fabricated proof). Today the default candidate builder returns
-`None` (fail-closed) for the action kinds whose *provable* candidate path is not yet
-wired upstream: an additive `metric_view` has no frozen-suite intervention to prove,
-the skill generator is a stub, and `gepa_prompt` bodies come from the separate GEPA
-run. So until an upstream lane completes a candidate→intervention mapping (or a
-deployment injects its own candidate builder), the cycle correctly **proposes nothing
-it cannot prove** — it reviews, plans, and fails closed rather than shipping an
-unproven or fabricated proposal. The moment a provable candidate exists it flows
-through the already-wired real prover unchanged.
+The importable `ail.jobs.optimization_cycle` module intentionally remains because the
+companion and scheduled RLM job reuse its shared seams (`build_feedback_bundle`,
+`_default_prover`, `_build_goal`, and related helpers). Only the serverless job
+resource, bundle variables, and console-script entry point were retired.
 
 ---
 

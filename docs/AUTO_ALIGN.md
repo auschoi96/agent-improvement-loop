@@ -108,7 +108,7 @@ rollback bar (letting a regressed re-alignment get promoted).
 
 The v4 trace store tables are **views** (`cc_trace_unified` / `cc_trace_metadata`),
 not Delta tables, so a `table_update` trigger is infeasible — the same reason the
-optimization cycle is scheduled. `ail-auto-align` runs on a cron
+other scheduled jobs (RLM, publish) run on a cron. `ail-auto-align` runs on a cron
 (`auto_align_cron`, default daily 06:00). It is **model-only**: it reads labeled
 traces and calls the reflection / embedding / judge models through the gateway; it
 has no SQL write path of its own. Like the other jobs it resolves an explicit

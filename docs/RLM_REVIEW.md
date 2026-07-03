@@ -79,7 +79,7 @@ compiled goal** (`ail.goals`, `docs/ARCHITECTURE.md` §4):
 
 The rubric is threaded through the existing seam
 (`run_continuous_rlm(rubric=…) → review_trace → build_review_prompt`); the job builds
-it from the same goal knobs `ail-optimization-cycle` uses (`--objective-metric`,
+it from the same goal knobs the local companion planner uses (`--objective-metric`,
 `--goal-direction`, `--goal-target`, `--goal-target-kind`, `--guardrail-judge`). An
 empty `--objective-metric` keeps `DEFAULT_RUBRIC`. The `CompiledGoal` is fully
 validated against the allowlist + readiness contract, so a misconfigured goal fails
@@ -98,7 +98,7 @@ recorded as a fake-good pass).
 deliberately **scheduled, not trace-arrival-triggered**: the UC-backed trace store is a
 **VIEW** (`cc_trace_unified` / `cc_trace_metadata`), so a `table_update` trigger is
 infeasible — the reason the original trigger job was retired. It mirrors the sibling
-job resources (`l0_publish` / `optimization_cycle`): serverless compute, the locally
+job resources (`l0_publish` / `auto_align`): serverless compute, the locally
 built `ail` wheel + `halo-engine`, bundle-level `run_as`, `max_concurrent_runs: 1` with
 queueing, and idempotency so it never re-reviews handled traces.
 
@@ -112,9 +112,9 @@ queueing, and idempotency so it never re-reviews handled traces.
 | `continuous_rlm_pause_status` | `UNPAUSED` | `PAUSED` ⇒ deployed-but-dormant |
 
 It reuses the shared `rlm_*` sampling knobs and the shared goal vars (`objective_metric`
-etc.), so by default it reviews toward the same user goal the optimization cycle
-optimizes. Idempotency (`has_rlm_assessment`) keeps it from double-reviewing traces the
-lighter in-cycle sonnet reviewer already handled.
+etc.), so by default it reviews toward the same user goal the local companion planner
+targets. Idempotency (`has_rlm_assessment`) keeps it from double-reviewing traces that
+already carry RLM feedback.
 
 ## Live smoke test
 
