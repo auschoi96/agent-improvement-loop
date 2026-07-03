@@ -216,3 +216,47 @@ def test_profile_forwarded_to_poll_would_be_refused(monkeypatch: pytest.MonkeyPa
         )
     )
     assert "--profile" not in passthrough
+
+
+def test_poll_failure_then_interrupt_surfaces_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a failing poll cycle followed by a graceful stop must NOT exit 0.
+
+    Cycle 1's poll fails; cycle 2 is interrupted (operator Ctrl-C / SIGTERM). A
+    graceful stop after a poll failure must still surface the failure in the exit
+    code. Before the fix (``return 0 if stopped else worst_rc``) this returned 0
+    and masked the failure from any process-exit-code monitor.
+    """
+    _fresh_mint(monkeypatch)
+    calls = {"n": 0}
+
+    def _flaky_poll(argv: list[str]) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 1  # this cycle's poll failed
+        raise KeyboardInterrupt  # operator stops the supervisor on the next cycle
+
+    monkeypatch.setattr(companion_cli, "run_poll", _flaky_poll)
+
+    rc = bootstrap.main([*_ARGS, "--max-cycles", "0"])  # unbounded; stopped by the interrupt
+
+    assert calls["n"] == 2  # ran the failing cycle, then the interrupted one
+    assert rc != 0  # failure is reflected despite the graceful stop
+
+
+def test_clean_interrupt_with_no_errors_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Paired case: a graceful stop with ZERO poll errors still exits 0."""
+    _fresh_mint(monkeypatch)
+    calls = {"n": 0}
+
+    def _ok_then_interrupt(argv: list[str]) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 0  # clean poll
+        raise KeyboardInterrupt  # then the operator stops it
+
+    monkeypatch.setattr(companion_cli, "run_poll", _ok_then_interrupt)
+
+    rc = bootstrap.main([*_ARGS, "--max-cycles", "0"])
+
+    assert calls["n"] == 2
+    assert rc == 0

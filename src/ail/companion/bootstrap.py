@@ -207,8 +207,11 @@ def main(argv: list[str] | None = None) -> int:
         f"max_cycles={args.max_cycles or 'unbounded'}"
     )
 
+    # Tracks the worst outcome across cycles: starts clean (0) and only bumps to
+    # non-zero on a poll failure. Returned regardless of HOW the loop ended (signal,
+    # max-cycles, or KeyboardInterrupt) so a persistent poll failure is never masked
+    # as success by a graceful stop.
     worst_rc = 0
-    stopped = False
     try:
         cycle = 0
         while not stop.is_set():
@@ -226,16 +229,14 @@ def main(argv: list[str] | None = None) -> int:
                 break
             if stop.wait(args.interval_seconds):
                 break
-        stopped = stop.is_set()
     except KeyboardInterrupt:
-        stopped = True
         print(f"{_TAG} interrupted; shutting down cleanly.")
     finally:
         if installed:
             with contextlib.suppress(ValueError, TypeError):
                 signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
 
-    return 0 if stopped else worst_rc
+    return worst_rc
 
 
 if __name__ == "__main__":
