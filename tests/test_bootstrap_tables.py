@@ -24,8 +24,11 @@ from ail.jobs import bootstrap_tables
 from ail.jobs.bootstrap_tables import (
     APP_QUERY_TABLES,
     ensure_app_tables,
+    reconcile_app_table_columns,
     table_ensure_statements,
 )
+from ail.loop.publish_proposals import PROPOSALS_TABLE
+from ail.loop.publish_proposals import _ddl as proposals_ddl
 
 # The deployed app's SQL query registry — the source of truth for the drift
 # guard. typegen runs a live DESCRIBE QUERY against each of these at build time.
@@ -331,3 +334,285 @@ def test_is_idempotent_create_accepts(statement: str) -> None:
 )
 def test_is_idempotent_create_rejects(statement: str) -> None:
     assert bootstrap_tables._is_idempotent_create(statement) is False
+
+
+# ==========================================================================
+# Additive column reconciliation
+# ==========================================================================
+#
+# The whole SQL client is faked (no live workspace): information_schema probes
+# return configured LIVE columns per table, and CREATE/ALTER statements are
+# recorded so the assertions can inspect exactly what would run.
+
+#: The nine columns L7b-1 (change_*) and L9 (verify_*) added to the writer DDL —
+#: the real regression this reconcile step exists to migrate onto a pre-existing
+#: ``agent_proposed_actions`` table.
+_NINE_ADDED = [
+    "change_plan",
+    "change_preview_diff",
+    "change_produced_change_ref",
+    "verify_requested",
+    "verify_status",
+    "verify_requested_by",
+    "verify_requested_at",
+    "verify_completed_at",
+    "verify_error",
+]
+
+# Independent column scan (does NOT use the module's parser) so the reconcile
+# assertions can't pass merely because the parser and the test agree on a bug.
+_DDL_COLUMN_RE = re.compile(
+    r"^\s*(\w+)\s+(STRING|INT|BIGINT|DOUBLE|BOOLEAN|FLOAT|LONG|TIMESTAMP|DATE)\b",
+    re.IGNORECASE,
+)
+
+
+def _declared_columns(create_stmt: str) -> list[tuple[str, str]]:
+    """`(name, ddl_type)` per column, scanned line-by-line from a CREATE TABLE."""
+    cols: list[tuple[str, str]] = []
+    for line in create_stmt.splitlines():
+        m = _DDL_COLUMN_RE.match(line)
+        if m:
+            cols.append((m.group(1), m.group(2)))
+    return cols
+
+
+def _proposals_create() -> str:
+    stmts = proposals_ddl("cat", "sch")
+    return next(s for s in stmts if s.strip().upper().startswith("CREATE TABLE"))
+
+
+# -- fakes: an information_schema-aware SQL client -------------------------
+
+_INFO_SCHEMA_TABLE_RE = re.compile(r"LOWER\(table_name\)\s*=\s*LOWER\('([^']+)'\)", re.IGNORECASE)
+
+
+class _FakeCol:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeManifestSchema:
+    def __init__(self, names: list[str]) -> None:
+        self.columns = [_FakeCol(n) for n in names]
+
+
+class _FakeManifest:
+    def __init__(self, names: list[str]) -> None:
+        self.schema = _FakeManifestSchema(names)
+
+
+class _FakeResultSet:
+    def __init__(self, data: list[list[str]]) -> None:
+        self.data_array = data
+
+
+class _FakeQueryResponse:
+    def __init__(
+        self,
+        statement_id: str,
+        state: StatementState,
+        manifest: _FakeManifest | None = None,
+        result: _FakeResultSet | None = None,
+    ) -> None:
+        self.statement_id = statement_id
+        self.status = _FakeStatementStatus(state)
+        self.manifest = manifest
+        self.result = result
+
+
+class _ReconcileStatementExecutionAPI:
+    """Serves information_schema.columns probes from a configured per-table map;
+    records every other (CREATE/ALTER) statement."""
+
+    def __init__(self, live_columns: dict[str, list[tuple[str, str]]]) -> None:
+        self._live = live_columns
+        self.statements: list[str] = []
+
+    def execute_statement(
+        self, *, warehouse_id: str, statement: str, wait_timeout: str = "50s"
+    ) -> _FakeQueryResponse:
+        self.statements.append(statement)
+        if "information_schema.columns" in statement.lower():
+            m = _INFO_SCHEMA_TABLE_RE.search(statement)
+            table = m.group(1) if m else ""
+            rows = self._live.get(table, [])
+            return _FakeQueryResponse(
+                "stmt-q",
+                StatementState.SUCCEEDED,
+                _FakeManifest(["column_name", "full_data_type"]),
+                _FakeResultSet([[name, full_type] for name, full_type in rows]),
+            )
+        return _FakeQueryResponse("stmt-1", StatementState.SUCCEEDED)
+
+    def get_statement(self, statement_id: str) -> _FakeQueryResponse:
+        return _FakeQueryResponse(statement_id, StatementState.SUCCEEDED)
+
+
+class _ReconcileClient:
+    def __init__(self, live_columns: dict[str, list[tuple[str, str]]]) -> None:
+        self.statement_execution = _ReconcileStatementExecutionAPI(live_columns)
+
+
+# -- the real regression + idempotence + skip -----------------------------
+
+
+def test_reconcile_migrates_missing_columns_on_existing_table() -> None:
+    declared = _declared_columns(_proposals_create())
+    declared_names = [n for n, _ in declared]
+    # sanity: the writer DDL really declares all nine added columns
+    assert set(_NINE_ADDED) <= set(declared_names)
+    # LIVE = a pre-existing table missing exactly the nine L7b-1/L9 columns; the
+    # rest present with their declared types (lower-cased, as information_schema
+    # reports full_data_type).
+    live_rows = [(n, t.lower()) for n, t in declared if n not in _NINE_ADDED]
+    client = _ReconcileClient({PROPOSALS_TABLE: live_rows})
+
+    alters = reconcile_app_table_columns(client, "wh-1", catalog="cat", schema="sch")
+
+    # Exactly ONE ALTER (only the proposals table needed migrating; the eight
+    # other app tables are absent live -> skipped).
+    assert len(alters) == 1
+    alter = alters[0]
+    assert bootstrap_tables._is_add_columns_alter(alter)
+    assert alter.startswith(f"ALTER TABLE `cat`.`sch`.{PROPOSALS_TABLE} ADD COLUMNS (")
+    block = alter[alter.index("(") + 1 : alter.rindex(")")]
+    added = {seg.split()[0] for seg in block.split(", ")}
+    assert added == set(_NINE_ADDED)
+    # name+type preserved — the one BOOLEAN among the nine and a representative STRING.
+    assert "verify_requested BOOLEAN" in block
+    assert "change_plan STRING" in block
+    # and it was actually executed on the warehouse.
+    assert alter in client.statement_execution.statements
+
+
+def test_reconcile_is_noop_when_all_columns_present() -> None:
+    declared = _declared_columns(_proposals_create())
+    live_rows = [(n, t.lower()) for n, t in declared]  # nothing missing
+    client = _ReconcileClient({PROPOSALS_TABLE: live_rows})
+
+    alters = reconcile_app_table_columns(client, "wh-1", catalog="cat", schema="sch")
+
+    assert alters == []
+    assert not any(
+        s.strip().upper().startswith("ALTER") for s in client.statement_execution.statements
+    )
+
+
+def test_reconcile_skips_absent_tables() -> None:
+    client = _ReconcileClient({})  # no table present live
+
+    alters = reconcile_app_table_columns(client, "wh-1", catalog="cat", schema="sch")
+
+    assert alters == []
+    stmts = client.statement_execution.statements
+    # It probed information_schema but issued no DDL (CREATE path is unaffected).
+    assert stmts
+    assert all("information_schema.columns" in s.lower() for s in stmts)
+
+
+# -- fail loud on a real type conflict; tolerate benign spelling ----------
+
+
+def test_reconcile_raises_on_real_type_conflict() -> None:
+    declared = _declared_columns(_proposals_create())
+    # All present, but agent_name (declared STRING) is BIGINT live -> unreconcilable.
+    live_rows = [
+        ("agent_name", "bigint") if n == "agent_name" else (n, t.lower()) for n, t in declared
+    ]
+    client = _ReconcileClient({PROPOSALS_TABLE: live_rows})
+
+    with pytest.raises(ValueError) as excinfo:
+        reconcile_app_table_columns(client, "wh-1", catalog="cat", schema="sch")
+
+    message = str(excinfo.value)
+    assert PROPOSALS_TABLE in message
+    assert "agent_name" in message
+    # Fail-closed: nothing was ALTERed.
+    assert not any(
+        s.strip().upper().startswith("ALTER") for s in client.statement_execution.statements
+    )
+
+
+def test_reconcile_tolerates_case_only_type_diff() -> None:
+    declared = _declared_columns(_proposals_create())
+    # agent_name live type differs only by case (declared STRING vs live STRING/uppercase);
+    # everything present -> no conflict, no migration.
+    live_rows = [(n, "STRING") if n == "agent_name" else (n, t.lower()) for n, t in declared]
+    client = _ReconcileClient({PROPOSALS_TABLE: live_rows})
+
+    assert reconcile_app_table_columns(client, "wh-1", catalog="cat", schema="sch") == []
+
+
+# -- parser: comments and complex types don't break column splitting ------
+
+
+def test_parse_create_table_handles_comments_and_complex_types() -> None:
+    create = (
+        "CREATE TABLE IF NOT EXISTS `c`.`s`.tricky (\n"
+        "  a STRING COMMENT 'has, a comma and (parens) and the word DROP',\n"
+        "  b DECIMAL(10, 2),\n"
+        "  c MAP<STRING,STRING>,\n"
+        "  d ARRAY<STRUCT<x:INT,y:STRING>>,\n"
+        "  e STRING\n"
+        ") USING DELTA COMMENT 'table, comment with ) a paren'"
+    )
+    parsed = bootstrap_tables._parse_create_table(create)
+    assert parsed is not None
+    fqn, table, declared = parsed
+    assert fqn == "`c`.`s`.tricky"
+    assert table == "tricky"
+
+    names = [n for n, _def, _t in declared]
+    assert names == ["a", "b", "c", "d", "e"]  # comment/type commas did NOT split
+
+    types = {n: t for n, _def, t in declared}
+    assert types["a"] == "STRING"  # trailing COMMENT stripped from the type
+    assert types["b"] == "DECIMAL(10, 2)"
+    assert types["c"] == "MAP<STRING,STRING>"
+    assert types["d"] == "ARRAY<STRUCT<x:INT,y:STRING>>"
+
+    # the full def keeps the COMMENT verbatim, so a migrated column is identical.
+    a_def = next(full for n, full, _t in declared if n == "a")
+    assert "COMMENT 'has, a comma and (parens) and the word DROP'" in a_def
+
+
+def test_parse_create_table_returns_none_for_create_schema() -> None:
+    assert bootstrap_tables._parse_create_table("CREATE SCHEMA IF NOT EXISTS `c`.`s`") is None
+
+
+# -- the ALTER allowlist: only ADD COLUMNS may ever run -------------------
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "ALTER TABLE `c`.`s`.t ADD COLUMNS (a STRING, b INT)",
+        "ALTER TABLE `c`.`s`.t ADD COLUMNS (a STRING);",  # lone trailing ;
+        # forbidden words appear ONLY inside a COMMENT literal -> accepted.
+        "ALTER TABLE `c`.`s`.t ADD COLUMNS (a STRING COMMENT 'we never drop or rename this')",
+        # complex type with an inner comma inside the block.
+        "ALTER TABLE `c`.`s`.t ADD COLUMNS (m MAP<STRING,STRING>)",
+    ],
+)
+def test_is_add_columns_alter_accepts(statement: str) -> None:
+    assert bootstrap_tables._is_add_columns_alter(statement) is True
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DROP TABLE `c`.`s`.t",
+        "ALTER TABLE `c`.`s`.t DROP COLUMN a",
+        "ALTER TABLE `c`.`s`.t RENAME COLUMN a TO b",
+        "ALTER TABLE `c`.`s`.t ALTER COLUMN a TYPE STRING",
+        "ALTER TABLE `c`.`s`.t ADD COLUMN a STRING",  # singular COLUMN, not COLUMNS
+        "CREATE TABLE IF NOT EXISTS `c`.`s`.t (a STRING) USING DELTA",
+        # appended second statement after a valid ADD COLUMNS.
+        "ALTER TABLE `c`.`s`.t ADD COLUMNS (a STRING); DROP TABLE `c`.`s`.t",
+        # trailing clause after the ADD COLUMNS block.
+        "ALTER TABLE `c`.`s`.t ADD COLUMNS (a STRING) DROP COLUMN b",
+    ],
+)
+def test_is_add_columns_alter_rejects(statement: str) -> None:
+    assert bootstrap_tables._is_add_columns_alter(statement) is False
