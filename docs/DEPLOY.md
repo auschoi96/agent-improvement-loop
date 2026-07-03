@@ -593,10 +593,19 @@ the same `<EXPERIMENT_ID>` you deployed with.
 
 5. **Run the local companion** on a host that has the Claude Agent SDK (`.[claude]`).
    It plans (evidence → proposals) and, on your approval, executes and optionally
-   proves. See [`COMPANION.md`](COMPANION.md):
+   proves. See [`COMPANION.md`](COMPANION.md). One command does everything —
+   it mints a fresh static token from your CLI profile, exports the auth +
+   catalog/schema, and runs the poll loop durably (re-minting each cycle so a long
+   run survives OAuth token expiry):
    ```bash
-   python -m ail.companion poll --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>
+   ail-companion-start --profile <PROFILE> --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>
    ```
+   `--profile` is used only to mint the token; it is never passed to the companion
+   (which requires a static token and refuses OAuth). Add `--warehouse-id <ID>` to
+   forward the monitoring warehouse.
+
+   Manual/advanced path (export `DATABRICKS_HOST`/`DATABRICKS_TOKEN` + `AIL_CATALOG`/
+   `AIL_SCHEMA` yourself first): `python -m ail.companion poll --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>`.
 
 6. **Review + approve** in the app. Each proposal carries its evidence (judge + RLM
    + L0); you approve; the companion applies it — recorded in the lineage timeline
