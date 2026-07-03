@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from ail.companion import __main__ as companion
+from ail.companion import cli as companion
 
 
 def _auth_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,10 +39,11 @@ def test_execute_dispatch_reuses_agent_executor(monkeypatch: pytest.MonkeyPatch)
 
 
 class _Artifact:
-    n_tasks = 1
-    n_promote = 1
-    n_block = 0
-    n_errored = 0
+    def __init__(self, *, n_block: int = 0, n_errored: int = 0) -> None:
+        self.n_tasks = 1
+        self.n_promote = 0 if n_block or n_errored else 1
+        self.n_block = n_block
+        self.n_errored = n_errored
 
     def model_dump_json(self, *, indent: int) -> str:
         return f'{{"indent": {indent}}}'
@@ -80,6 +81,63 @@ def test_prove_dispatch_reuses_phase2_prover(
     assert calls[0]["adapter"] == "adapter"
     assert calls[0]["profile"] is None
     assert out.read_text(encoding="utf-8") == '{"indent": 2}'
+
+
+def test_prove_ignores_ambient_warehouse_without_experiment_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[dict[str, Any]] = []
+    _auth_ok(monkeypatch)
+    monkeypatch.setenv("AIL_WAREHOUSE_ID", "ambient-wh")
+    monkeypatch.setattr(companion, "load_task_suite", lambda version, root=None: "suite")
+    monkeypatch.setattr(companion, "_build_adapter", lambda args: "adapter")
+    monkeypatch.setattr(
+        companion,
+        "run_phase2_comparison",
+        lambda **kwargs: calls.append(kwargs) or _Artifact(),
+    )
+
+    code = companion.main(
+        [
+            "prove",
+            "--suite-version",
+            "phase2-mini",
+            "--output",
+            str(tmp_path / "phase2.json"),
+            "--host",
+            "https://example.databricks.com",
+        ]
+    )
+
+    assert code == 0
+    assert calls[0]["warehouse_id"] is None
+
+
+def test_prove_returns_nonzero_for_blocked_or_errored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _auth_ok(monkeypatch)
+    monkeypatch.setattr(companion, "load_task_suite", lambda version, root=None: "suite")
+    monkeypatch.setattr(companion, "_build_adapter", lambda args: "adapter")
+    monkeypatch.setattr(
+        companion,
+        "run_phase2_comparison",
+        lambda **kwargs: _Artifact(n_block=1, n_errored=1),
+    )
+
+    code = companion.main(
+        [
+            "prove",
+            "--suite-version",
+            "phase2-mini",
+            "--output",
+            str(tmp_path / "phase2.json"),
+            "--host",
+            "https://example.databricks.com",
+        ]
+    )
+
+    assert code == 2
 
 
 def test_poll_bounded_loop_runs_executor_and_planner_cadence(
@@ -146,6 +204,55 @@ def test_poll_no_pending_work_is_clean_noop(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert code == 0
     assert calls == 1
+
+
+def test_poll_real_executor_arg_construction_reaches_real_run_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DATABRICKS_HOST", "https://example.databricks.com")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "token")
+    registry = tmp_path / "agents.yaml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry.write_text(
+        "\n".join(
+            [
+                "agents:",
+                "  - agent_name: claude_code",
+                "    experiment_id: exp",
+                f"    target_workspace: {workspace}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        companion.agent_executor, "_build_workspace_client", lambda profile: object()
+    )
+    monkeypatch.setattr(companion.agent_executor, "_build_volume_client", lambda profile: object())
+
+    def _list(client: object, warehouse_id: str, **kwargs: Any) -> list[Any]:
+        calls.append((warehouse_id, kwargs["status"].value))
+        return []
+
+    monkeypatch.setattr(companion.agent_executor, "list_agent_task_proposals", _list)
+
+    code = companion.main(
+        [
+            "poll",
+            "--registry",
+            str(registry),
+            "--warehouse-id",
+            "wh",
+            "--volume-root",
+            "/Volumes/c/s/v",
+            "--max-iterations",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    assert calls == [("wh", "pending"), ("wh", "approved")]
 
 
 def test_missing_static_token_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:

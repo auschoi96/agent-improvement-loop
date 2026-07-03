@@ -131,6 +131,23 @@ The prover runs the baseline and candidate arms over the user's frozen suite and
 a Phase-2 artifact with PROMOTE/BLOCK/ERRORED outcomes. It is on-demand evidence for a
 candidate or proposal; it is not part of the automatic planning gate.
 
+`prove` does not inherit `AIL_WAREHOUSE_ID`. To attach monitoring warehouse
+provenance, pass both flags explicitly:
+
+```bash
+python -m ail.companion prove \
+  --suite-version phase2-mini \
+  --run-plan run_plan.yaml \
+  --experiment /Shared/my-agent-experiment \
+  --experiment-id <mlflow-experiment-id> \
+  --warehouse-id "$AIL_WAREHOUSE_ID" \
+  --output artifacts/phase2_companion.json
+```
+
+Exit code `0` means every task completed without BLOCK or ERRORED outcomes. Exit code
+`2` means at least one task BLOCKED or ERRORED; inspect the written artifact for the
+per-task result.
+
 ### `run`
 
 `run` is an alias for `poll`.
