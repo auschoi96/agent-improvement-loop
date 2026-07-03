@@ -51,14 +51,14 @@ from ail.loop.proposals import (
 from ail.optimize.gepa_runner import GepaOptimizationResult
 from ail.optimize.phase2 import Phase2Artifact
 from ail.optimize.prompt_registry import (
-    DEFAULT_CATALOG,
     DEFAULT_PROMPT_NAME,
-    DEFAULT_SCHEMA,
     PromptProvenance,
     PromptSource,
 )
 
-FULL_PROMPT_NAME = f"{DEFAULT_CATALOG}.{DEFAULT_SCHEMA}.{DEFAULT_PROMPT_NAME}"
+TEST_CATALOG = "test_catalog"
+TEST_SCHEMA = "test_schema"
+FULL_PROMPT_NAME = f"{TEST_CATALOG}.{TEST_SCHEMA}.{DEFAULT_PROMPT_NAME}"
 METRIC_VIEW_SQL = (
     "CREATE OR REPLACE VIEW `cat`.`sch`.`mv_token_waste`\n"
     "WITH METRICS\nLANGUAGE YAML\nAS $$\nversion: '1.1'\n$$"
@@ -321,6 +321,8 @@ def _run(
         lineage_recorder=seams.lineage,
         gate_recheck=seams.gate,
         body_resolver=body_resolver,
+        catalog=TEST_CATALOG,
+        schema=TEST_SCHEMA,
     )
 
 
