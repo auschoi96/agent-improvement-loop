@@ -336,6 +336,50 @@ def test_is_idempotent_create_rejects(statement: str) -> None:
     assert bootstrap_tables._is_idempotent_create(statement) is False
 
 
+def _main_is_idempotent_create(statement: str) -> bool:
+    """Byte-for-byte reproduction of main's PRE-REFACTOR ``_is_idempotent_create``.
+
+    Main stripped comments with a CASE-SENSITIVE ``re.sub(r"COMMENT '[^']*'", ...)``
+    applied to the already-``.upper()``-ed statement. The refactor to a shared
+    ``_COMMENT_LITERAL_RE`` added ``IGNORECASE`` and (on this branch) doubled-quote
+    -escape handling; the CREATE allowlist's verdict must not have shifted. This
+    oracle uses the module's OWN ``_ALLOWED_PREFIXES``/``_FORBIDDEN_VERBS`` (the
+    refactor left those untouched) so only the comment-strip differs.
+    """
+    normalized = " ".join(statement.split()).upper()
+    if not normalized.startswith(bootstrap_tables._ALLOWED_PREFIXES):
+        return False
+    stripped = re.sub(r"COMMENT '[^']*'", "", normalized)
+    single = stripped[:-1].rstrip() if stripped.endswith(";") else stripped
+    if ";" in single:
+        return False
+    body = f" {single} "
+    return not any(verb in body for verb in bootstrap_tables._FORBIDDEN_VERBS)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # Mixed-case `comment` carrying a forbidden verb — the literal Finding 2
+        # calls out. Main upper-cases before the (case-sensitive) match, so it
+        # strips the comment and ACCEPTS; the guard must produce the same verdict.
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) comment 'we drop nothing'",
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING) CoMmEnT 'please replace me'",
+        # Doubled-quote escape + an interior ';': main's `[^']*` stops at the first
+        # quote and (falsely) REJECTS on the leftover ';'. The CREATE guard must
+        # reproduce that verdict — i.e. it must NOT inherit the shared regex's
+        # doubled-quote fix (which would strip the whole comment and ACCEPT).
+        "CREATE TABLE IF NOT EXISTS `cat`.`sch`.t (a STRING COMMENT 'owner''s; note')",
+    ],
+)
+def test_is_idempotent_create_matches_pre_refactor_verdict(statement: str) -> None:
+    # Provably identical to main: the guard agrees with the pre-refactor oracle on
+    # every statement, so the shared-regex refactor did not shift the allowlist.
+    assert bootstrap_tables._is_idempotent_create(statement) == _main_is_idempotent_create(
+        statement
+    )
+
+
 # ==========================================================================
 # Additive column reconciliation
 # ==========================================================================
@@ -575,6 +619,32 @@ def test_parse_create_table_handles_comments_and_complex_types() -> None:
     # the full def keeps the COMMENT verbatim, so a migrated column is identical.
     a_def = next(full for n, full, _t in declared if n == "a")
     assert "COMMENT 'has, a comma and (parens) and the word DROP'" in a_def
+
+
+def test_parse_create_table_handles_doubled_quote_escape_in_comment() -> None:
+    # SQL escapes a literal single-quote inside a string by DOUBLING it (`''`).
+    # The comment-literal regex must span the whole `COMMENT 'owner''s, note'`
+    # (through the `''` escape) so its interior comma can't be read as a top-level
+    # column separator and mis-split `note` into bogus columns.
+    create = (
+        "CREATE TABLE IF NOT EXISTS `c`.`s`.t (\n"
+        "  note STRING COMMENT 'owner''s, note',\n"
+        "  b INT\n"
+        ") USING DELTA"
+    )
+    parsed = bootstrap_tables._parse_create_table(create)
+    assert parsed is not None
+    _fqn, _table, declared = parsed
+
+    names = [n for n, _def, _t in declared]
+    assert names == ["note", "b"]  # the escaped-quote comment's comma did NOT split
+
+    types = {n: t for n, _def, t in declared}
+    assert types["note"] == "STRING"  # whole COMMENT (incl. '' escape) stripped from the type
+
+    # the full def keeps the escaped comment verbatim, so a migrated column is identical.
+    note_def = next(full for n, full, _t in declared if n == "note")
+    assert "COMMENT 'owner''s, note'" in note_def
 
 
 def test_parse_create_table_returns_none_for_create_schema() -> None:

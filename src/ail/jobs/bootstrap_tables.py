@@ -110,13 +110,25 @@ _ALLOWED_PREFIXES: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS ",
 )
 
-#: A ``COMMENT '...'`` string literal. Column/table comments may legitimately
-#: contain commas, parens, quotes, and words like "drop"/"replace" in prose, so
-#: this literal is stripped before any structural check (single-statement,
-#: forbidden-verb, top-level-comma split) so that prose can never trip it. Shared
-#: by :func:`_is_idempotent_create` (CREATE allowlist) and the column parser
-#: (:func:`_parse_create_table`) so both handle comments identically.
-_COMMENT_LITERAL_RE = re.compile(r"COMMENT '[^']*'", re.IGNORECASE)
+#: A ``COMMENT '...'`` string literal, matched INCLUDING SQL's doubled-single-
+#: quote escape (``''``) — so the whole of e.g. ``COMMENT 'owner''s, note'`` is
+#: one match and its interior commas/quotes/prose can never trip a structural
+#: check. Column/table comments may legitimately contain commas, parens, quotes,
+#: and words like "drop"/"replace", so this literal is stripped/masked before the
+#: top-level-comma column split (:func:`_split_top_level_columns`), the per-column
+#: type extraction (:func:`_parse_column_def`), and the reconcile ALTER guard
+#: (:func:`_is_add_columns_alter`). The CREATE guard (:func:`_is_idempotent_create`)
+#: deliberately does NOT use this — it keeps its own :data:`_CREATE_COMMENT_LITERAL_RE`
+#: so its accept/reject verdict stays byte-for-byte identical to the pre-refactor code.
+_COMMENT_LITERAL_RE = re.compile(r"COMMENT '(?:[^']|'')*'", re.IGNORECASE)
+
+#: The CREATE guard's OWN comment strip, kept SEPARATE from :data:`_COMMENT_LITERAL_RE`.
+#: :func:`_is_idempotent_create` applies this to the already-``.upper()``-ed statement,
+#: exactly as the pre-refactor code did, so its allowlist verdict is provably unchanged:
+#: it neither inherits ``IGNORECASE`` (a no-op on upper-cased text) nor the shared
+#: regex's doubled-quote-escape handling. Case-sensitive and single-quote-terminated,
+#: matching main's original ``re.sub(r"COMMENT '[^']*'", ...)`` verbatim.
+_CREATE_COMMENT_LITERAL_RE = re.compile(r"COMMENT '[^']*'")
 
 #: Destructive/mutating verbs that must never appear in a bootstrap statement's
 #: body. ``CREATE OR REPLACE`` is already caught by the prefix check; `` REPLACE ``
@@ -156,7 +168,9 @@ def _is_idempotent_create(statement: str) -> bool:
     # Strip COMMENT '...' string literals FIRST, so prose (which legitimately may
     # contain ';', 'drop', 'replace', ... — e.g. "...PROMOTE traces; cost
     # ESTIMATE.") can't trip the single-statement or forbidden-verb checks below.
-    stripped = _COMMENT_LITERAL_RE.sub("", normalized)
+    # Uses the CREATE guard's OWN case-sensitive strip (not the shared
+    # _COMMENT_LITERAL_RE) so this allowlist's verdict is identical to pre-refactor.
+    stripped = _CREATE_COMMENT_LITERAL_RE.sub("", normalized)
 
     # Single statement only: drop one optional trailing ';'; any other ';'
     # introduces a second (possibly destructive) statement -> reject.
