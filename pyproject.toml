@@ -57,6 +57,18 @@ ail-author-judge = "ail.jobs.author_judge:main"
 # Register the built-in scheduled scorers against an explicit experiment. Thin CLI
 # over ail.judges.registration.register_scorers; no experiment/workspace default.
 ail-register-scorers = "ail.jobs.register_scorers_job:main"
+# Suite builder (L8), draft half: `ail-suite-scaffold --experiment <id>` drafts YOUR OWN
+# Task Suite from YOUR OWN traces — stratifies by L0 (token/tool-call distribution), derives
+# a prompt per representative trace, and writes an UNFROZEN draft plus a companion checks.yaml
+# of placeholders a human must author. Reuses ail.task_suite + ail.ingest + ail.metrics.
+# NEVER fabricates a success check; NEVER freezes (short read-only trace read, takes --profile).
+ail-suite-scaffold = "ail.jobs.suite_scaffold:main"
+# Suite builder (L8), freeze half: `ail-suite-freeze <tasks.yaml>` seals a drafted suite.
+# FAIL-CLOSED — refuses (non-zero, names the tasks, freezes nothing) if any success check in
+# checks.yaml is still empty or the scaffold placeholder, forcing human authoring. Otherwise
+# freezes via the existing TaskSuite.freeze()+save and confirms the sealed artifact reloads
+# with a passing integrity check.
+ail-suite-freeze = "ail.jobs.suite_freeze:main"
 # Standalone SCHEDULED L3/RLM deep-reviewer (resources/continuous_rlm.job.yml): a
 # bounded runner that idempotently attaches rlm_* feedback only to sampled traces
 # without RLM assessments, on the most powerful viable judge (databricks-gpt-5-5-pro)
