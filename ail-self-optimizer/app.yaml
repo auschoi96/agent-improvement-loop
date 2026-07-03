@@ -2,6 +2,14 @@ command: ['npm', 'run', 'start']
 env:
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
+  - name: AIL_CATALOG
+    value: ${var.catalog}
+  - name: AIL_SCHEMA
+    value: ${var.schema}
+  - name: AIL_APPLY_CATALOG
+    value: ${var.catalog}
+  - name: AIL_APPLY_SCHEMA
+    value: ${var.schema}
   # Select the Job-trigger apply transport (Phase C lane 3b). Generic literal,
   # correct for every deployment — subprocess is the default otherwise, but the
   # Node-only deployed image can't spawn the Python engine, so it must be `job`.

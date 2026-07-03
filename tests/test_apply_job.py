@@ -26,8 +26,17 @@ from ail.jobs.apply_job import APPLY_RESULTS_TABLE, main, write_apply_result
 from ail.loop import apply_service
 from ail.loop.apply import DecisionKind
 from ail.loop.apply_service import ApplyServiceOutcome, ApplyServiceResult, run_decision
+from ail.workspace_config import CATALOG_ENV, SCHEMA_ENV
 
 DECIDED_AT = "2026-06-30T12:00:00+00:00"
+TEST_CATALOG = "test_catalog"
+TEST_SCHEMA = "test_schema"
+
+
+@pytest.fixture(autouse=True)
+def _configured_test_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(CATALOG_ENV, TEST_CATALOG)
+    monkeypatch.setenv(SCHEMA_ENV, TEST_SCHEMA)
 
 
 def _result(

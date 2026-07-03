@@ -34,8 +34,17 @@ from ail.optimize.prompt_registry import (
     resolve_prompt_name,
     search_registered_prompts,
 )
+from ail.workspace_config import CATALOG_ENV, SCHEMA_ENV
 
-EXPECTED_FULL_NAME = f"{DEFAULT_CATALOG}.{DEFAULT_SCHEMA}.{DEFAULT_PROMPT_NAME}"
+TEST_CATALOG = "test_catalog"
+TEST_SCHEMA = "test_schema"
+EXPECTED_FULL_NAME = f"{TEST_CATALOG}.{TEST_SCHEMA}.{DEFAULT_PROMPT_NAME}"
+
+
+@pytest.fixture(autouse=True)
+def _configured_test_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(CATALOG_ENV, TEST_CATALOG)
+    monkeypatch.setenv(SCHEMA_ENV, TEST_SCHEMA)
 
 
 # ---------------------------------------------------------------------------
