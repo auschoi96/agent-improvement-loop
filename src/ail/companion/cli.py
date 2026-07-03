@@ -26,7 +26,13 @@ from ail.ingest.adapters.claude_code import ClaudeCodeAdapter
 from ail.ingest.adapters.codex import CodexAdapter
 from ail.ingest.base import AgentAdapter
 from ail.jobs import agent_executor, companion_planner
+from ail.loop.verify_service import (
+    run_verify_tick,
+    select_pending_verify_requests,
+    write_verify_result,
+)
 from ail.optimize import VerifySpec, run_phase2_comparison
+from ail.publish import _build_workspace_client
 from ail.task_suite.loader import DEFAULT_ARTIFACT_VERSION, load_task_suite
 
 _TAG = "[ail.companion]"
@@ -183,6 +189,27 @@ def _poll_parser() -> argparse.ArgumentParser:
         help="Run planner every N poll iterations; 0 disables planning in the loop.",
     )
     parser.add_argument("--experiment", default=None, help="Planner experiment id.")
+    # In-app opt-in Tier-2 "verify on my suite" (L9): each enabled tick, pick up the
+    # proposals a reviewer flagged for a frozen-suite proof and run the EXISTING prover
+    # (run_phase2_comparison) on them, writing the result back to UC keyed to the
+    # proposal. Opt-in: disabled by default (0) — the deployer turns it on.
+    parser.add_argument(
+        "--verify-every",
+        type=int,
+        default=0,
+        metavar="ITERATIONS",
+        help="Run the in-app verify-request handler every N poll iterations; "
+        "0 disables 'verify on my suite'.",
+    )
+    parser.add_argument("--suite-version", default=DEFAULT_ARTIFACT_VERSION)
+    parser.add_argument("--suite-root", type=Path, default=None)
+    parser.add_argument("--run-plan", type=Path, default=None)
+    parser.add_argument("--fixtures-root", type=Path, default=None)
+    parser.add_argument("--adapter", choices=["claude_code", "codex"], default="claude_code")
+    parser.add_argument("--allowed-tool", action="append", default=None, dest="allowed_tools")
+    parser.add_argument("--codex-command", default="codex")
+    parser.add_argument("--codex-home", type=Path, default=None)
+    parser.add_argument("--codex-arg", action="append", default=None)
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--planner-model", default=None)
     parser.add_argument("--objective-metric", default="total_tokens")
@@ -273,6 +300,70 @@ def _planner_argv(args: argparse.Namespace) -> list[str]:
     return argv
 
 
+def _run_verify_once(args: argparse.Namespace, *, client: Any, warehouse_id: str) -> None:
+    """Wire the live seams and run one in-app verify-request tick (fail-soft).
+
+    Reuses the existing frozen-suite prover (:func:`run_phase2_comparison`) — proving
+    is never reimplemented here. An idle tick only runs the SELECT (cheap); the suite
+    and adapter are loaded and the prover runs only when a request is present. Each
+    request's terminal state (verified / blocked / errored / no_suite) is written
+    honestly by :func:`run_verify_tick`; this outer guard only stops an infra hiccup
+    (e.g. a pre-migration table missing the verify_* columns) from crashing the poll.
+    """
+
+    def _select() -> list[dict[str, Any]]:
+        return select_pending_verify_requests(
+            client=client,
+            warehouse_id=warehouse_id,
+            agent_name=args.agent,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
+
+    def _load_suite() -> Any:
+        return load_task_suite(args.suite_version, root=args.suite_root)
+
+    def _prove(suite: Any) -> Any:
+        return run_phase2_comparison(
+            suite=suite,
+            adapter=_build_adapter(args),
+            verify_specs=_load_run_plan(args.run_plan),
+            config=ComparisonConfig(objective_metric=args.objective_metric),
+            experiment=args.experiment,
+            profile=None,
+            warehouse_id=warehouse_id,
+            fixtures_root=args.fixtures_root,
+        )
+
+    def _write(**kwargs: Any) -> None:
+        write_verify_result(
+            client=client,
+            warehouse_id=warehouse_id,
+            agent_name=args.agent,
+            catalog=args.catalog,
+            schema=args.schema,
+            **kwargs,
+        )
+
+    try:
+        summary = run_verify_tick(
+            agent_name=args.agent,
+            select_requested=_select,
+            load_suite=_load_suite,
+            run_prover=_prove,
+            write_result=_write,
+        )
+    except Exception as exc:  # noqa: BLE001 - a verify infra hiccup must not crash the executor poll
+        print(f"{_TAG} verify tick skipped ({type(exc).__name__}: {exc})")
+        return
+    if summary.n_requested:
+        print(
+            f"{_TAG} verify tick: {summary.n_requested} request(s) -> "
+            f"{summary.n_verified} verified / {summary.n_blocked} blocked / "
+            f"{summary.n_errored} errored / {summary.n_no_suite} no-suite"
+        )
+
+
 def run_poll(argv: list[str]) -> int:
     parser = _poll_parser()
     args = parser.parse_args(argv)
@@ -282,10 +373,24 @@ def run_poll(argv: list[str]) -> int:
         parser.error("--interval-seconds must be >= 0")
     if args.plan_every < 0:
         parser.error("--plan-every must be >= 0")
+    if args.verify_every < 0:
+        parser.error("--verify-every must be >= 0")
 
     exec_args = agent_executor._parse_args(_executor_argv(args))
     plan_args = companion_planner._parse_args(_planner_argv(args)) if args.plan_every else None
     _auth(exec_args)
+
+    # Opt-in Tier-2 verify polling: build the workspace client once, up front. Fail
+    # closed on a missing warehouse — never silently drop verify requests.
+    verify_client: Any | None = None
+    verify_warehouse = args.warehouse_id or os.environ.get("DATABRICKS_WAREHOUSE_ID")
+    if args.verify_every:
+        if not verify_warehouse:
+            print(
+                f"{_TAG} verify disabled — no warehouse id (set --warehouse-id or AIL_WAREHOUSE_ID)"
+            )
+        else:
+            verify_client = _build_workspace_client(None)
 
     exit_code = 0
     for iteration in range(1, args.max_iterations + 1):
@@ -293,6 +398,9 @@ def run_poll(argv: list[str]) -> int:
         if plan_args is not None and (iteration - 1) % args.plan_every == 0:
             exit_code = max(exit_code, companion_planner.run(plan_args))
         exit_code = max(exit_code, agent_executor.run(exec_args))
+        run_verify = verify_client is not None and (iteration - 1) % args.verify_every == 0
+        if run_verify and verify_warehouse:
+            _run_verify_once(args, client=verify_client, warehouse_id=verify_warehouse)
         if iteration < args.max_iterations:
             time.sleep(args.interval_seconds)
     return exit_code
