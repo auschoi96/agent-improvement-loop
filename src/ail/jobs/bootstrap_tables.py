@@ -41,6 +41,7 @@ steps already carry (see :mod:`ail.jobs.bootstrap_grants`).
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -109,6 +110,26 @@ _ALLOWED_PREFIXES: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS ",
 )
 
+#: A ``COMMENT '...'`` string literal, matched INCLUDING SQL's doubled-single-
+#: quote escape (``''``) — so the whole of e.g. ``COMMENT 'owner''s, note'`` is
+#: one match and its interior commas/quotes/prose can never trip a structural
+#: check. Column/table comments may legitimately contain commas, parens, quotes,
+#: and words like "drop"/"replace", so this literal is stripped/masked before the
+#: top-level-comma column split (:func:`_split_top_level_columns`), the per-column
+#: type extraction (:func:`_parse_column_def`), and the reconcile ALTER guard
+#: (:func:`_is_add_columns_alter`). The CREATE guard (:func:`_is_idempotent_create`)
+#: deliberately does NOT use this — it keeps its own :data:`_CREATE_COMMENT_LITERAL_RE`
+#: so its accept/reject verdict stays byte-for-byte identical to the pre-refactor code.
+_COMMENT_LITERAL_RE = re.compile(r"COMMENT '(?:[^']|'')*'", re.IGNORECASE)
+
+#: The CREATE guard's OWN comment strip, kept SEPARATE from :data:`_COMMENT_LITERAL_RE`.
+#: :func:`_is_idempotent_create` applies this to the already-``.upper()``-ed statement,
+#: exactly as the pre-refactor code did, so its allowlist verdict is provably unchanged:
+#: it neither inherits ``IGNORECASE`` (a no-op on upper-cased text) nor the shared
+#: regex's doubled-quote-escape handling. Case-sensitive and single-quote-terminated,
+#: matching main's original ``re.sub(r"COMMENT '[^']*'", ...)`` verbatim.
+_CREATE_COMMENT_LITERAL_RE = re.compile(r"COMMENT '[^']*'")
+
 #: Destructive/mutating verbs that must never appear in a bootstrap statement's
 #: body. ``CREATE OR REPLACE`` is already caught by the prefix check; `` REPLACE ``
 #: is kept here for defense-in-depth.
@@ -147,7 +168,9 @@ def _is_idempotent_create(statement: str) -> bool:
     # Strip COMMENT '...' string literals FIRST, so prose (which legitimately may
     # contain ';', 'drop', 'replace', ... — e.g. "...PROMOTE traces; cost
     # ESTIMATE.") can't trip the single-statement or forbidden-verb checks below.
-    stripped = re.sub(r"COMMENT '[^']*'", "", normalized)
+    # Uses the CREATE guard's OWN case-sensitive strip (not the shared
+    # _COMMENT_LITERAL_RE) so this allowlist's verdict is identical to pre-refactor.
+    stripped = _CREATE_COMMENT_LITERAL_RE.sub("", normalized)
 
     # Single statement only: drop one optional trailing ';'; any other ';'
     # introduces a second (possibly destructive) statement -> reject.
@@ -231,3 +254,347 @@ def ensure_app_tables(
     for statement in statements:
         _execute(client, warehouse_id, statement)
     return sorted(APP_QUERY_TABLES)
+
+
+# ---------------------------------------------------------------------------
+# Additive column reconciliation
+# ---------------------------------------------------------------------------
+#
+# Why this exists (a real incident this permanently prevents)
+# -----------------------------------------------------------
+# ``ensure_app_tables`` runs ``CREATE TABLE IF NOT EXISTS`` — which never adds a
+# column to a table that already exists. When a writer adds columns to its
+# ``_ddl()`` (L7b-1 added ``change_plan``/``change_preview_diff``/
+# ``change_produced_change_ref``; L9 added the six ``verify_*`` columns to
+# ``agent_proposed_actions``), deploying that schema-additive version OVER an
+# existing workspace leaves the new columns missing on the pre-existing table.
+# AppKit typegen's live ``DESCRIBE QUERY`` then fails on the missing column, the
+# app build fails, and the running app goes UNAVAILABLE — the same failure mode
+# ``ensure_app_tables`` prevents for a *fresh* table, but for an *upgrade*.
+#
+# This step closes that gap without any manual DDL and without a general
+# migration framework: for every ``CREATE TABLE`` a writer ``_ddl()`` emits, it
+# diffs the DECLARED columns against the LIVE columns and, for a pre-existing
+# table, emits exactly one ``ALTER TABLE ... ADD COLUMNS (...)`` for the missing
+# ones — nothing else.
+#
+# Fail-closed discipline (separate from the CREATE allowlist)
+# -----------------------------------------------------------
+# * ADD COLUMNS ONLY. This path never DROPs, RENAMEs, or ALTERs a column type; a
+#   genuine type conflict fails LOUD (raises), it is never auto-"fixed".
+# * Its own allowlist. The only statement shape this path may execute is
+#   ``ALTER TABLE <fqn> ADD COLUMNS (...)``, enforced by :func:`_is_add_columns_alter`
+#   at runtime before anything executes. It does NOT route through
+#   :func:`_is_idempotent_create` (which still bans ``ALTER`` for the CREATE path).
+# * Idempotent + fail-closed ordering. Diff-driven, so a re-run on an
+#   already-migrated table emits zero ALTERs; it runs AFTER the CREATEs (a just
+#   -created fresh table trivially has every column -> no-op) and BEFORE the app
+#   build (see :mod:`ail.jobs.bootstrap_grants`). All ALTERs are validated as a
+#   set before ANY executes — never a partial/malformed apply.
+
+#: The only statement shape the reconcile path may execute. ``\S+`` for the fully
+#: -qualified table name means no whitespace-delimited clause (e.g. a smuggled
+#: `` DROP ``) can hide in it, and the anchored trailing ``\)`` means nothing may
+#: follow the ADD COLUMNS block. ``DOTALL`` lets a column def span the (collapsed
+#: -to-single-space) block. Validated on the COMMENT-stripped statement.
+_ADD_COLUMNS_ALTER_RE = re.compile(r"ALTER TABLE \S+ ADD COLUMNS \(.+\)", re.IGNORECASE | re.DOTALL)
+
+#: Verbs that must never appear in a reconcile ALTER's (comment-stripped) body —
+#: defense-in-depth beyond the shape regex. `` ALTER `` itself is intentionally
+#: absent (``ALTER TABLE`` is the required prefix); a second ``ALTER COLUMN`` is
+#: caught by `` ALTER COLUMN `` / the anchored shape instead.
+_FORBIDDEN_ALTER_VERBS: tuple[str, ...] = (
+    " DROP ",
+    " RENAME ",
+    " ALTER COLUMN ",
+    " CHANGE ",
+    " REPLACE ",
+    " SET ",
+    " TRUNCATE ",
+    " DELETE ",
+    " INSERT ",
+    " UPDATE ",
+    " MERGE ",
+)
+
+
+def _is_add_columns_alter(statement: str) -> bool:
+    """True iff ``statement`` is exactly one ``ALTER TABLE <fqn> ADD COLUMNS (...)``.
+
+    The reconcile path's OWN allowlist — deliberately separate from
+    :func:`_is_idempotent_create`, which governs the CREATE path and still bans
+    ``ALTER``. After whitespace-collapse and stripping ``COMMENT '...'`` literals
+    (so comment prose can't trip the checks) the statement must satisfy ALL of:
+
+    * **single statement** — one optional trailing ``;`` allowed; any other ``;``
+      (a second, possibly destructive, appended statement) is rejected;
+    * **exact shape** — full-match :data:`_ADD_COLUMNS_ALTER_RE`, so a bare
+      ``ADD COLUMN`` (singular), ``ALTER COLUMN``, ``DROP``/``RENAME``, or any
+      trailing clause after the ``(...)`` block is rejected; and
+    * **clean body** — no verb in :data:`_FORBIDDEN_ALTER_VERBS`.
+    """
+    normalized = " ".join(statement.split())
+    body = normalized[:-1].rstrip() if normalized.endswith(";") else normalized
+    stripped = _COMMENT_LITERAL_RE.sub("", body)
+    if ";" in stripped:
+        return False
+    if not _ADD_COLUMNS_ALTER_RE.fullmatch(stripped):
+        return False
+    padded = f" {stripped.upper()} "
+    return not any(verb in padded for verb in _FORBIDDEN_ALTER_VERBS)
+
+
+def _split_top_level_columns(column_block: str) -> list[str]:
+    """Split a ``CREATE TABLE`` column block on TOP-LEVEL commas only.
+
+    ``column_block`` is the text between the outer ``(`` and its matching ``)``.
+    Commas inside a ``COMMENT '...'`` literal or inside a nested type
+    (``DECIMAL(10,2)``, ``MAP<STRING,STRING>``, ``ARRAY<...>``, ``STRUCT<...>``)
+    must NOT split. Comment literals are masked to equal-length spaces (indices
+    stay aligned) so the returned substrings still carry their original
+    ``COMMENT`` text verbatim; the scan then splits only on commas seen at paren
+    /angle-bracket depth zero in the masked view.
+    """
+    masked = _COMMENT_LITERAL_RE.sub(lambda m: " " * len(m.group()), column_block)
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(masked):
+        if ch in "(<":
+            depth += 1
+        elif ch in ")>":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(column_block[start:i])
+            start = i + 1
+    parts.append(column_block[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+#: First tokens that mark a TABLE-level constraint (not a column) in a column
+#: block. None of the writer ``_ddl()`` producers emit these today, but skipping
+#: them defensively keeps a future constraint from being mis-read as a column and
+#: turned into a bogus ``ADD COLUMNS`` entry.
+_CONSTRAINT_LEADERS: frozenset[str] = frozenset(
+    {"PRIMARY", "FOREIGN", "UNIQUE", "CONSTRAINT", "CHECK"}
+)
+
+
+def _parse_column_def(column_def: str) -> tuple[str, str, str] | None:
+    """``(name, full_def, type)`` for one column def, or ``None`` for a constraint.
+
+    ``full_def`` is the whole (whitespace-collapsed) definition — name + type +
+    any ``COMMENT '...'`` — so a migrated column is emitted byte-for-byte as the
+    writer declared it. ``type`` is the definition minus the name and minus the
+    trailing ``COMMENT`` literal, used only for the conservative conflict check.
+    """
+    if column_def.startswith("`"):
+        end = column_def.find("`", 1)
+        if end == -1:
+            return None
+        name = column_def[1:end]
+        remainder = column_def[end + 1 :].strip()
+    else:
+        head, _, tail = column_def.partition(" ")
+        name = head
+        remainder = tail.strip()
+    if not name or name.upper() in _CONSTRAINT_LEADERS:
+        return None
+    type_str = _COMMENT_LITERAL_RE.sub("", remainder).strip()
+    return name, column_def, type_str
+
+
+def _parse_create_table(statement: str) -> tuple[str, str, list[tuple[str, str, str]]] | None:
+    """Parse ``(fqn, table_name, [(name, full_def, type), ...])`` from a CREATE TABLE.
+
+    Returns ``None`` for anything that is not a ``CREATE TABLE IF NOT EXISTS`` (a
+    ``CREATE SCHEMA``, say) so callers can iterate the full producer output and
+    reconcile only the tables. Whitespace is collapsed first; the outer column
+    ``(...)`` is located by quote-aware paren matching (so a ``)`` inside a
+    ``COMMENT`` literal or a ``DECIMAL(10,2)`` type does not close it early).
+    """
+    collapsed = " ".join(statement.split())
+    m = re.match(r"CREATE TABLE IF NOT EXISTS\s+(\S+)\s*\(", collapsed, re.IGNORECASE)
+    if not m:
+        return None
+    fqn = m.group(1)
+    table_name = fqn.rsplit(".", 1)[-1].strip("`")
+
+    open_idx = m.end() - 1
+    depth = 0
+    in_str = False
+    close_idx = -1
+    for i in range(open_idx, len(collapsed)):
+        ch = collapsed[i]
+        if in_str:
+            if ch == "'":
+                in_str = False
+            continue
+        if ch == "'":
+            in_str = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close_idx = i
+                break
+    if close_idx == -1:
+        raise ValueError(f"unbalanced parentheses in CREATE TABLE for {fqn}")
+
+    column_block = collapsed[open_idx + 1 : close_idx]
+    declared: list[tuple[str, str, str]] = []
+    for column_def in _split_top_level_columns(column_block):
+        parsed = _parse_column_def(column_def)
+        if parsed is not None:
+            declared.append(parsed)
+    return fqn, table_name, declared
+
+
+def _normalize_type(type_str: str) -> str:
+    """Conservative type normalization for the conflict check: casefold + drop all
+    whitespace.
+
+    Deliberately minimal so a benign spelling/spacing diff (``STRING`` vs
+    ``string``, ``BIGINT`` vs ``bigint``, ``DECIMAL(10, 2)`` vs ``decimal(10,2)``)
+    is NOT flagged and does not needlessly break an upgrade deploy. It does NOT
+    canonicalize type aliases — only a genuinely different type text raises.
+    """
+    return "".join(type_str.split()).casefold()
+
+
+def _read_rows(client: Any, warehouse_id: str, statement: str) -> list[dict[str, Any]]:
+    """Run a SELECT and return rows as ``{column: value}`` dicts.
+
+    Mirrors :func:`ail.publish._execute`'s wait loop but reads the result set. A
+    response with no manifest/result (e.g. a table with no matching rows) yields
+    ``[]`` — treated by the caller as "table not present, nothing to reconcile".
+    """
+    from databricks.sdk.service.sql import StatementState
+
+    resp = client.statement_execution.execute_statement(
+        warehouse_id=warehouse_id, statement=statement, wait_timeout="50s"
+    )
+    statement_id = resp.statement_id
+    state = resp.status.state if resp.status else None
+    while state in (StatementState.PENDING, StatementState.RUNNING):
+        time.sleep(1.0)
+        resp = client.statement_execution.get_statement(statement_id)
+        state = resp.status.state if resp.status else None
+    if state != StatementState.SUCCEEDED:
+        detail = ""
+        if resp.status and resp.status.error:
+            detail = f": {resp.status.error.message}"
+        raise RuntimeError(f"statement {state}{detail}\nSQL head: {statement[:300]}")
+
+    manifest = getattr(resp, "manifest", None)
+    result = getattr(resp, "result", None)
+    columns = [c.name for c in manifest.schema.columns] if manifest and manifest.schema else []
+    data = result.data_array if result and result.data_array else []
+    return [dict(zip(columns, row, strict=False)) for row in data]
+
+
+def _live_column_types(
+    client: Any, warehouse_id: str, *, catalog: str, schema: str, table: str
+) -> dict[str, str]:
+    """LIVE ``{column_name: full_data_type}`` for one table, ``{}`` if it is absent.
+
+    Reads ``information_schema.columns`` (which returns zero rows for a
+    nonexistent table — no error), so an empty mapping unambiguously means "not
+    present". Names are lower-cased for case-insensitive diffing.
+    """
+    query = (
+        "SELECT column_name, full_data_type FROM "
+        f"`{catalog}`.information_schema.columns "
+        f"WHERE LOWER(table_schema) = LOWER('{_escape_sql_literal(schema)}') "
+        f"AND LOWER(table_name) = LOWER('{_escape_sql_literal(table)}')"
+    )
+    live: dict[str, str] = {}
+    for row in _read_rows(client, warehouse_id, query):
+        name = row.get("column_name")
+        full_type = row.get("full_data_type")
+        if name is not None and full_type is not None:
+            live[str(name).lower()] = str(full_type)
+    return live
+
+
+def _escape_sql_literal(value: str) -> str:
+    """Escape a value for use inside a single-quoted SQL string literal."""
+    return value.replace("'", "''")
+
+
+def _missing_column_defs(
+    fqn: str, declared: list[tuple[str, str, str]], live: dict[str, str]
+) -> list[str]:
+    """Full defs of DECLARED columns absent LIVE; raises on an unreconcilable type
+    conflict.
+
+    Additive-only: a declared column missing live is returned for ``ADD COLUMNS``;
+    a declared column present live with a genuinely different (normalized) type is
+    a conflict this refuses to auto-fix — it raises :class:`ValueError` naming the
+    table, column, and declared-vs-live types. A live-only column (not declared)
+    is left untouched.
+    """
+    missing: list[str] = []
+    for name, full_def, type_str in declared:
+        key = name.lower()
+        if key not in live:
+            missing.append(full_def)
+            continue
+        if _normalize_type(type_str) != _normalize_type(live[key]):
+            raise ValueError(
+                f"schema drift on {fqn} column {name!r}: declared type {type_str!r} "
+                f"conflicts with live type {live[key]!r}. Additive reconciliation refuses "
+                "to ALTER/DROP a column type — resolve this drift manually."
+            )
+    return missing
+
+
+def reconcile_app_table_columns(
+    client: Any,
+    warehouse_id: str,
+    *,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+) -> list[str]:
+    """Additively migrate each app table's columns to its writer-declared schema.
+
+    For every ``CREATE TABLE`` a writer ``_ddl()`` emits, diff the DECLARED
+    columns against the table's LIVE columns and, for a PRE-EXISTING table missing
+    some, emit exactly one ``ALTER TABLE <fqn> ADD COLUMNS (<missing full defs>)``.
+    This closes the ``CREATE TABLE IF NOT EXISTS``-never-adds-columns gap that
+    takes a running app UNAVAILABLE on a schema-additive upgrade deploy.
+
+    Fail-closed and additive-only (see the section comment above): tables absent
+    live are skipped (the CREATE already handles a fresh table); a type conflict
+    raises; every emitted statement is validated by :func:`_is_add_columns_alter`
+    as a set BEFORE any executes; and it is idempotent — an already-migrated table
+    produces no ALTER. Returns the ALTER statements executed (empty on a no-op).
+    """
+    alters: list[str] = []
+    for statement in table_ensure_statements(catalog, schema):
+        parsed = _parse_create_table(statement)
+        if parsed is None:
+            continue  # CREATE SCHEMA (or non-CREATE-TABLE) — nothing to reconcile
+        fqn, table_name, declared = parsed
+        live = _live_column_types(
+            client, warehouse_id, catalog=catalog, schema=schema, table=table_name
+        )
+        if not live:
+            continue  # table not present yet — the CREATE in ensure_app_tables handled it
+        missing = _missing_column_defs(fqn, declared, live)
+        if missing:
+            alters.append(f"ALTER TABLE {fqn} ADD COLUMNS ({', '.join(missing)})")
+
+    # Fail-closed: validate the FULL set against the ADD COLUMNS allowlist before
+    # executing ANY — a single malformed statement means nothing runs.
+    violations = [alter for alter in alters if not _is_add_columns_alter(alter)]
+    if violations:
+        detail = "; ".join(repr(alter[:120]) for alter in violations)
+        raise ValueError(
+            f"refusing to run non-'ALTER TABLE ... ADD COLUMNS' reconcile statement(s): {detail}"
+        )
+
+    for alter in alters:
+        _execute(client, warehouse_id, alter)
+    return alters

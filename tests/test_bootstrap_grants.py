@@ -200,9 +200,15 @@ def test_bootstrap_creates_grants_and_tags(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.warehouse_id == "wh-explicit"
     assert result.warehouse_created is False
     assert result.granted_sp_id == "sp-9"
-    # table-ensure ran against the resolved warehouse, only CREATE ... IF NOT EXISTS
-    assert stmts.statements, "bootstrap must issue the table-ensure DDL"
-    assert all("IF NOT EXISTS" in s for s in stmts.statements)
+    # table-ensure ran against the resolved warehouse; every CREATE is idempotent.
+    create_stmts = [s for s in stmts.statements if s.strip().upper().startswith("CREATE")]
+    assert create_stmts, "bootstrap must issue the table-ensure DDL"
+    assert all("IF NOT EXISTS" in s for s in create_stmts)
+    # The additive-reconcile step probes live columns via information_schema; this
+    # fake returns no rows, so every table looks absent -> no ALTER is emitted, and
+    # bootstrap issues only CREATE + SELECT (never a destructive/ALTER statement).
+    assert all(s.strip().upper().startswith(("CREATE", "SELECT")) for s in stmts.statements)
+    assert result.columns_reconciled == []
     assert result.tables_ensured  # the app-read table set was covered
     # grant landed on the explicit warehouse
     assert api.update_perm_calls[0][0] == "wh-explicit"
@@ -214,6 +220,32 @@ def test_bootstrap_creates_grants_and_tags(monkeypatch: pytest.MonkeyPatch) -> N
     import os
 
     assert TRACING_WAREHOUSE_ENV not in os.environ
+
+
+def test_bootstrap_reconciles_columns_after_creates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The additive-reconcile step is wired into bootstrap and runs in the same
+    # pre-app-build step, AFTER every CREATE: so a just-created fresh table is a
+    # trivial no-op, and reconcile can never run before its table exists.
+    monkeypatch.delenv(TRACING_WAREHOUSE_ENV, raising=False)
+    api = _FakeWarehousesAPI(listing=[], new_id="fresh-wh")
+    stmts = _FakeStatementExecutionAPI()
+
+    bootstrap(
+        experiment_id="EXP-order",
+        warehouse_id="wh-order",
+        framework_sp_id=None,
+        catalog="prod_catalog",
+        schema="prod_schema",
+        client=_FakeClient(api, statement_execution=stmts),
+        mlflow_client=_FakeMlflowClient(),
+    )
+
+    kinds = [s.strip().upper().split(None, 1)[0] for s in stmts.statements]
+    assert "CREATE" in kinds and "SELECT" in kinds
+    # Every information_schema probe (SELECT) comes after every CREATE.
+    assert max(i for i, k in enumerate(kinds) if k == "CREATE") < min(
+        i for i, k in enumerate(kinds) if k == "SELECT"
+    )
 
 
 def test_bootstrap_skips_grant_when_no_sp() -> None:

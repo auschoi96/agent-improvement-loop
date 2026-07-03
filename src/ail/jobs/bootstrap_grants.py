@@ -53,11 +53,11 @@ from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ail.compare.monitoring import MonitoringWarehouseConfig, configure_monitoring_warehouse
-from ail.jobs.bootstrap_tables import ensure_app_tables
+from ail.jobs.bootstrap_tables import ensure_app_tables, reconcile_app_table_columns
 
 # Re-exported for backward compatibility: these symbols moved (the workspace guard
 # constants/helper now live in ``ail.workspace_guards`` to break an import cycle),
@@ -98,6 +98,10 @@ class BootstrapResult:
     granted_sp_id: str | None
     tables_ensured: list[str]
     monitoring: MonitoringWarehouseConfig | None
+    #: ``ALTER TABLE ... ADD COLUMNS`` statements the additive-reconcile step ran
+    #: to migrate pre-existing tables to their writer-declared schema (empty when
+    #: nothing needed migrating — a fresh workspace or an already-migrated one).
+    columns_reconciled: list[str] = field(default_factory=list)
 
 
 def validate_workspace_values(
@@ -296,6 +300,15 @@ def bootstrap(
     # clean workspace; idempotent CREATE ... IF NOT EXISTS, never DROP/ALTER.
     tables_ensured = ensure_app_tables(client, resolved_id, catalog=catalog, schema=schema)
 
+    # Then additively reconcile columns: CREATE TABLE IF NOT EXISTS never adds a
+    # column to a pre-existing table, so a schema-additive upgrade deploy would
+    # otherwise leave new writer columns missing and fail the app build's typegen
+    # DESCRIBE QUERY. Runs AFTER the CREATEs (a just-created table is a no-op) and
+    # BEFORE the app build; ADD COLUMNS only, fail-loud on a type conflict.
+    columns_reconciled = reconcile_app_table_columns(
+        client, resolved_id, catalog=catalog, schema=schema
+    )
+
     granted: str | None = None
     if framework_sp_id and framework_sp_id.strip():
         grant_warehouse_can_use(client, resolved_id, framework_sp_id.strip())
@@ -317,6 +330,7 @@ def bootstrap(
         granted_sp_id=granted,
         tables_ensured=tables_ensured,
         monitoring=monitoring,
+        columns_reconciled=columns_reconciled,
     )
 
 
@@ -400,9 +414,12 @@ def main(argv: list[str] | None = None) -> int:
         f"[ail.jobs.bootstrap_grants] warehouse={result.warehouse_id} ({action}) "
         f"grant_can_use={grant} "
         f"tables_ensured={len(result.tables_ensured)} in {args.catalog}.{args.schema} "
+        f"columns_reconciled={len(result.columns_reconciled)} "
         f"experiment={args.experiment} "
         f"monitoring_tag_set={result.monitoring is not None}"
     )
+    for alter in result.columns_reconciled:
+        print(f"[ail.jobs.bootstrap_grants] migrated: {alter}")
     if args.create_warehouse:
         print(f"[ail.jobs.bootstrap_grants] warehouse_id={result.warehouse_id}")
     return 0
