@@ -578,9 +578,25 @@ the same `<EXPERIMENT_ID>` you deployed with.
    Manual/advanced path (export `DATABRICKS_HOST`/`DATABRICKS_TOKEN` + `AIL_CATALOG`/
    `AIL_SCHEMA` yourself first): `python -m ail.companion poll --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>`.
 
-6. **Review + approve** in the app. Each proposal carries its evidence (judge + RLM
-   + L0); you approve; the companion applies it — recorded in the lineage timeline
-   and revertible (`ail-revert`).
+6. **(optional) Build a frozen suite for on-demand verification (Tier 2).** Evidence
+   (judge + RLM + L0) is enough to approve on — but for a high-blast-radius change you
+   can *verify* it first by running the candidate vs. baseline on a suite of **your
+   own** representative tasks. Scaffold candidate tasks from real traces, author a
+   pass/fail check per task (a human step — no fabrication), then freeze (the freeze
+   refuses to seal unless every task has a real check):
+   ```bash
+   ail-suite-scaffold --experiment <EXPERIMENT_ID> --out eval/suites/my_suite   # draft tasks from traces
+   # …author eval/suites/my_suite/checks.yaml — one real pass/fail check per task_id…
+   ail-suite-freeze eval/suites/my_suite                                        # fail-closed seal
+   ```
+   Then "Verify on my suite" on a proposal in the app (or `python -m ail.companion
+   prove …`) runs the frozen suite and attaches the measured delta as **added
+   evidence** — it never auto-approves. Skip this entirely for token/cost goals where
+   the deterministic L0 delta already measures the win.
+
+7. **Review + approve** in the app. Each proposal carries its evidence (judge + RLM
+   + L0, plus any Tier-2 verify delta); you approve; the companion applies it —
+   recorded in the lineage timeline and revertible (`ail-revert`).
 
 ### Readiness gates — what unlocks when
 
