@@ -20,6 +20,12 @@ variables:
       the `apply-job` app resource below, and from there into the app's
       AIL_APPLY_JOB_ID env var via app.yaml's `valueFrom: apply-job`.
     default: ''
+  catalog:
+    description: Unity Catalog catalog that holds the L0/app write-path tables.
+    default: ''
+  schema:
+    description: Schema within catalog that holds the L0/app write-path tables.
+    default: ''
 
 resources:
   apps:

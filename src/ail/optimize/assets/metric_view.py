@@ -52,7 +52,9 @@ from ail.optimize.assets.l0_contract import (
     SESSION_TABLE,
     ColumnKind,
     L0ColumnContract,
+    _build_contract,
 )
+from ail.workspace_config import resolve_catalog_schema
 
 __all__ = [
     "GENERATOR_VERSION",
@@ -431,6 +433,9 @@ def generate_metric_view(
             f"metric_view generator received asset_type {asset.asset_type!r}; "
             "expected 'metric_view'"
         )
+    if contract is L0_CONTRACT and full_name is None:
+        catalog, schema = resolve_catalog_schema()
+        contract = _build_contract(catalog, schema)
     table = contract.get_table(source_table)
     if table is None:
         raise ValueError(f"unknown L0 source table {source_table!r}")

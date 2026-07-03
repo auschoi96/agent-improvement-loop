@@ -158,8 +158,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=os.environ.get("AIL_WAREHOUSE_ID") or os.environ.get("DATABRICKS_WAREHOUSE_ID"),
         help="SQL warehouse id used to load the proposal, apply, and record the result.",
     )
-    parser.add_argument("--catalog", default=DEFAULT_CATALOG)
-    parser.add_argument("--schema", default=DEFAULT_SCHEMA)
+    parser.add_argument("--catalog", default=os.environ.get("AIL_CATALOG"))
+    parser.add_argument("--schema", default=os.environ.get("AIL_SCHEMA"))
     parser.add_argument("--prompt-name", default=DEFAULT_PROMPT_NAME)
     parser.add_argument(
         "--token-secret-scope",

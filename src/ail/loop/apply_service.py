@@ -94,6 +94,7 @@ from ail.optimize.prompt_registry import (
 )
 from ail.publish import _build_workspace_client, _execute, _lit
 from ail.publish_lineage import new_lineage_client, publish_agent_lineage
+from ail.workspace_config import resolve_catalog_schema
 
 __all__ = [
     "DECISIONS_TABLE",
@@ -467,7 +468,12 @@ class _CompositeRegistryClient:
         return self._lineage.get_prompt_version_by_alias(name, alias)
 
 
-def build_registry_client(profile: str | None = None) -> ApplyRegistryClient:
+def build_registry_client(
+    profile: str | None = None,
+    *,
+    catalog: str | None = None,
+    schema: str | None = None,
+) -> ApplyRegistryClient:
     """The live registry seam: the prompt-registry client + the lineage client.
 
     Reuses :func:`ail.optimize.prompt_registry._new_prompt_client` (via
@@ -475,6 +481,8 @@ def build_registry_client(profile: str | None = None) -> ApplyRegistryClient:
     ``client`` is ``None`` — but the engine requires an explicit union client, so we
     build both here) and :func:`ail.publish_lineage.new_lineage_client`.
     """
+    resolve_catalog_schema(catalog, schema)
+
     from ail.optimize.prompt_registry import _new_prompt_client
 
     return _CompositeRegistryClient(_new_prompt_client(profile), new_lineage_client(profile))
@@ -496,8 +504,8 @@ def build_lineage_recorder(
     registry_client: ApplyRegistryClient,
     warehouse_client: Any,
     warehouse_id: str,
-    catalog: str = DEFAULT_CATALOG,
-    schema: str = DEFAULT_SCHEMA,
+    catalog: str | None = None,
+    schema: str | None = None,
 ) -> LineageRecorder:
     """The live lineage seam: refresh the agent's ``agent_prompt_lineage`` slice.
 
@@ -508,6 +516,8 @@ def build_lineage_recorder(
     *who/why* of the decision is recorded separately in ``agent_action_decisions``.
     """
 
+    resolved_catalog, resolved_schema = resolve_catalog_schema(catalog, schema)
+
     def _record(record: Any) -> None:
         publish_agent_lineage(
             agent,
@@ -515,8 +525,8 @@ def build_lineage_recorder(
             registry_client=registry_client,
             warehouse_client=warehouse_client,
             warehouse_id=warehouse_id,
-            catalog=catalog,
-            schema=schema,
+            catalog=resolved_catalog,
+            schema=resolved_schema,
         )
 
     return _record
@@ -561,8 +571,8 @@ def build_body_resolver(
     *,
     registry_client: ApplyRegistryClient,
     prompt_name: str = DEFAULT_PROMPT_NAME,
-    catalog: str = DEFAULT_CATALOG,
-    schema: str = DEFAULT_SCHEMA,
+    catalog: str | None = None,
+    schema: str | None = None,
     champion_alias: str = CHAMPION_ALIAS,
 ) -> BodyResolver:
     """The live body seam for a skill/instruction update (its change is a *diff*).
@@ -574,7 +584,8 @@ def build_body_resolver(
     minted), :func:`_apply_unified_diff` raises and the engine refuses — a stale diff
     is never force-applied.
     """
-    full_name = resolve_prompt_name(prompt_name, catalog=catalog, schema=schema)
+    resolved_catalog, resolved_schema = resolve_catalog_schema(catalog, schema)
+    full_name = resolve_prompt_name(prompt_name, catalog=resolved_catalog, schema=resolved_schema)
 
     def _resolve(proposal: ProposedAction) -> RegisterableBody:
         diff = proposal.change.diff
@@ -991,8 +1002,8 @@ def run_decision(
     decided_at: str,
     profile: str | None = None,
     warehouse_id: str | None = None,
-    catalog: str = DEFAULT_CATALOG,
-    schema: str = DEFAULT_SCHEMA,
+    catalog: str | None = None,
+    schema: str | None = None,
     prompt_name: str = DEFAULT_PROMPT_NAME,
     registry_path: str | None = None,
 ) -> ApplyServiceResult:
@@ -1059,14 +1070,15 @@ def run_decision(
         )
 
     try:
+        resolved_catalog, resolved_schema = resolve_catalog_schema(catalog, schema)
         client = _build_workspace_client(profile)
         proposal = load_pending_proposal(
             client=client,
             warehouse_id=wh,
             agent_name=agent_name,
             proposal_id=proposal_id,
-            catalog=catalog,
-            schema=schema,
+            catalog=resolved_catalog,
+            schema=resolved_schema,
         )
         if proposal is None:
             return _error_result(
@@ -1081,15 +1093,17 @@ def run_decision(
             )
 
         agent = _resolve_agent(agent_name, registry_path)
-        registry_client = build_registry_client(profile)
+        registry_client = build_registry_client(
+            profile, catalog=resolved_catalog, schema=resolved_schema
+        )
         lineage_recorder = build_lineage_recorder(
             agent=agent,
             prompt_name=prompt_name,
             registry_client=registry_client,
             warehouse_client=client,
             warehouse_id=wh,
-            catalog=catalog,
-            schema=schema,
+            catalog=resolved_catalog,
+            schema=resolved_schema,
         )
         gate_recheck = build_gate_recheck(
             experiment_id=agent.experiment_id,
@@ -1099,7 +1113,13 @@ def run_decision(
         )
 
         def _decision_writer(result: ApplyServiceResult) -> None:
-            record_decision(result, client=client, warehouse_id=wh, catalog=catalog, schema=schema)
+            record_decision(
+                result,
+                client=client,
+                warehouse_id=wh,
+                catalog=resolved_catalog,
+                schema=resolved_schema,
+            )
 
         def _status_writer(*, agent_name: str, proposal_id: str, status: ProposalStatus) -> None:
             mark_proposal_status(
@@ -1108,8 +1128,8 @@ def run_decision(
                 agent_name=agent_name,
                 proposal_id=proposal_id,
                 status=status,
-                catalog=catalog,
-                schema=schema,
+                catalog=resolved_catalog,
+                schema=resolved_schema,
             )
 
         return decide_on_proposal(
@@ -1122,14 +1142,14 @@ def run_decision(
             body_resolver=build_body_resolver(
                 registry_client=registry_client,
                 prompt_name=prompt_name,
-                catalog=catalog,
-                schema=schema,
+                catalog=resolved_catalog,
+                schema=resolved_schema,
             ),
             decision_writer=_decision_writer,
             status_writer=_status_writer,
             prompt_name=prompt_name,
-            catalog=catalog,
-            schema=schema,
+            catalog=resolved_catalog,
+            schema=resolved_schema,
         )
     except Exception as exc:  # noqa: BLE001 - any infra failure is an honest ERROR, never a fake apply
         return _error_result(
@@ -1201,8 +1221,8 @@ def main(argv: list[str] | None = None) -> int:
         decided_at=str(payload.get("decided_at") or datetime.now(UTC).isoformat()),
         profile=payload.get("profile"),
         warehouse_id=payload.get("warehouse_id"),
-        catalog=str(payload.get("catalog") or DEFAULT_CATALOG),
-        schema=str(payload.get("schema") or DEFAULT_SCHEMA),
+        catalog=payload.get("catalog"),
+        schema=payload.get("schema"),
         prompt_name=str(payload.get("prompt_name") or DEFAULT_PROMPT_NAME),
         registry_path=payload.get("registry_path"),
     )
