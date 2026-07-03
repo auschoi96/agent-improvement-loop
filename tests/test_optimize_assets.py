@@ -42,6 +42,13 @@ from ail.optimize.assets.metric_view import SpecValidationError
 FIXTURE = Path(__file__).parent / "fixtures" / "rlm_batch_report_sample.json"
 
 
+@pytest.fixture(autouse=True)
+def _allow_reference_workspace_for_default_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AIL_CATALOG", "austin_choi_omni_agent_catalog")
+    monkeypatch.setenv("AIL_SCHEMA", "agent_improvement_loop")
+    monkeypatch.setenv("AIL_ALLOW_REFERENCE_WORKSPACE", "1")
+
+
 def _report() -> CohortReviewReport:
     return CohortReviewReport.model_validate(json.loads(FIXTURE.read_text()))
 

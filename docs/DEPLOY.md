@@ -286,7 +286,9 @@ the app for the tables (no SP grant yet, since the App SP does not exist), and o
 # 1. (verification) deploy the job bundle as yourself — proves config is sound,
 #    and creates the apply job whose id the app needs (§7 step 1).
 databricks bundle validate -t dais_demo --profile dais-demo
-databricks bundle deploy   -t dais_demo --profile dais-demo
+# --var catalog/schema are REQUIRED: they wire AIL_CATALOG/AIL_SCHEMA into every
+# job's env; the write path fails closed (loud error) if they are unset/empty.
+databricks bundle deploy   -t dais_demo --var catalog=<CATALOG> --var schema=<SCHEMA> --profile dais-demo
 
 # 2. BOOTSTRAP FIRST [ADMIN]: (explicit warehouse) + ensure the app's tables
 #    (empty) + tag experiment. No --framework-sp-id yet (the App SP is created in
@@ -301,7 +303,7 @@ ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
 #    job with --var apply_job_id=<id> (from step 1 / §7) so it also auto-grants
 #    CAN_MANAGE_RUN on that job + injects AIL_APPLY_JOB_ID; see §7.
 cd ail-self-optimizer && databricks bundle deploy --profile dais-demo \
-  --var apply_job_id=<APPLY_JOB_ID> && cd ..
+  --var apply_job_id=<APPLY_JOB_ID> --var catalog=<CATALOG> --var schema=<SCHEMA> && cd ..
 databricks bundle run app -t default --profile dais-demo   # start the app
 
 # 4. capture the App SP -> the single framework SP
@@ -313,13 +315,24 @@ SP=$(databricks apps get ail-self-optimizer -o json --profile dais-demo \
 ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
   --warehouse-id <WAREHOUSE_ID> --framework-sp-id "$SP" \
   --catalog <CATALOG> --schema <SCHEMA> --profile dais-demo
-databricks bundle deploy -t dais_demo_sp --var framework_sp_id="$SP" --profile dais-demo
+databricks bundle deploy -t dais_demo_sp --var framework_sp_id="$SP" \
+  --var catalog=<CATALOG> --var schema=<SCHEMA> --profile dais-demo
 ```
 
 > If you use a **standalone** framework SP (created once by an admin) instead of
 > reusing the App SP, pass `--framework-sp-id <SP>` in step 2 and drop step 5's
 > bootstrap re-run — the single pre-app bootstrap then does the warehouse, tables,
 > grant, and tag in one shot.
+
+> **`--var catalog=... --var schema=...` are REQUIRED on every `bundle deploy` above.**
+> They wire `AIL_CATALOG` / `AIL_SCHEMA` into the jobs' and app's env; the
+> approval->apply **write path** (prompt-registry, lineage, metric-view / asset
+> creation) resolves the deployer's catalog from them and **fails closed with a loud
+> error** if they are empty/placeholder -- so a fresh deploy can never silently write
+> into the reference workspace. The write-path escape hatch (owner-only, for
+> re-deploying the reference demo) is `AIL_ALLOW_REFERENCE_WORKSPACE=1` -- a
+> **distinct** env var from the bootstrap's `AIL_ALLOW_REFERENCE` /
+> `--allow-reference-workspace` (step 2 / §3).
 
 ---
 
@@ -580,10 +593,19 @@ the same `<EXPERIMENT_ID>` you deployed with.
 
 5. **Run the local companion** on a host that has the Claude Agent SDK (`.[claude]`).
    It plans (evidence → proposals) and, on your approval, executes and optionally
-   proves. See [`COMPANION.md`](COMPANION.md):
+   proves. See [`COMPANION.md`](COMPANION.md). One command does everything —
+   it mints a fresh static token from your CLI profile, exports the auth +
+   catalog/schema, and runs the poll loop durably (re-minting each cycle so a long
+   run survives OAuth token expiry):
    ```bash
-   python -m ail.companion poll --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>
+   ail-companion-start --profile <PROFILE> --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>
    ```
+   `--profile` is used only to mint the token; it is never passed to the companion
+   (which requires a static token and refuses OAuth). Add `--warehouse-id <ID>` to
+   forward the monitoring warehouse.
+
+   Manual/advanced path (export `DATABRICKS_HOST`/`DATABRICKS_TOKEN` + `AIL_CATALOG`/
+   `AIL_SCHEMA` yourself first): `python -m ail.companion poll --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>`.
 
 6. **Review + approve** in the app. Each proposal carries its evidence (judge + RLM
    + L0); you approve; the companion applies it — recorded in the lineage timeline

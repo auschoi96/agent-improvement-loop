@@ -58,7 +58,19 @@ from typing import TYPE_CHECKING, Any
 
 from ail.compare.monitoring import MonitoringWarehouseConfig, configure_monitoring_warehouse
 from ail.jobs.bootstrap_tables import ensure_app_tables
-from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA, REFERENCE_EXPERIMENT
+
+# Re-exported for backward compatibility: these symbols moved (the workspace guard
+# constants/helper now live in ``ail.workspace_guards`` to break an import cycle),
+# but ``ail.jobs.bootstrap_grants`` remains their stable public import location.
+from ail.publish import (  # noqa: F401
+    DEFAULT_CATALOG,
+    DEFAULT_SCHEMA,
+    REFERENCE_EXPERIMENT,
+)
+from ail.workspace_guards import (  # noqa: F401
+    REFERENCE_WORKSPACE_DEFAULTS,
+    _workspace_value_error,
+)
 
 if TYPE_CHECKING:
     from mlflow import MlflowClient
@@ -76,17 +88,6 @@ DEFAULT_CLUSTER_SIZE = "2X-Small"
 #: >= 10). Keeps an idle framework warehouse from billing.
 DEFAULT_AUTO_STOP_MINS = 10
 
-# Values from the original reference workspace. Deploy-time bootstrap refuses
-# these so a reusable checkout cannot silently target that workspace's assets.
-REFERENCE_WORKSPACE_DEFAULTS: dict[str, frozenset[str]] = {
-    "experiment_id": frozenset({REFERENCE_EXPERIMENT}),
-    "warehouse_id": frozenset({"7d1d3dbb3ba65f2a"}),
-    "catalog": frozenset({DEFAULT_CATALOG}),
-    "schema": frozenset({DEFAULT_SCHEMA}),
-}
-
-PLACEHOLDER_VALUES = frozenset({"REPLACE_ME", "CHANGE_ME", "TODO", "TBD", "NONE", "NULL"})
-
 
 @dataclass(frozen=True, slots=True)
 class BootstrapResult:
@@ -97,32 +98,6 @@ class BootstrapResult:
     granted_sp_id: str | None
     tables_ensured: list[str]
     monitoring: MonitoringWarehouseConfig | None
-
-
-def _workspace_value_error(
-    var_name: str,
-    value: str | None,
-    *,
-    required: bool = True,
-    allow_reference_workspace: bool = False,
-) -> str | None:
-    cleaned = (value or "").strip()
-    if not cleaned:
-        if required:
-            return f"{var_name} is empty"
-        return None
-
-    upper = cleaned.upper()
-    if upper in PLACEHOLDER_VALUES or (cleaned.startswith("<") and cleaned.endswith(">")):
-        return f"{var_name} is a placeholder"
-    if cleaned.startswith("${") and cleaned.endswith("}"):
-        return f"{var_name} is an unresolved bundle reference"
-    reference_values = REFERENCE_WORKSPACE_DEFAULTS.get(var_name, frozenset())
-    if not allow_reference_workspace and cleaned.casefold() in {
-        reference.casefold() for reference in reference_values
-    }:
-        return f"{var_name} is a reference workspace default"
-    return None
 
 
 def validate_workspace_values(
