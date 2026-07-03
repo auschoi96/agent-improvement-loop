@@ -203,8 +203,14 @@ does four things in one run:
    app's SQL queries read, using each writer module's **own** authoritative
    `_ddl()` `CREATE SCHEMA/TABLE IF NOT EXISTS` (module `ail.jobs.bootstrap_tables`;
    no schema is authored in the bootstrap). This is **load-bearing for the app
-   build** — see the ordering callout below. `CREATE ... IF NOT EXISTS` only, so a
-   re-run never drops, alters, or repopulates an existing table.
+   build** — see the ordering callout below. On an **existing** table it then
+   **additively reconciles columns**: any column in the writer's `_ddl()` that is
+   missing on the live table is added via `ALTER TABLE ... ADD COLUMNS`. This is
+   **additive-only and idempotent** — it never drops, renames, changes a column's
+   type, or repopulates a table (no missing columns ⇒ no `ALTER`), and it **fails
+   loud** (raising, changing nothing) if a live column's type genuinely conflicts
+   with the DDL. So both a fresh deploy and an **upgrade** deploy that adds columns
+   converge the table to the current schema before the app build.
 3. **Grant `CAN_USE`** on the warehouse to `--framework-sp-id` via the warehouse
    permissions API (`update_permissions`, a merge — it does not clobber the App
    SP's auto-grant). Skipped if no SP is given.
@@ -251,21 +257,21 @@ platform from the `permission: CAN_USE` declaration in
 > tables the bootstrap covers is drift-guarded in `tests/test_bootstrap_tables.py`
 > against the actual `.sql` query files, so it cannot silently fall behind.
 
-> **Migration note — existing deployments, `agent_proposed_actions` (L7b-1).** The
-> `AGENT_TASK` representation adds three **nullable** columns to
-> `agent_proposed_actions` — `change_plan`, `change_preview_diff`,
-> `change_produced_change_ref`. The table DDL is `CREATE TABLE IF NOT EXISTS`, so the
-> new columns land automatically on a **fresh** table but an **already-created** table
-> is **not** ALTERed (the same known pattern as the earlier `proof_*` columns). Before
-> the executor lane (L7b-2) publishes an `AGENT_TASK` proposal, an operator with a
-> pre-existing table must add the three columns once:
-> ```sql
-> ALTER TABLE `<catalog>`.`<schema>`.agent_proposed_actions
->   ADD COLUMNS (change_plan STRING, change_preview_diff STRING, change_produced_change_ref STRING);
-> ```
-> No auto-migration is performed. Reads stay compatible in the meantime: the app's
-> `SELECT`ed column set is unchanged, and a non-`AGENT_TASK` proposal never populates
-> these columns.
+> **Upgrade deploys migrate columns automatically — no manual `ALTER`.** When a
+> version adds columns to a table that already exists on the workspace — e.g. the
+> `AGENT_TASK` fields (`change_plan`, `change_preview_diff`,
+> `change_produced_change_ref`) or the verify-on-suite fields (`verify_requested`,
+> `verify_status`, `verify_requested_by`, `verify_requested_at`, `verify_completed_at`,
+> `verify_error`) on `agent_proposed_actions` — step 2's additive column
+> reconciliation adds them to the already-created table (via `ALTER TABLE ... ADD
+> COLUMNS`) **before** the app build's typegen runs. This closes the upgrade-path
+> incident where a schema-additive redeploy over an existing workspace left the new
+> columns missing → typegen's live `DESCRIBE QUERY` failed → the app build failed →
+> the running app went **UNAVAILABLE**. The reconciliation is **additive-only** (never
+> drops, renames, or changes a column's type) and **idempotent** (a re-run on an
+> already-migrated table adds nothing); a genuine type conflict **fails loud**
+> (raising, changing nothing) rather than mutating data — surface and resolve it
+> manually if it ever occurs.
 
 ---
 
