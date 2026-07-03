@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 
-from ail.jobs.bootstrap_grants import _workspace_value_error
+from ail.workspace_guards import _workspace_value_error
 
 CATALOG_ENV = "AIL_CATALOG"
 SCHEMA_ENV = "AIL_SCHEMA"

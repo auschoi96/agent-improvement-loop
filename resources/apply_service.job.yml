@@ -84,6 +84,9 @@ resources:
         - environment_key: serverless
           spec:
             environment_version: '3'
+            environment_variables:
+              AIL_CATALOG: ${var.catalog}
+              AIL_SCHEMA: ${var.schema}
             dependencies:
               # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
               - ../dist/*.whl
