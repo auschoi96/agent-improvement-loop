@@ -50,6 +50,7 @@ from typing import Any, Protocol
 
 from ail.optimize.gepa_runner import DEFAULT_COMPONENT, GepaOptimizationResult
 from ail.optimize.lever import token_efficiency_skill
+from ail.workspace_config import resolve_catalog_schema
 
 __all__ = [
     "DEFAULT_CATALOG",
@@ -302,8 +303,8 @@ def register_prompt_body(
     body: str,
     provenance: PromptProvenance,
     name: str = DEFAULT_PROMPT_NAME,
-    catalog: str = DEFAULT_CATALOG,
-    schema: str = DEFAULT_SCHEMA,
+    catalog: str | None = None,
+    schema: str | None = None,
     commit_message: str | None = None,
     alias: str | None = None,
     client: PromptRegistryClient | None = None,
@@ -333,7 +334,11 @@ def register_prompt_body(
     if not body.strip():
         raise ValueError("refusing to register an empty prompt body")
 
-    full_name = resolve_prompt_name(name, catalog=catalog, schema=schema)
+    if name.count(".") >= 2:
+        full_name = resolve_prompt_name(name)
+    else:
+        resolved_catalog, resolved_schema = resolve_catalog_schema(catalog, schema)
+        full_name = resolve_prompt_name(name, catalog=resolved_catalog, schema=resolved_schema)
     registry = client if client is not None else _new_prompt_client(profile)
     tags = provenance.as_tags()
 
@@ -360,8 +365,8 @@ def register_seed_prompt(
     *,
     body: str | None = None,
     name: str = DEFAULT_PROMPT_NAME,
-    catalog: str = DEFAULT_CATALOG,
-    schema: str = DEFAULT_SCHEMA,
+    catalog: str | None = None,
+    schema: str | None = None,
     suite_version: str | None = None,
     suite_content_hash: str | None = None,
     commit_message: str | None = None,
@@ -399,8 +404,8 @@ def register_gepa_candidate(
     candidate_json_path: str | Path,
     *,
     name: str = DEFAULT_PROMPT_NAME,
-    catalog: str = DEFAULT_CATALOG,
-    schema: str = DEFAULT_SCHEMA,
+    catalog: str | None = None,
+    schema: str | None = None,
     alias: str | None = None,
     force: bool = False,
     commit_message: str | None = None,
