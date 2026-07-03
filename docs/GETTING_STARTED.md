@@ -6,8 +6,11 @@ without ever trusting a dashboard that lies.**
 This is the hands-on guide. If you read nothing else, read
 [§1 — the one idea](#1-the-one-idea-you-connect-you-dont-upload) and
 [§2 — when it actually helps](#2-when-will-it-actually-help-the-readiness-gates).
-For the full design see [`ARCHITECTURE.md`](ARCHITECTURE.md); for the pitch see
-the [README](../README.md).
+For the full design see [`PRODUCT_ARCHITECTURE.md`](PRODUCT_ARCHITECTURE.md)
+(the design of record); for the pitch see the [README](../README.md). Picking this
+project up fresh or debugging a deployment? Start with
+[`PROJECT_STATE.md`](PROJECT_STATE.md) — the component map, CLI reference, live
+deployment details, and operational gotchas.
 
 ---
 
@@ -277,6 +280,13 @@ python scripts/run_phase2_comparison.py --suite-version phase2-mini --run-plan r
   verifier, or a sub-threshold reduction all **BLOCK** — a token "win" off a
   broken run is never counted. On the reference suite this proved a **35.4%
   token reduction with correctness held** (2 PROMOTE / 3 honest BLOCK).
+- **Build your own frozen suite first** (proving is only as meaningful as the
+  suite is representative of *your* work): scaffold candidate tasks from your real
+  traces and freeze them (`ail-suite-scaffold` → author a `checks.yaml` per task →
+  `ail-suite-freeze`, which refuses to freeze until every task has a real
+  human-authored check). Proving is **opt-in Tier-2** — run it here from the CLI,
+  or per-proposal from the app's **"Verify on my suite"** button
+  ([`PHASE2_FIXTURE_SPEC`](PHASE2_FIXTURE_SPEC.md)).
 
 ### Stage 6 — Generate helper assets
 
@@ -316,9 +326,21 @@ sequenceDiagram
     Note over Eng,Lin: nothing reaches the live agent unless<br/>PROVEN + GATED + APPROVED — and it's revertible
 ```
 
+- **What actually runs this loop:** the **local companion** on deployer-controlled
+  compute (the planner + executor + prover need the Claude Agent SDK, which can't
+  run in a hosted app/serverless job). One command starts it:
+  ```bash
+  ail-companion-start                    # or: python -m ail.companion poll \
+  #   --experiment <EXPERIMENT_ID> --catalog <CATALOG> --schema <SCHEMA>
+  ```
+  It polls UC for pending work, produces the *concrete* change in a sandbox for you
+  to preview, and applies only what you approve. Subcommands:
+  `python -m ail.companion {plan|execute|prove|poll|run}`
+  ([`COMPANION.md`](COMPANION.md), [`EXECUTOR.md`](EXECUTOR.md)).
 - Design of record: [`LOOP_CONTROLLER.md`](LOOP_CONTROLLER.md). Revert a change
   that didn't really help with `ail-revert <agent> --to-version <n>` (fail-closed,
-  dry-run by default).
+  dry-run by default; Databricks-native — prompt-registry alias flip, UC-Volume
+  snapshot restore, or `DROP` — no git needed).
 
 ---
 
@@ -378,6 +400,16 @@ databricks bundle run   app --profile my-workspace   # roll the app live
 - **Live GEPA is slow:** each fitness eval is a real agent coding session that can
   hit a per-arm timeout; if both seed and candidate score 0 (e.g. the arm times
   out), GEPA correctly declines to promote. Keep budgets small and tasks fast.
+- **App build fails with `TABLE_OR_VIEW_NOT_FOUND` or a missing column** (typegen
+  `DESCRIBE QUERY`): the app's tables/columns weren't ensured before the build. Run
+  `ail-bootstrap-grants` first — it creates missing tables **and additively migrates
+  missing columns** (`ALTER … ADD COLUMNS`, idempotent, fail-loud on a type
+  conflict) *before* `bundle run app`. Upgrade deploys over an existing workspace are
+  handled automatically; no manual `ALTER` is needed.
+- **Cross-vendor review under gateway 429s:** if a reviewer worker (codex/GPT on the
+  Databricks gateway) rate-limits, reroute it to a different workspace's gateway
+  bucket (edit its base_url + auth `--profile`) or wait; `claude_code` (local auth)
+  is an unthrottled fallback implementer. See [`PROJECT_STATE.md`](PROJECT_STATE.md) §7.
 
 ---
 
@@ -395,8 +427,13 @@ databricks bundle run   app --profile my-workspace   # roll the app live
 | 6. Assets | `src/ail/optimize/assets` | — | [ASSET_GENERATOR](ASSET_GENERATOR.md) |
 | Goals | `src/ail/goals` | — | — |
 | Readiness | `src/ail/readiness` | `ail-readiness <exp>` | [READINESS_AND_TRUST](READINESS_AND_TRUST.md) |
+| Judge authoring | `src/ail/judges`, `jobs/author_judge.py` | `ail-author-judge` | [JUDGE_AUTHORING](JUDGE_AUTHORING.md) |
+| Auto-align (MemAlign trigger) | `src/ail/judges`, `jobs/auto_align_job.py` | `ail-auto-align` | [AUTO_ALIGN](AUTO_ALIGN.md) |
+| Suite builder | `src/ail/task_suite` | `ail-suite-scaffold`, `ail-suite-freeze` | [PHASE2_FIXTURE_SPEC](PHASE2_FIXTURE_SPEC.md) |
 | Controller + approval | `src/ail/loop` | — | [LOOP_CONTROLLER](LOOP_CONTROLLER.md) |
-| Deploy | `databricks.yml`, `resources/`, `ail-self-optimizer/` | `databricks bundle deploy` | [DEPLOY](DEPLOY.md) |
+| **Companion** (plan/execute/prove/poll) | `src/ail/companion`, `src/ail/executor` | `ail-companion-start`, `python -m ail.companion` | [COMPANION](COMPANION.md), [EXECUTOR](EXECUTOR.md) |
+| Versioning + revert | `src/ail/versioning`, `publish_lineage.py`, `publish_versions.py` | `ail-revert` | [VERSIONING](VERSIONING.md), [PROMPT_REGISTRY](PROMPT_REGISTRY.md) |
+| Deploy (bootstrap + migration) | `databricks.yml`, `resources/`, `ail-self-optimizer/`, `jobs/bootstrap_*.py` | `databricks bundle deploy`, `ail-bootstrap-grants` | [DEPLOY](DEPLOY.md) |
 
 ---
 
