@@ -106,6 +106,19 @@ PROPOSAL_COLUMNS: list[str] = [
     "gate_n_distrusted_judges",
     "gate_gated",
     "gate_reasons",
+    # verify — the opt-in Tier-2 "verify on my suite" request lifecycle (L9). A freshly
+    # published proposal is never verify-requested (verify_requested=False, the rest
+    # NULL); the app's authenticated verify write-path sets verify_requested/status/by/at,
+    # and the companion poll handler drives the frozen-suite proof and writes the RESULT
+    # into the existing proof_* columns above (no parallel proof schema) plus an honest
+    # terminal verify_status. This is request lifecycle only — the proof itself reuses
+    # proof_*; verify_* never carries a fabricated result.
+    "verify_requested",
+    "verify_status",
+    "verify_requested_by",
+    "verify_requested_at",
+    "verify_completed_at",
+    "verify_error",
     # provenance
     "created_at",
     "generated_at",
@@ -183,6 +196,16 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
         g.n_distrusted_judges,
         g.gated,
         json.dumps(g.reasons),
+        # verify lifecycle — a controller-published proposal is never verify-requested.
+        # It becomes so only when a reviewer clicks "Verify on my suite" in the app
+        # (the authenticated verify write-path); the poll handler then fills proof_* +
+        # the terminal verify_status. So publish writes not-requested / all-NULL here.
+        False,  # verify_requested
+        None,  # verify_status
+        None,  # verify_requested_by
+        None,  # verify_requested_at
+        None,  # verify_completed_at
+        None,  # verify_error
         p.created_at,
         generated_at,
     ]
@@ -198,6 +221,12 @@ def _ddl(catalog: str, schema: str) -> list[str]:
     #   ALTER TABLE `<catalog>`.`<schema>`.agent_proposed_actions
     #     ADD COLUMNS (change_plan STRING, change_preview_diff STRING,
     #                  change_produced_change_ref STRING);
+    # The same applies to the L9 verify_* lifecycle columns below — an operator with a
+    # pre-existing table must add them once (nullable), e.g.:
+    #   ALTER TABLE `<catalog>`.`<schema>`.agent_proposed_actions
+    #     ADD COLUMNS (verify_requested BOOLEAN, verify_status STRING,
+    #                  verify_requested_by STRING, verify_requested_at STRING,
+    #                  verify_completed_at STRING, verify_error STRING);
     # No auto-ALTER is done here (out of scope). See docs/DEPLOY.md.
     fqn = f"`{catalog}`.`{schema}`"
     return [
@@ -248,6 +277,12 @@ def _ddl(catalog: str, schema: str) -> list[str]:
             gate_n_distrusted_judges INT,
             gate_gated BOOLEAN,
             gate_reasons STRING,
+            verify_requested BOOLEAN,
+            verify_status STRING,
+            verify_requested_by STRING,
+            verify_requested_at STRING,
+            verify_completed_at STRING,
+            verify_error STRING,
             created_at STRING,
             generated_at STRING
         ) USING DELTA

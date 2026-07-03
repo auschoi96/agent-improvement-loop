@@ -1,6 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { handleDecision, readApprover, type DecisionHttpRequest, type DecisionHttpResponse } from './approvals';
+import {
+  handleDecision,
+  handleVerify,
+  readApprover,
+  type DecisionHttpRequest,
+  type DecisionHttpResponse,
+} from './approvals';
 import type { ApplyBridge, BridgeResult, DecisionInput } from './bridge';
+import type { VerifyBridge, VerifyBridgeResult, VerifyInput } from './verify_bridge';
 
 function fakeRes() {
   const captured: { code: number; body: unknown } = { code: 0, body: undefined };
@@ -122,6 +129,67 @@ describe('handleDecision — validation + engine surfacing', () => {
     const bridge: ApplyBridge = vi.fn().mockRejectedValue(new Error('apply-service exited 1'));
     const { res, captured } = fakeRes();
     await handleDecision(req(AUTH, { proposal_id: 'p1', agent_name: 'a', decision: 'approve' }), res, bridge);
+    expect(captured.code).toBe(502);
+    expect((captured.body as { outcome: string; error: string }).outcome).toBe('error');
+    expect((captured.body as { error: string }).error).toMatch(/exited 1/);
+  });
+});
+
+function recordingVerifyBridge(result: VerifyBridgeResult = { outcome: 'requested', verify_status: 'requested' }) {
+  const calls: VerifyInput[] = [];
+  const bridge: VerifyBridge = (input) => {
+    calls.push(input);
+    return Promise.resolve(result);
+  };
+  return { bridge, calls };
+}
+
+describe('handleVerify — fail-closed authentication + evidence-only request', () => {
+  it('refuses an unauthenticated request (401) and never calls the engine', async () => {
+    const { bridge, calls } = recordingVerifyBridge();
+    const { res, captured } = fakeRes();
+    await handleVerify(req({}, { proposal_id: 'p1', agent_name: 'a' }), res, bridge);
+    expect(captured.code).toBe(401);
+    expect((captured.body as { outcome: string }).outcome).toBe('refused');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses a missing proposal_id / agent_name (400)', async () => {
+    const { bridge, calls } = recordingVerifyBridge();
+    const { res, captured } = fakeRes();
+    await handleVerify(req(AUTH, {}), res, bridge);
+    expect(captured.code).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('calls the engine with the AUTHENTICATED requester + a server-set timestamp', async () => {
+    const { bridge, calls } = recordingVerifyBridge();
+    const { res, captured } = fakeRes();
+    // A spoofed requester in the body must be ignored — the header identity wins.
+    await handleVerify(
+      req(AUTH, { proposal_id: 'p1', agent_name: 'claude_code', requested_by: 'attacker@evil.com' }),
+      res,
+      bridge
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].requested_by).toBe('reviewer@databricks.com');
+    expect(calls[0].requested_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(captured.code).toBe(200);
+    expect((captured.body as { outcome: string }).outcome).toBe('requested');
+  });
+
+  it('surfaces an engine refusal verbatim (200 + refused outcome)', async () => {
+    const { bridge } = recordingVerifyBridge({ outcome: 'refused', refused_reason: 'action kind cannot be proven' });
+    const { res, captured } = fakeRes();
+    await handleVerify(req(AUTH, { proposal_id: 'p1', agent_name: 'a' }), res, bridge);
+    expect(captured.code).toBe(200);
+    expect(captured.body).toMatchObject({ outcome: 'refused', refused_reason: 'action kind cannot be proven' });
+  });
+
+  it('returns 502 when the bridge itself fails — honest error, never a fake request', async () => {
+    const bridge: VerifyBridge = vi.fn().mockRejectedValue(new Error('verify-service exited 1'));
+    const { res, captured } = fakeRes();
+    await handleVerify(req(AUTH, { proposal_id: 'p1', agent_name: 'a' }), res, bridge);
     expect(captured.code).toBe(502);
     expect((captured.body as { outcome: string; error: string }).outcome).toBe('error');
     expect((captured.body as { error: string }).error).toMatch(/exited 1/);

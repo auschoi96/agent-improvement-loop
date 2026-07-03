@@ -179,6 +179,56 @@ def test_poll_bounded_loop_runs_executor_and_planner_cadence(
     assert planner_calls[0].experiment == "exp"
 
 
+def test_poll_verify_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tier-2 verify is opt-in: with no --verify-every, the handler never runs."""
+    _auth_ok(monkeypatch)
+    monkeypatch.setattr(companion.agent_executor, "run", lambda args: 0)
+    verify_calls: list[Any] = []
+    monkeypatch.setattr(companion, "_run_verify_once", lambda *a, **k: verify_calls.append(k))
+    # A client build would signal the verify path engaged — it must NOT be built.
+    monkeypatch.setattr(
+        companion,
+        "_build_workspace_client",
+        lambda profile: (_ for _ in ()).throw(AssertionError("verify must be disabled")),
+    )
+
+    code = companion.main(
+        ["poll", "--warehouse-id", "wh", "--volume-root", "/Volumes/c/s/v", "--max-iterations", "2"]
+    )
+
+    assert code == 0
+    assert verify_calls == []
+
+
+def test_poll_runs_verify_tick_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    _auth_ok(monkeypatch)
+    monkeypatch.setattr(companion.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(companion.agent_executor, "run", lambda args: 0)
+    monkeypatch.setattr(companion, "_build_workspace_client", lambda profile: object())
+    verify_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(companion, "_run_verify_once", lambda args, **k: verify_calls.append(k))
+
+    code = companion.main(
+        [
+            "poll",
+            "--warehouse-id",
+            "wh",
+            "--volume-root",
+            "/Volumes/c/s/v",
+            "--max-iterations",
+            "2",
+            "--interval-seconds",
+            "0",
+            "--verify-every",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    assert len(verify_calls) == 2
+    assert verify_calls[0]["warehouse_id"] == "wh"
+
+
 def test_poll_no_pending_work_is_clean_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     _auth_ok(monkeypatch)
     calls = 0

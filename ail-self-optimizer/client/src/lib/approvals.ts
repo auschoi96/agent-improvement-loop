@@ -39,6 +39,7 @@ export interface ProposedActionRow {
   proof_realized_savings_pct: number;
   proof_n_promote: number;
   proof_n_block: number;
+  proof_n_errored: number;
   proof_suite_version: string;
   // gate
   gate_readiness_tier: string;
@@ -46,7 +47,24 @@ export interface ProposedActionRow {
   gate_judge_agreement: number;
   gate_scored_coverage: number;
   gate_n_distrusted_judges: number;
+  // verify (opt-in Tier-2 "verify on my suite" lifecycle). Nullable — a proposal
+  // that was never verify-requested has verify_status null/''.
+  verify_requested: boolean;
+  verify_status: string;
+  verify_requested_by: string;
+  verify_requested_at: string;
+  verify_completed_at: string;
+  verify_error: string;
 }
+
+// The action kinds the frozen suite can run a baseline-vs-candidate proof for — a
+// skill / instruction / prompt-behaviour change. MUST mirror PROVABLE_ACTION_KINDS in
+// src/ail/loop/verify_service.py: the client greys the "Verify on my suite" button for
+// a non-provable kind (metric view / revert / agent task), and the engine independently
+// refuses a request for one (defence in depth — the browser is never trusted).
+const PROVABLE_ACTION_KINDS: ReadonlySet<string> = new Set(['skill_update', 'instruction_update', 'gepa_prompt']);
+
+export const isProvable = (actionKind: string): boolean => PROVABLE_ACTION_KINDS.has(actionKind);
 
 const ACTION_KIND_LABELS: Record<string, string> = {
   metric_view: 'Metric view',
@@ -199,5 +217,111 @@ export function decisionMessage(resp: DecisionResponse): { tone: DecisionTone; t
       };
     default:
       return { tone: 'error', text: `Error — ${resp.error ?? 'the decision could not be completed'}.` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in Tier-2 "Verify on my suite" (L9) — request + result rendering.
+// ---------------------------------------------------------------------------
+
+// The POST body for the authenticated "Verify on my suite" route. The requester is NOT
+// included — it is resolved server-side from the authenticated request (never trusted
+// from the browser), exactly like the approver on a decision.
+export interface VerifyRequest {
+  proposal_id: string;
+  agent_name: string;
+}
+
+export function buildVerifyRequest(
+  row: Pick<ProposedActionRow, 'proposal_id' | 'agent_name'>
+): VerifyRequest {
+  return { proposal_id: row.proposal_id, agent_name: row.agent_name };
+}
+
+// The verify route's result (ail.loop.verify_service.VerifyRequestResult), narrowed to
+// what the queue renders. This is the outcome of REQUESTING a proof, not the proof.
+export interface VerifyResponse {
+  outcome: string;
+  verify_status?: string | null;
+  action_kind?: string | null;
+  refused_reason?: string | null;
+  error?: string | null;
+}
+
+// Map a verify-REQUEST outcome to an honest message + tone. A "requested" is a neutral
+// success (the proof runs later on the companion); a refusal surfaces WHY it was
+// refused; a bridge/infra failure is an honest error — never a fabricated proof.
+export function verifyRequestMessage(resp: VerifyResponse): { tone: DecisionTone; text: string } {
+  switch (resp.outcome) {
+    case 'requested':
+      return {
+        tone: 'success',
+        text: 'Verification requested — the frozen-suite proof runs on your companion; refresh for the result.',
+      };
+    case 'refused':
+      return {
+        tone: 'error',
+        text: `Not requested — ${resp.refused_reason ?? 'a fail-closed gate blocked the request'}.`,
+      };
+    default:
+      return { tone: 'error', text: `Error — ${resp.error ?? 'the verify request could not be completed'}.` };
+  }
+}
+
+export interface VerifyEvidence {
+  tone: DecisionTone;
+  label: string;
+  detail: string;
+}
+
+// The ADDED Tier-2 evidence block, rendered NEXT TO the Tier-1 judge/RLM proof/gate
+// lines. Honest by construction: a blocked / errored / no-suite verify is shown AS SUCH
+// and never dressed up as verified; every number comes straight from the proof_* the
+// companion wrote (SELECT-only — the app never recomputes proving). Returns null when
+// no verify was ever requested for this proposal.
+export function verifyEvidence(row: ProposedActionRow): VerifyEvidence | null {
+  const status = (row.verify_status ?? '').toLowerCase();
+  if (!status) return null;
+  switch (status) {
+    case 'requested':
+      return {
+        tone: 'warning',
+        label: 'Tier-2 verify: requested',
+        detail: 'Frozen-suite proof queued on the companion — refresh for the result.',
+      };
+    case 'verified': {
+      const savings = hasNum(row.proof_realized_savings_pct)
+        ? fmtSignedPct(row.proof_realized_savings_pct)
+        : '—';
+      return {
+        tone: 'success',
+        label: 'Tier-2 verify: PROMOTE',
+        detail: `Frozen-suite proof: ${savings} on ${row.objective_metric}, correctness held · ${fmtInt(row.proof_n_promote)} promote / ${fmtInt(row.proof_n_block)} block${row.proof_suite_version ? ` · suite ${row.proof_suite_version}` : ''}`,
+      };
+    }
+    case 'blocked':
+      return {
+        tone: 'error',
+        label: 'Tier-2 verify: BLOCK',
+        detail: `Frozen-suite proof did NOT clear the bar — ${fmtInt(row.proof_n_promote)} promote / ${fmtInt(row.proof_n_block)} block / ${fmtInt(row.proof_n_errored)} errored${row.proof_correctness_held ? '' : ', correctness not held'}.`,
+      };
+    case 'errored':
+      return {
+        tone: 'error',
+        label: 'Tier-2 verify: errored',
+        detail: `The proof could not run — ${row.verify_error || 'unknown error'}. No proof recorded (fail-closed).`,
+      };
+    case 'no_suite':
+      return {
+        tone: 'error',
+        label: 'Tier-2 verify: no suite',
+        detail: `No frozen suite is configured — ${row.verify_error || 'the deployer must freeze a suite first'}. Nothing was proven (fail-closed).`,
+      };
+    default:
+      return {
+        tone: 'warning',
+        label: `Tier-2 verify: ${status}`,
+        detail: row.verify_error || 'Unknown verify state.',
+      };
   }
 }

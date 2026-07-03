@@ -1,4 +1,4 @@
-export { ApprovalsPlugin, approvals, handleDecision, readApprover } from './approvals';
+export { ApprovalsPlugin, approvals, handleDecision, handleVerify, readApprover } from './approvals';
 export type { DecisionHttpRequest, DecisionHttpResponse } from './approvals';
 export { spawnPythonApplyBridge, jobTriggerApplyBridge, selectApplyBridge, resolveApplyTransport } from './bridge';
 export type {
@@ -9,3 +9,10 @@ export type {
   JobTriggerBridgeOptions,
   ApplyTransport,
 } from './bridge';
+export {
+  spawnPythonVerifyBridge,
+  selectVerifyBridge,
+  resolveVerifyTransport,
+  deferredJobVerifyBridge,
+} from './verify_bridge';
+export type { VerifyBridge, VerifyBridgeResult, VerifyInput, VerifyTransport } from './verify_bridge';

@@ -4,21 +4,27 @@ import { sql } from '@databricks/appkit-ui/js';
 import {
   actionKindLabel,
   buildDecisionRequest,
+  buildVerifyRequest,
   changeUnderReview,
   decisionMessage,
   gateSummary,
   isPending,
+  isProvable,
   proofSummary,
   rejectReasonError,
   riskClassLabel,
   sortRows,
+  verifyEvidence,
+  verifyRequestMessage,
   type DecisionKind,
   type DecisionResponse,
   type DecisionTone,
   type ProposedActionRow,
+  type VerifyResponse,
 } from '../lib/approvals';
 
 const DECISION_ENDPOINT = '/api/approvals/decision';
+const VERIFY_ENDPOINT = '/api/approvals/verify';
 
 const TONE_CLASS: Record<DecisionTone, string> = {
   success: 'text-emerald-700 dark:text-emerald-300',
@@ -103,8 +109,15 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState<DecisionKind | null>(null);
   const [message, setMessage] = useState<{ tone: DecisionTone; text: string } | null>(null);
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState<{ tone: DecisionTone; text: string } | null>(null);
   const change = changeUnderReview(row);
   const rejectError = rejectReasonError(reason);
+  // "Verify on my suite" is evidence for skill/instruction/prompt changes only — the
+  // frozen suite can't run a metric-view / revert / agent-task, so the button is N/A
+  // for those kinds. The engine independently refuses a non-provable request.
+  const provable = isProvable(row.action_kind);
+  const evidence = verifyEvidence(row);
 
   async function decide(decision: DecisionKind) {
     setMessage(null);
@@ -146,6 +159,38 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
     }
   }
 
+  // Request the opt-in Tier-2 frozen-suite proof. This does NOT decide the proposal —
+  // it asks the companion for harder evidence; the proof comes back as ADDED evidence
+  // on a later refresh. Fail-closed: a 401 / refusal / bridge error is surfaced
+  // honestly and nothing is proven.
+  async function requestVerify() {
+    setVerifyMsg(null);
+    setVerifyBusy(true);
+    try {
+      const res = await fetch(VERIFY_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildVerifyRequest(row)),
+      });
+      const body = (await res.json().catch(() => ({}))) as VerifyResponse;
+      if (!res.ok && !body.outcome) {
+        setVerifyMsg({
+          tone: 'error',
+          text: res.status === 401 ? 'Not authenticated — sign in to verify.' : `Request failed (${res.status}).`,
+        });
+        return;
+      }
+      setVerifyMsg(verifyRequestMessage(body));
+      // A successful request flips verify_status to 'requested' in UC — refresh so the
+      // queue reflects it (and later refreshes surface the proof the companion writes).
+      if (body.outcome === 'requested') onDecided();
+    } catch (err) {
+      setVerifyMsg({ tone: 'error', text: err instanceof Error ? err.message : 'Network error.' });
+    } finally {
+      setVerifyBusy(false);
+    }
+  }
+
   return (
     <Card className="shadow-sm">
       <CardContent className="p-4 space-y-3">
@@ -176,6 +221,11 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
           <p>
             <span className="font-semibold">Gate:</span> {gateSummary(row)}
           </p>
+          {evidence && (
+            <p className={TONE_CLASS[evidence.tone]}>
+              <span className="font-semibold">{evidence.label}</span> — {evidence.detail}
+            </p>
+          )}
         </div>
 
         <details className="text-sm">
@@ -207,6 +257,26 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
               {busy === 'reject' ? 'Rejecting…' : 'Reject'}
             </Button>
             {message && <span className={`text-sm ${TONE_CLASS[message.tone]}`}>{message.text}</span>}
+          </div>
+
+          {/* Opt-in Tier-2: request a frozen-suite proof for harder evidence before
+              deciding. Evidence only — it never approves. Greyed/N-A for kinds the
+              suite can't run (metric view / revert / agent task). */}
+          <div className="flex flex-wrap items-center gap-2">
+            {provable ? (
+              <Button variant="outline" onClick={() => void requestVerify()} disabled={verifyBusy || busy !== null}>
+                {verifyBusy ? 'Requesting…' : 'Verify on my suite'}
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                disabled
+                title="The frozen suite can't run this kind of change — verification is not applicable."
+              >
+                Verify on my suite (N/A)
+              </Button>
+            )}
+            {verifyMsg && <span className={`text-sm ${TONE_CLASS[verifyMsg.tone]}`}>{verifyMsg.text}</span>}
           </div>
         </div>
       </CardContent>
