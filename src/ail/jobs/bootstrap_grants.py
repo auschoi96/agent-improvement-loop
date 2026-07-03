@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 from ail.compare.monitoring import MonitoringWarehouseConfig, configure_monitoring_warehouse
 from ail.jobs.bootstrap_tables import ensure_app_tables
-from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA, REFERENCE_EXPERIMENT
+from ail.publish import DEFAULT_CATALOG, REFERENCE_EXPERIMENT
 
 if TYPE_CHECKING:
     from mlflow import MlflowClient
@@ -74,6 +74,17 @@ DEFAULT_CLUSTER_SIZE = "2X-Small"
 #: >= 10). Keeps an idle framework warehouse from billing.
 DEFAULT_AUTO_STOP_MINS = 10
 
+# Values from the original reference workspace. Deploy-time bootstrap refuses
+# these so a reusable checkout cannot silently target that workspace's assets.
+REFERENCE_WORKSPACE_DEFAULTS: dict[str, frozenset[str]] = {
+    "experiment_id": frozenset({REFERENCE_EXPERIMENT}),
+    "warehouse_id": frozenset({"7d1d3dbb3ba65f2a"}),
+    "catalog": frozenset({DEFAULT_CATALOG}),
+    "schema": frozenset({"agent_improvement_loop"}),
+}
+
+PLACEHOLDER_VALUES = frozenset({"REPLACE_ME", "CHANGE_ME", "TODO", "TBD", "NONE", "NULL"})
+
 
 @dataclass(frozen=True, slots=True)
 class BootstrapResult:
@@ -84,6 +95,48 @@ class BootstrapResult:
     granted_sp_id: str | None
     tables_ensured: list[str]
     monitoring: MonitoringWarehouseConfig | None
+
+
+def _workspace_value_error(var_name: str, value: str | None) -> str | None:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return f"{var_name} is empty"
+
+    upper = cleaned.upper()
+    if upper in PLACEHOLDER_VALUES or (cleaned.startswith("<") and cleaned.endswith(">")):
+        return f"{var_name} is a placeholder"
+    if cleaned.startswith("${") and cleaned.endswith("}"):
+        return f"{var_name} is an unresolved bundle reference"
+    if cleaned in REFERENCE_WORKSPACE_DEFAULTS.get(var_name, frozenset()):
+        return f"{var_name} is a reference workspace default"
+    return None
+
+
+def validate_workspace_values(
+    *,
+    experiment_id: str,
+    warehouse_id: str | None,
+    catalog: str,
+    schema: str,
+) -> None:
+    """Fail closed on workspace-specific deploy values before any workspace calls."""
+    errors = [
+        error
+        for error in (
+            _workspace_value_error("experiment_id", experiment_id),
+            _workspace_value_error("warehouse_id", warehouse_id),
+            _workspace_value_error("catalog", catalog),
+            _workspace_value_error("schema", schema),
+        )
+        if error
+    ]
+    if errors:
+        details = "; ".join(errors)
+        raise SystemExit(
+            "Refusing to run against empty, placeholder, or reference workspace defaults "
+            f"({details}); set --experiment/--warehouse-id/--catalog/--schema to your own "
+            "workspace values."
+        )
 
 
 def _default_workspace_client() -> Any:
@@ -172,8 +225,8 @@ def bootstrap(
     warehouse_name: str = DEFAULT_WAREHOUSE_NAME,
     cluster_size: str = DEFAULT_CLUSTER_SIZE,
     auto_stop_mins: int = DEFAULT_AUTO_STOP_MINS,
-    catalog: str = DEFAULT_CATALOG,
-    schema: str = DEFAULT_SCHEMA,
+    catalog: str = "",
+    schema: str = "",
     client: Any | None = None,
     mlflow_client: MlflowClient | None = None,
 ) -> BootstrapResult:
@@ -181,7 +234,8 @@ def bootstrap(
 
     Args:
         experiment_id: MLflow experiment to tag with the monitoring warehouse.
-        warehouse_id: Existing warehouse to use; blank/``None`` => find-or-create.
+        warehouse_id: Existing warehouse to use; must be explicit at the bootstrap
+            boundary so reusable deploys cannot fall back to a reference workspace.
         framework_sp_id: Single framework SP to grant ``CAN_USE``; blank/``None``
             => skip the grant (the app SP is already granted via the app's
             resource declaration, and a job running as the deploying identity
@@ -189,8 +243,7 @@ def bootstrap(
         warehouse_name, cluster_size, auto_stop_mins: serverless-warehouse spec
             used only on the create path.
         catalog, schema: Unity Catalog location of the app's tables; the
-            table-ensure step creates every app-read table here (defaults match
-            the app's ``config/queries/*.sql`` and the writer modules).
+            table-ensure step creates every app-read table here.
         client: Databricks ``WorkspaceClient`` (injectable for tests).
         mlflow_client: ``MlflowClient`` passed through to
             :func:`configure_monitoring_warehouse` (injectable for tests).
@@ -198,8 +251,12 @@ def bootstrap(
     Returns:
         A :class:`BootstrapResult` describing what was resolved/done.
     """
-    if not experiment_id or not experiment_id.strip():
-        raise ValueError("experiment_id must be a non-empty experiment id")
+    validate_workspace_values(
+        experiment_id=experiment_id,
+        warehouse_id=warehouse_id,
+        catalog=catalog,
+        schema=schema,
+    )
 
     if client is None:
         client = _default_workspace_client()
@@ -251,12 +308,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "run once as a workspace admin."
         )
     )
-    parser.add_argument("--experiment", default=REFERENCE_EXPERIMENT)
+    parser.add_argument("--experiment", default="")
     parser.add_argument(
         "--warehouse-id",
         default=os.environ.get("AIL_WAREHOUSE_ID", ""),
-        help="Existing SQL warehouse id to use. Empty => find-or-create a small "
-        "serverless warehouse named --warehouse-name.",
+        help="Existing SQL warehouse id to use. Required; reference workspace "
+        "defaults and placeholders are refused before any workspace calls.",
     )
     parser.add_argument(
         "--framework-sp-id",
@@ -269,13 +326,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--auto-stop-mins", default=DEFAULT_AUTO_STOP_MINS, type=int)
     parser.add_argument(
         "--catalog",
-        default=DEFAULT_CATALOG,
-        help="Unity Catalog catalog holding the app's tables (table-ensure step).",
+        default="",
+        help="Unity Catalog catalog holding the app's tables (table-ensure step). "
+        "Required; the reference catalog is refused.",
     )
     parser.add_argument(
         "--schema",
-        default=DEFAULT_SCHEMA,
-        help="Schema (within --catalog) holding the app's tables (table-ensure step).",
+        default="",
+        help="Schema (within --catalog) holding the app's tables (table-ensure step). Required.",
     )
     return parser.parse_args(argv)
 
@@ -284,8 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     result = bootstrap(
         experiment_id=args.experiment,
-        # Empty strings (the default when the operator omits them) mean
-        # "not provided" -> find-or-create / skip-grant.
+        # Empty strings are still collapsed before bootstrap so the guard reports
+        # one clear missing-value error for omitted CLI options.
         warehouse_id=args.warehouse_id or None,
         framework_sp_id=args.framework_sp_id or None,
         warehouse_name=args.warehouse_name,

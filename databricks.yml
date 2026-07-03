@@ -16,16 +16,16 @@ artifacts:
 variables:
   experiment_id:
     description: MLflow experiment whose traces are summarized into the L0 tables.
-    default: '660599403165942'
+    default: ''
   warehouse_id:
     description: SQL warehouse id used to create + (atomically) populate the L0 UC Delta tables.
-    default: 7d1d3dbb3ba65f2a
+    default: ''
   catalog:
     description: Unity Catalog catalog that holds the L0 tables.
-    default: austin_choi_omni_agent_catalog
+    default: ''
   schema:
     description: Schema (within --catalog) that holds l0_session_metrics / l0_corpus_summary / l0_diagnosis.
-    default: agent_improvement_loop
+    default: ''
   publish_cron:
     description: >-
       Quartz cron for the refresh schedule (sec min hour day-of-month month day-of-week).

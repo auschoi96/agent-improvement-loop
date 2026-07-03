@@ -23,6 +23,12 @@ can actually read traces.
 > the framework is turnkey for everyone else. This is the Databricks permission
 > model — there is no bypass, and none should be added.
 
+> [!IMPORTANT]
+> `experiment_id`, `warehouse_id` / `sql_warehouse_id`, `catalog`, and `schema`
+> have **no reusable default**. Pass them explicitly for your workspace; the
+> bootstrap refuses empty, placeholder, or reference-workspace values before any
+> deploy-time workspace changes.
+
 ---
 
 ## 0. What deploys
@@ -78,18 +84,18 @@ databricks bundle deploy \
 
 `warehouse_id` (root bundle) and `sql_warehouse_id` (app bundle) **must be the
 same warehouse** — that is what lets one grant cover the whole framework. Both
-default to the reference workspace's warehouse so an unflagged deploy still works.
+must be provided explicitly for each workspace.
 
-### Auto-provision when none is given
+### Auto-provision a warehouse
 
-If you do not have a warehouse, the bootstrap step provisions one — a small
+If you do not have a warehouse, provision one first — a small
 (`2X-Small`), serverless (`PRO`) warehouse with a 10-minute auto-stop, found-or-
 created **by name** (`ail-framework-serverless`) so re-runs never make a second
-one. Run the bootstrap with **no** `--warehouse-id`; it prints the id it created:
+one. Then pass its id explicitly to bootstrap and both bundles:
 
 ```bash
-ail-bootstrap-grants --experiment <EXPERIMENT_ID> --framework-sp-id <FRAMEWORK_SP_ID>
-# -> [ail.jobs.bootstrap_grants] warehouse=<NEW_ID> (created) grant_can_use=<sp> ...
+ail-bootstrap-grants --experiment <EXPERIMENT_ID> --warehouse-id <NEW_ID> \
+  --catalog <CATALOG> --schema <SCHEMA> --framework-sp-id <FRAMEWORK_SP_ID>
 ```
 
 Then deploy both bundles with `warehouse_id=<NEW_ID>` / `sql_warehouse_id=<NEW_ID>`

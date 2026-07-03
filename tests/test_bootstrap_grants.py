@@ -28,6 +28,7 @@ from ail.jobs.bootstrap_grants import (
     ensure_warehouse,
     grant_warehouse_can_use,
     main,
+    validate_workspace_values,
 )
 
 # -- fakes -----------------------------------------------------------------
@@ -187,25 +188,27 @@ def test_bootstrap_creates_grants_and_tags(monkeypatch: pytest.MonkeyPatch) -> N
 
     result = bootstrap(
         experiment_id="EXP-9",
-        warehouse_id=None,
+        warehouse_id="wh-explicit",
         framework_sp_id="sp-9",
+        catalog="prod_catalog",
+        schema="prod_schema",
         client=_FakeClient(api, statement_execution=stmts),
         mlflow_client=mlflow,
     )
 
-    assert result.warehouse_id == "fresh-wh"
-    assert result.warehouse_created is True
+    assert result.warehouse_id == "wh-explicit"
+    assert result.warehouse_created is False
     assert result.granted_sp_id == "sp-9"
     # table-ensure ran against the resolved warehouse, only CREATE ... IF NOT EXISTS
     assert stmts.statements, "bootstrap must issue the table-ensure DDL"
     assert all("IF NOT EXISTS" in s for s in stmts.statements)
     assert result.tables_ensured  # the app-read table set was covered
-    # grant landed on the freshly-created warehouse
-    assert api.update_perm_calls[0][0] == "fresh-wh"
+    # grant landed on the explicit warehouse
+    assert api.update_perm_calls[0][0] == "wh-explicit"
     # monitoring tag set on the experiment with the resolved warehouse
-    assert mlflow.tag_calls == [("EXP-9", MONITORING_WAREHOUSE_TAG, "fresh-wh")]
+    assert mlflow.tag_calls == [("EXP-9", MONITORING_WAREHOUSE_TAG, "wh-explicit")]
     assert result.monitoring is not None
-    assert result.monitoring.warehouse_id == "fresh-wh"
+    assert result.monitoring.warehouse_id == "wh-explicit"
     # set_env=False: bootstrap must not mutate the process environment
     import os
 
@@ -220,6 +223,8 @@ def test_bootstrap_skips_grant_when_no_sp() -> None:
         experiment_id="EXP-1",
         warehouse_id="wh-given",
         framework_sp_id="   ",  # blank == not provided
+        catalog="prod_catalog",
+        schema="prod_schema",
         client=_FakeClient(api),
         mlflow_client=mlflow,
     )
@@ -234,14 +239,99 @@ def test_bootstrap_skips_grant_when_no_sp() -> None:
 
 def test_bootstrap_rejects_blank_experiment() -> None:
     api = _FakeWarehousesAPI()
-    with pytest.raises(ValueError, match="experiment_id"):
+    with pytest.raises(SystemExit, match="experiment_id is empty"):
         bootstrap(
             experiment_id="  ",
             warehouse_id="wh",
             framework_sp_id=None,
+            catalog="prod_catalog",
+            schema="prod_schema",
             client=_FakeClient(api),
             mlflow_client=_FakeMlflowClient(),
         )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"experiment_id": "", "warehouse_id": "wh", "catalog": "cat", "schema": "sch"},
+            "experiment_id is empty",
+        ),
+        (
+            {
+                "experiment_id": "660599403165942",
+                "warehouse_id": "wh",
+                "catalog": "cat",
+                "schema": "sch",
+            },
+            "experiment_id is a reference workspace default",
+        ),
+        (
+            {"experiment_id": "exp", "warehouse_id": "", "catalog": "cat", "schema": "sch"},
+            "warehouse_id is empty",
+        ),
+        (
+            {
+                "experiment_id": "exp",
+                "warehouse_id": "7d1d3dbb3ba65f2a",
+                "catalog": "cat",
+                "schema": "sch",
+            },
+            "warehouse_id is a reference workspace default",
+        ),
+        (
+            {
+                "experiment_id": "exp",
+                "warehouse_id": "wh",
+                "catalog": "austin_choi_omni_agent_catalog",
+                "schema": "sch",
+            },
+            "catalog is a reference workspace default",
+        ),
+        (
+            {
+                "experiment_id": "exp",
+                "warehouse_id": "wh",
+                "catalog": "cat",
+                "schema": "agent_improvement_loop",
+            },
+            "schema is a reference workspace default",
+        ),
+        (
+            {
+                "experiment_id": "exp",
+                "warehouse_id": "wh",
+                "catalog": "cat",
+                "schema": "REPLACE_ME",
+            },
+            "schema is a placeholder",
+        ),
+        (
+            {
+                "experiment_id": "exp",
+                "warehouse_id": "wh",
+                "catalog": "${var.catalog}",
+                "schema": "sch",
+            },
+            "catalog is an unresolved bundle reference",
+        ),
+    ],
+)
+def test_workspace_value_guard_rejects_empty_placeholder_and_reference_values(
+    kwargs: dict[str, str], message: str
+) -> None:
+    with pytest.raises(SystemExit, match=message):
+        validate_workspace_values(**kwargs)
+
+
+def test_workspace_value_guard_accepts_distinct_explicit_values() -> None:
+    validate_workspace_values(
+        experiment_id="exp-prod-123",
+        warehouse_id="wh-prod-123",
+        catalog="prod_ail_catalog",
+        schema="prod_ail_schema",
+    )
 
 
 # -- main wiring -----------------------------------------------------------

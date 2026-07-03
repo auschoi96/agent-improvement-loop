@@ -8,7 +8,7 @@ variables:
       warehouse the publish job + scorers use (root bundle's `warehouse_id`), so a
       single CAN_USE grant covers the whole framework. Override with
       --var sql_warehouse_id=... or BUNDLE_VAR_sql_warehouse_id.
-    default: 7d1d3dbb3ba65f2a
+    default: ''
   apply_job_id:
     description: >-
       Numeric job id of the pre-deployed `ail-apply-service` job (created by the
