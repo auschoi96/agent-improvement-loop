@@ -25,6 +25,7 @@ from ail.loop.candidate_builders import (
     gepa_candidate_builder,
     gepa_cost_gate,
     gepa_target_key,
+    gepa_target_objective,
     registry_candidate_builder,
 )
 from ail.loop.controller import Candidate
@@ -69,6 +70,17 @@ def _quality_goal() -> CompiledGoal:
     ).confirm()
 
 
+def _token_goal() -> CompiledGoal:
+    """A token-reduction goal (the dimension GEPA can genuinely prove today)."""
+    return CompiledGoal(
+        objective_metric="total_tokens",
+        direction="minimize",
+        target=GoalTarget(value=-0.30, kind="relative"),
+        guardrails=(Guardrail(name="modularity", kind="judge", threshold=4.0),),
+        cohort="claude_code",
+    ).confirm()
+
+
 def _skill_decision(trigger: TriggerKind = TriggerKind.JUDGE_DIMENSION_BELOW_THRESHOLD) -> Decision:
     return Decision(
         ActionKind.SKILL_UPDATE,
@@ -99,6 +111,30 @@ def _gepa_decision(
             observed_value=3.1,
             threshold=4.0,
             judge_name=judge_name,
+            n_traces=n_traces,
+            trace_refs=[f"t{i}" for i in range(n_traces)],
+        ),
+    )
+
+
+def _token_gepa_decision(*, n_traces: int = 5) -> Decision:
+    """A GEPA_PROMPT routed to the token/efficiency objective (metric, no judge).
+
+    The honest GEPA path GEPA can prove today: judge_name is unset so it routes to
+    ``metric:total_tokens`` (:func:`gepa_target_key`) and its routed objective is
+    ``total_tokens`` (:func:`gepa_target_objective`), which the held-out proof genuinely
+    speaks to. Token efficiency is an L0 metric, not a judged dimension.
+    """
+    return Decision(
+        ActionKind.GEPA_PROMPT,
+        default_risk_class(ActionKind.GEPA_PROMPT),
+        TriggerSignal(
+            kind=TriggerKind.AGENT_PLANNER,
+            summary="planner: optimize the token-efficiency skill body via GEPA",
+            metric="total_tokens",
+            observed_value=900.0,
+            threshold=700.0,
+            judge_name=None,
             n_traces=n_traces,
             trace_refs=[f"t{i}" for i in range(n_traces)],
         ),
@@ -321,6 +357,9 @@ def _seed_resolver(seed: GepaSeed | None) -> object:
 
 
 _SEED = GepaSeed(target_key="judge:modularity", seed_body="seed body")
+#: The token-objective seed: its target_key matches _token_gepa_decision's routed
+#: target (metric:total_tokens), so the honest token GEPA path can bind + emit.
+_TOKEN_SEED = GepaSeed(target_key="metric:total_tokens", seed_body="seed body")
 
 
 def test_gepa_target_key_is_generic_not_token_efficiency() -> None:
@@ -345,25 +384,64 @@ def test_gepa_target_key_is_generic_not_token_efficiency() -> None:
     assert gepa_target_key(bare, goal=_quality_goal()) == "goal:modularity"
 
 
-def test_gepa_builder_produces_self_proving_candidate(tmp_path: Path) -> None:
+def test_gepa_target_objective_mirrors_key_resolution() -> None:
+    # judge dimension -> the judged dimension is the objective a proof must speak to
+    assert (
+        gepa_target_objective(_gepa_decision(judge_name="modularity"), goal=_quality_goal())
+        == "modularity"
+    )
+    # metric-only trigger -> that metric
+    assert gepa_target_objective(_token_gepa_decision(), goal=_quality_goal()) == "total_tokens"
+    # nothing on the trigger -> the goal's own objective (still not hardcoded)
+    bare = Decision(
+        ActionKind.GEPA_PROMPT,
+        default_risk_class(ActionKind.GEPA_PROMPT),
+        TriggerSignal(kind=TriggerKind.AGENT_PLANNER, summary="x"),
+    )
+    assert gepa_target_objective(bare, goal=_token_goal()) == "total_tokens"
+
+
+def test_gepa_builder_fails_closed_when_gepa_cannot_prove_routed_dimension(
+    tmp_path: Path,
+) -> None:
+    # A judge:modularity GEPA decision. GEPA's evaluator proves ONLY the token/efficiency
+    # objective today, so the held-out proof's objective_metric is total_tokens, NOT
+    # modularity. The builder REFUSES to emit a mislabeled token-savings proof onto a
+    # quality target — it FAILS CLOSED (no proposal, no artifact) rather than pretend to
+    # have proven modularity. (Full "optimize anything" — scoring against the routed
+    # judge on held-out — is the documented follow-on.)
     build = gepa_candidate_builder(
         gepa_run=_gepa_run(_result(evolved_pct=50.0, seed_pct=30.0)),
-        seed_resolver=_seed_resolver(_SEED),
+        seed_resolver=_seed_resolver(_SEED),  # target_key="judge:modularity"
         artifacts_root=tmp_path,
     )
-    candidate = build(_gepa_decision(), goal=_quality_goal(), agent=_agent())
+    assert build(_gepa_decision(), goal=_quality_goal(), agent=_agent()) is None
+    assert not list(tmp_path.iterdir())  # no mislabeled artifact written
+
+
+def test_gepa_builder_produces_candidate_for_token_objective(tmp_path: Path) -> None:
+    # The honest path GEPA CAN prove: the routed objective is total_tokens (metric
+    # trigger), which the held-out proof genuinely speaks to -> a self-proving candidate
+    # is emitted, and its pre-computed held-out proof travels on the candidate.
+    build = gepa_candidate_builder(
+        gepa_run=_gepa_run(_result(evolved_pct=50.0, seed_pct=30.0)),
+        seed_resolver=_seed_resolver(_TOKEN_SEED),
+        artifacts_root=tmp_path,
+    )
+    candidate = build(_token_gepa_decision(), goal=_token_goal(), agent=_agent())
     assert candidate is not None
     assert candidate.change.kind is ChangeKind.EVOLVED_BODY_REF
-    # the pre-computed held-out proof travels on the candidate (evidence-first path)
     assert candidate.proof is not None
     assert candidate.proof.proved_improvement and candidate.proof.correctness_held
+    # the proof genuinely corresponds to the routed target objective
+    assert candidate.proof.objective_metric == "total_tokens"
     # the evolved_body_ref is a REAL file the apply engine can read + re-validate
     ref = candidate.change.evolved_body_ref
     assert ref and Path(ref).is_file()
     reloaded = GepaOptimizationResult.model_validate_json(Path(ref).read_text(encoding="utf-8"))
     assert reloaded.changed and reloaded.holdout_savings_delta_pct == 20.0
-    # target key is generic (judge dimension), not token_efficiency
-    assert "judge:modularity" in candidate.change.summary
+    # target key is generic (the routed metric), not hardcoded token_efficiency
+    assert "metric:total_tokens" in candidate.change.summary
 
 
 def test_gepa_builder_fails_closed_on_changed_false(tmp_path: Path) -> None:
@@ -509,7 +587,13 @@ def test_cost_policy_permits_lane_b_planner_gepa() -> None:
 
 
 def _companion_registry(tmp_path: Path) -> object:
-    """The companion wiring: SKILL_UPDATE -> quick-edit, GEPA_PROMPT -> cost-gated GEPA."""
+    """The companion wiring: SKILL_UPDATE -> quick-edit, GEPA_PROMPT -> cost-gated GEPA.
+
+    GEPA routes to the token/efficiency objective — the dimension GEPA can genuinely
+    prove today — so its held-out proof honestly matches the routed target. The cost
+    policy permits a metric-driven (non-judge) token GEPA, since token efficiency is an
+    L0 metric rather than a judged dimension.
+    """
     return registry_candidate_builder(
         {
             ActionKind.SKILL_UPDATE: agent_skill_edit_builder(
@@ -518,10 +602,10 @@ def _companion_registry(tmp_path: Path) -> object:
             ActionKind.GEPA_PROMPT: gepa_cost_gate(
                 gepa_candidate_builder(
                     gepa_run=_gepa_run(_result(evolved_pct=50.0, seed_pct=30.0)),
-                    seed_resolver=_seed_resolver(_SEED),
+                    seed_resolver=_seed_resolver(_TOKEN_SEED),
                     artifacts_root=tmp_path,
                 ),
-                policy=GepaCostPolicy(),
+                policy=GepaCostPolicy(require_judge_dimension=False),
             ),
         }
     )
@@ -537,7 +621,7 @@ def test_capstone_skill_update_routes_to_quick_edit(tmp_path: Path) -> None:
 
 def test_capstone_persistent_gepa_routes_to_gepa(tmp_path: Path) -> None:
     registry = _companion_registry(tmp_path)
-    out = registry(_gepa_decision(n_traces=5), goal=_quality_goal(), agent=_agent())
+    out = registry(_token_gepa_decision(n_traces=5), goal=_token_goal(), agent=_agent())
     assert out is not None
     assert out.change.kind is ChangeKind.EVOLVED_BODY_REF  # the full GEPA run
     assert out.proof is not None and out.proof.proved_improvement
@@ -545,7 +629,7 @@ def test_capstone_persistent_gepa_routes_to_gepa(tmp_path: Path) -> None:
 
 def test_capstone_trivial_gepa_is_cost_gated_to_none(tmp_path: Path) -> None:
     registry = _companion_registry(tmp_path)
-    assert registry(_gepa_decision(n_traces=1), goal=_quality_goal(), agent=_agent()) is None
+    assert registry(_token_gepa_decision(n_traces=1), goal=_token_goal(), agent=_agent()) is None
 
 
 # ==========================================================================
@@ -555,10 +639,10 @@ def test_capstone_trivial_gepa_is_cost_gated_to_none(tmp_path: Path) -> None:
 # ==========================================================================
 
 
-def _ready_modularity() -> ReadinessStatus:
+def _ready_token() -> ReadinessStatus:
     return ReadinessStatus(
         cohort_name="claude_code",
-        objective_metric="modularity",
+        objective_metric="total_tokens",
         requires_quality=True,
         guardrail_names=["modularity"],
         trace_count=80,
@@ -583,8 +667,10 @@ def _ready_modularity() -> ReadinessStatus:
 
 def test_evidence_cycle_carries_gepa_proof_and_quick_edit_none(tmp_path: Path) -> None:
     registry = _companion_registry(tmp_path)
-    # Lane B proposes both a SKILL_UPDATE (quick-edit) and a persistent judged-dimension
-    # GEPA_PROMPT; Lane A contributes nothing (empty feedback).
+    # Lane B proposes both a SKILL_UPDATE (quick-edit, on the modularity guardrail judge)
+    # and a persistent token-objective GEPA_PROMPT; Lane A contributes nothing (empty
+    # feedback). The GEPA proof genuinely matches the routed (token) objective, so it
+    # rides through; the quick-edit carries proof=None.
     skill_dec = Decision(
         ActionKind.SKILL_UPDATE,
         default_risk_class(ActionKind.SKILL_UPDATE),
@@ -596,19 +682,17 @@ def test_evidence_cycle_carries_gepa_proof_and_quick_edit_none(tmp_path: Path) -
             n_traces=4,
         ),
     )
-    gepa_dec = _gepa_decision(
-        trigger=TriggerKind.AGENT_PLANNER, judge_name="modularity", n_traces=5
-    )
+    gepa_dec = _token_gepa_decision(n_traces=5)
 
     def _planner(feedback: FeedbackBundle, goal: CompiledGoal, agent: Agent) -> list[Decision]:
         return [skill_dec, gepa_dec]
 
     ecr = run_evidence_cycle(
         _agent(),
-        _quality_goal(),
+        _token_goal(),
         feedback_source=lambda: FeedbackBundle(),
         candidate_builder=registry,
-        gate=lambda *, goal, agent: _ready_modularity(),
+        gate=lambda *, goal, agent: _ready_token(),
         planner=_planner,
         now="2026-07-08T00:00:00+00:00",
     )

@@ -97,6 +97,7 @@ __all__ = [
     "GepaSeedResolver",
     "GepaRunFn",
     "gepa_target_key",
+    "gepa_target_objective",
     "gepa_candidate_builder",
     # Cost-aware routing (piece 4)
     "GepaCostPolicy",
@@ -532,6 +533,30 @@ def gepa_target_key(decision: Decision, *, goal: CompiledGoal) -> str:
     return f"goal:{goal.objective_metric}"
 
 
+def gepa_target_objective(decision: Decision, *, goal: CompiledGoal) -> str:
+    """The objective metric a GEPA proof MUST speak to for the routed target.
+
+    The companion of :func:`gepa_target_key`: where that returns the routed target's
+    stable *identity* (``judge:<name>`` / ``metric:<metric>`` / ``goal:<obj>``), this
+    returns — in the **same** resolution order — the objective metric a genuine proof
+    for that target must carry: the judged dimension (``judge_name``) when the trigger
+    rests on a judge, else the targeted ``metric``, else the goal's own objective.
+
+    A GEPA candidate is honest only when the objective it *actually proved*
+    (:attr:`~ail.loop.proposals.ProofSummary.objective_metric`, sourced from the
+    held-out :class:`~ail.optimize.phase2.Phase2Artifact`) equals this. Otherwise the
+    proposal would attach a proof for one dimension to a target routed for another —
+    e.g. a ``total_tokens`` savings proof onto a ``judge:modularity`` target — which is
+    exactly the mislabeled-proof path :func:`gepa_candidate_builder` fails closed on.
+    """
+    t = decision.trigger
+    if t.judge_name:
+        return t.judge_name
+    if t.metric:
+        return t.metric
+    return goal.objective_metric
+
+
 def _write_gepa_candidate_artifact(
     result: GepaOptimizationResult, *, root: Path, target_key: str
 ) -> str:
@@ -577,12 +602,28 @@ def gepa_candidate_builder(
     check). The ``evolved_body_ref`` points at a written ``gepa_candidate*.json`` that
     :func:`ail.optimize.prompt_registry.register_gepa_candidate` consumes on approval.
 
-    Fail-closed everywhere (no fabricated candidate): not a ``GEPA_PROMPT`` decision,
-    no resolvable seed, ``gepa_run`` returned ``None`` (no frozen suite / no local
-    Claude), the run did not change the body (``changed=False``), the held-out result
-    did not beat the seed (:func:`ail.optimize.prompt_registry.candidate_improvement`),
-    or the held-out proof does not both prove an improvement and hold correctness —
-    each returns ``None``.
+    Fail-closed everywhere (no fabricated **or mislabeled** candidate): not a
+    ``GEPA_PROMPT`` decision, no resolvable seed, the resolved seed does not match the
+    decision's routed target (:func:`gepa_target_key`), ``gepa_run`` returned ``None``
+    (no frozen suite / no local Claude), the run did not change the body
+    (``changed=False``), the run evolved a *different* seed than the one resolved, the
+    held-out result did not beat the seed
+    (:func:`ail.optimize.prompt_registry.candidate_improvement`), the held-out proof
+    does not both prove an improvement and hold correctness, **or the proof's objective
+    does not match the routed target dimension** — each returns ``None``.
+
+    **Honest genericity (the routed-objective gate).** The builder routes *any* target
+    (:func:`gepa_target_key`), but it refuses to emit a proposal whose proof does not
+    genuinely correspond to that routed dimension: it requires
+    ``proof.objective_metric == gepa_target_objective(decision, goal)``. Because
+    :func:`ail.optimize.gepa_runner.run_gepa_optimization`'s evaluator today proves
+    ONLY the token/efficiency objective, a routed dimension GEPA cannot yet prove (a
+    ``judge:<quality>`` like modularity/correctness) FAILS CLOSED here rather than
+    shipping a token-savings proof mislabeled as a quality improvement. The token/
+    efficiency-objective path — where the proof genuinely matches — is emitted as
+    before. **FOLLOW-ON** for full "optimize anything": generalize GEPA's evaluator to
+    score a candidate against an arbitrary routed judge on the held-out split; that
+    body of work is what lets a quality dimension pass this gate honestly.
     """
     root = Path(artifacts_root)
 
@@ -612,6 +653,20 @@ def gepa_candidate_builder(
         # the apply engine will accept: a real proved improvement with correctness held.
         proof = ProofSummary.from_phase2_artifact(artifact)
         if not (proof.proved_improvement and proof.correctness_held):
+            return None
+        # BLOCKING: the proof must genuinely correspond to the ROUTED target dimension.
+        # run_gepa_optimization's evaluator today proves ONLY the token/efficiency
+        # objective (GepaConfig.objective_metric -> the held-out Phase2Artifact's
+        # objective_metric), so proof.objective_metric is whatever GEPA actually
+        # optimized. If the routed target is a dimension GEPA cannot yet prove — e.g. a
+        # judge:<quality> like modularity/correctness, whose routed objective is that
+        # judge name, not total_tokens — the proof would NOT match, so we FAIL CLOSED
+        # here rather than emit a mislabeled token-savings proof onto a quality target.
+        # FOLLOW-ON: generalizing GEPA's evaluator to score candidates against an
+        # arbitrary routed judge on the held-out split (full "optimize anything") is what
+        # lets those dimensions pass this gate honestly; until then only a target whose
+        # objective GEPA genuinely proved (the token/efficiency path) is emitted.
+        if proof.objective_metric != gepa_target_objective(decision, goal=goal):
             return None
         ref = _write_gepa_candidate_artifact(result, root=root, target_key=seed.target_key)
         change = ProposedChange(
