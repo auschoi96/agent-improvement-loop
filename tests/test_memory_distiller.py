@@ -5,16 +5,31 @@ without a live model (the ``distill`` step and the SQL client are injected).
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from ail.memory.distiller import DistillerConfig, DistillerDeps, run_memory_distiller
 from ail.memory.provenance import ReservedPools
+from ail.memory.writeback import apply_and_write
 
 _ASSESS_COLS = ["name", "target_id", "value_str", "comment", "created_at"]
 _ASSESS_DATA = [
     ["token_efficiency", "a" * 32, "4.0", "read too much", "2026-07-03 07:57:07.085"],
     ["rlm_review", "b" * 32, "80", "efficient", "2026-06-30 02:07:18.127"],
 ]
+
+
+def _candidate(trace_id: str, **over) -> dict:
+    base = {
+        "category": "token_efficiency",
+        "guideline_text": "prefer grep over reading whole files",
+        "score": 0.8,
+        "source_trace_ids": [trace_id],
+        "source_signal": "judge:token_efficiency",
+    }
+    base.update(over)
+    return base
 
 
 def _config() -> DistillerConfig:
@@ -152,3 +167,98 @@ def test_reserved_pools_resolved_when_not_injected(fake_sql_client, monkeypatch)
     with pytest.raises(FileNotFoundError):
         run_memory_distiller(_config(), deps=deps)
     assert _watermark_writes(client) == []
+
+
+def _standard_responder(stmt: str):
+    if "SELECT last_created_at" in stmt:
+        return (["last_created_at"], [])  # never advanced (simulate first/failed-watermark run)
+    if "SELECT name, target_id" in stmt:
+        return (_ASSESS_COLS, _ASSESS_DATA)
+    return None
+
+
+def test_grounding_drops_unread_trace_id_in_a_run(fake_sql_client) -> None:
+    # BLOCKING 1 (end-to-end): the model submits one row grounded in a READ trace and
+    # one citing an UNREAD (non-reserved, format-valid) trace -> only the grounded row
+    # is merged; the fabricated one is dropped and never written.
+    client = fake_sql_client(_standard_responder)
+    merges: list[str] = []
+
+    def distill(assessments, tally):
+        read_ids = frozenset(a.trace_id for a in assessments)  # exactly what the driver threads
+        apply_and_write(
+            [_candidate("a" * 32), _candidate("z" * 32)],  # read, then UNREAD
+            execute=merges.append,
+            catalog="c",
+            schema="s",
+            cohort="claude_code",
+            created_at="ts",
+            reserved=ReservedPools(),
+            read_trace_ids=read_ids,
+            tally=tally,
+        )
+
+    deps = DistillerDeps(
+        client=client, reserved=ReservedPools(), distill=distill, now=lambda: "NOW"
+    )
+    report = run_memory_distiller(_config(), deps=deps)
+
+    assert report.n_written == 1
+    assert report.n_invalid == 1  # the unread citation
+    assert len(merges) == 1
+    assert ("a" * 32) in merges[0]
+    assert ("z" * 32) not in merges[0]  # the fabricated id never reached SQL
+
+
+def test_write_failure_blocks_watermark_and_raises_loudly(fake_sql_client) -> None:
+    # BLOCKING 2: a recorded submit_memory failure -> driver raises + watermark NOT advanced.
+    client = fake_sql_client(_standard_responder)
+
+    def distill(assessments, tally):
+        tally.errors.append("submit_memory failed: MERGE rejected")  # as the tool records it
+
+    deps = DistillerDeps(
+        client=client, reserved=ReservedPools(), distill=distill, now=lambda: "NOW"
+    )
+
+    with pytest.raises(RuntimeError, match="watermark NOT advanced"):
+        run_memory_distiller(_config(), deps=deps)
+    assert _watermark_writes(client) == []
+
+
+def test_reprocess_same_window_inserts_zero_duplicates(fake_sql_client) -> None:
+    # BLOCKING 4: insert succeeded but the watermark never advanced (so the window is
+    # reprocessed). Deterministic ids + the MERGE upsert mean the second run inserts
+    # zero new rows. A stateful fake models the table by tracking merged memory_ids.
+    merged_ids: set[str] = set()
+    net_inserted: list[int] = []
+
+    def merge_execute(sql: str) -> None:
+        ids = set(re.findall(r"[0-9a-f]{64}", sql))  # memory_ids are the only 64-hex tokens
+        net_inserted.append(len(ids - merged_ids))
+        merged_ids.update(ids)
+
+    def distill(assessments, tally):
+        read_ids = frozenset(a.trace_id for a in assessments)
+        apply_and_write(
+            [_candidate("a" * 32)],  # identical candidate each run -> identical deterministic id
+            execute=merge_execute,
+            catalog="c",
+            schema="s",
+            cohort="claude_code",
+            created_at="ts",
+            reserved=ReservedPools(),
+            read_trace_ids=read_ids,
+            tally=tally,
+        )
+
+    # Watermark never advances (responder always returns none), so run 2 reprocesses run 1's window.
+    client = fake_sql_client(_standard_responder)
+    deps = DistillerDeps(
+        client=client, reserved=ReservedPools(), distill=distill, now=lambda: "NOW"
+    )
+
+    run_memory_distiller(_config(), deps=deps)  # run 1
+    run_memory_distiller(_config(), deps=deps)  # run 2, same feedback window
+
+    assert net_inserted == [1, 0]  # second reprocess adds zero duplicate rows

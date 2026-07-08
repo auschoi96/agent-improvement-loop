@@ -33,7 +33,7 @@ MEMORY_TABLE = "agent_memory"
 WATERMARK_TABLE = "agent_memory_watermark"
 
 #: The ``agent_memory`` column order, declared once and reused by both the DDL and
-#: the INSERT builder (:func:`ail.memory.writeback.build_memory_insert`) so the two
+#: the MERGE builder (:func:`ail.memory.writeback.build_memory_merge`) so the two
 #: can never drift.
 MEMORY_COLUMNS: list[str] = [
     "memory_id",

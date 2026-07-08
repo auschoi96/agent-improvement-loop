@@ -39,6 +39,7 @@ from ail.pools import (
     AnchorItem,
     HumanAnchor,
     Pool,
+    PoolOverlapError,
     assert_pools_disjoint,
 )
 
@@ -111,6 +112,49 @@ def _trace_refs(ids: Iterable[str]) -> list[SimpleNamespace]:
     return [SimpleNamespace(info=SimpleNamespace(trace_id=tid)) for tid in ids]
 
 
+def _shares_reserved_prefix(trace_id: str, reserved_ids: frozenset[str]) -> str | None:
+    """The reserved id ``trace_id`` shares a ≥``_MIN_PREFIX_LEN``-char prefix with, or None.
+
+    Deliberately re-implemented independently of :func:`_overlap` so the re-verification
+    gate (:func:`_assert_kept_disjoint`) catches a regression IN the drop pass — a test
+    (or bug) that neuters ``_overlap`` must not also neuter the guard that proves the
+    drop worked.
+    """
+    for rid in reserved_ids:
+        n = min(len(trace_id), len(rid))
+        if n >= _MIN_PREFIX_LEN and trace_id[:n] == rid[:n]:
+            return rid
+    return None
+
+
+def _assert_kept_disjoint(kept_ids: set[str], reserved: ReservedPools) -> None:
+    """Prove the kept ids share no id with the reserved pools, or raise (fail-closed).
+
+    Two independent checks, so a regression in the drop pass RAISES:
+
+    * the canonical **exact** guard reused from :mod:`ail.pools`
+      (:func:`assert_pools_disjoint`), and
+    * a memory-specific **prefix** guard (:func:`_shares_reserved_prefix`) that catches
+      a full candidate id sharing a ≥12-char prefix with a *truncated* reserved id —
+      which the exact set-intersection guard cannot see.
+    """
+    assert_pools_disjoint(
+        alignment_set=AlignmentSet.of(_trace_refs(kept_ids)),
+        human_anchor=HumanAnchor.of(
+            AnchorItem(item_id=hid, human_label="reserved") for hid in reserved.human_anchor_ids
+        ),
+        task_suite_ids=reserved.task_suite_ids,
+    )
+    for tid in kept_ids:
+        rid = _shares_reserved_prefix(tid, reserved.all_ids)
+        if rid is not None:
+            raise PoolOverlapError(
+                f"kept memory row trace id {tid!r} shares a >= {_MIN_PREFIX_LEN}-char prefix "
+                f"with reserved pool id {rid!r} ({reserved.pool_of(rid).value}); the "
+                "provenance drop logic regressed — refusing to write eval-derived memory."
+            )
+
+
 def partition_rows(rows: Iterable[MemoryRow], reserved: ReservedPools) -> Partition:
     """Split ``rows`` into clean (kept) and reserved-overlapping (dropped).
 
@@ -143,17 +187,10 @@ def partition_rows(rows: Iterable[MemoryRow], reserved: ReservedPools) -> Partit
             kept.append(row)
 
     # Canonical re-verification (fail-closed): prove the kept set shares no id with
-    # either reserved pool using the same guard the loop controller runs. The kept
-    # rows' ids are wrapped as an AlignmentSet (the "incoming" data) and checked
-    # against the reserved Task-Suite ids and Human Anchor.
+    # either reserved pool, by BOTH the shared exact guard and an independent prefix
+    # guard, so a regression in the drop pass above RAISES rather than leaking.
     kept_ids = {tid for row in kept for tid in row.source_trace_ids}
-    assert_pools_disjoint(
-        alignment_set=AlignmentSet.of(_trace_refs(kept_ids)),
-        human_anchor=HumanAnchor.of(
-            AnchorItem(item_id=hid, human_label="reserved") for hid in reserved.human_anchor_ids
-        ),
-        task_suite_ids=reserved.task_suite_ids,
-    )
+    _assert_kept_disjoint(kept_ids, reserved)
     return Partition(kept=tuple(kept), dropped=tuple(dropped))
 
 

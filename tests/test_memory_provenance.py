@@ -89,17 +89,31 @@ def test_empty_reserved_keeps_everything() -> None:
     assert part.dropped == ()
 
 
-def test_verification_gate_reuses_pools_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    # If the drop logic ever regressed and let a reserved id through, the
-    # assert_pools_disjoint verification must fail closed (raise), not leak.
+def test_verification_gate_catches_exact_regression(monkeypatch: pytest.MonkeyPatch) -> None:
+    # If the drop logic ever regressed and let an EXACT reserved id through, the
+    # canonical assert_pools_disjoint verification must fail closed (raise), not leak.
     import ail.memory.provenance as prov
 
     reserved = ReservedPools(task_suite_ids=frozenset({"a" * 32}))
     # Force _overlap to miss (simulate a regression), so the reserved row survives
-    # into `kept` and the canonical guard has to catch it.
+    # into `kept` and the re-verification has to catch it.
     monkeypatch.setattr(prov, "_overlap", lambda tid, reserved_ids: None)
     with pytest.raises(PoolOverlapError):
         partition_rows([_row("leak", "a" * 32)], reserved)
+
+
+def test_verification_gate_catches_truncated_prefix_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # BLOCKING 3: a full 32-char candidate sharing a 12-char prefix with a TRUNCATED
+    # reserved id survives a regressed drop pass. Exact set-intersection can't see it,
+    # so the INDEPENDENT prefix guard in the re-verification must raise.
+    import ail.memory.provenance as prov
+
+    reserved = ReservedPools(task_suite_ids=frozenset({"37ed22abfdb1"}))  # 12-char truncated
+    monkeypatch.setattr(prov, "_overlap", lambda tid, reserved_ids: None)  # regression
+    with pytest.raises(PoolOverlapError):
+        partition_rows([_row("leak", "37ed22abfdb17d2ab106f3002478ecdf")], reserved)
 
 
 def test_resolve_reserved_pools_loads_frozen_task_suite() -> None:

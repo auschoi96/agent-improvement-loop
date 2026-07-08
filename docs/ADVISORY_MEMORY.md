@@ -9,7 +9,7 @@ It mirrors the pattern in
 [`auschoi96/dc-assistant-data-review-agent`](https://github.com/auschoi96/dc-assistant-data-review-agent):
 a serverless Databricks Job drives the **Claude Agent SDK** `query()` loop
 in-process, authenticates to Databricks FMAPI with **zero secrets**, and writes via
-a custom `@tool` that INSERTs through the SQL Statement API.
+a custom `@tool` that writes through the SQL Statement API (an idempotent MERGE).
 
 ## What one run does
 
@@ -34,12 +34,17 @@ a custom `@tool` that INSERTs through the SQL Statement API.
    run writes nothing.
 5. **Distill** — the Claude Agent SDK `query()` loop reads the feedback and calls
    the `submit_memory` tool with candidate guideline rows.
-6. **Validate → wall → write** — inside `submit_memory`, each candidate is validated
-   (non-empty guideline, 0–1 score, known signal, ≥1 `source_trace_id`), then the
-   **provenance wall** drops any row whose `source_trace_ids` touch a frozen pool,
-   and the survivors are INSERTed (escaped, never raw-interpolated).
-7. **Advance the watermark** to the newest assessment processed — so a re-run over
-   the same window is a no-op.
+6. **Ground → validate → wall → write** — inside `submit_memory`, each candidate is
+   grounded (**every** cited `source_trace_id` must be in the set read this run — the
+   model cannot cite an unread id), validated (non-empty guideline, 0–1 score, signal
+   *exactly* `rlm` or one of the four `judge:<name>`, ≥1 `source_trace_id`), then the
+   **provenance wall** drops any row whose `source_trace_ids` touch a frozen pool.
+   Survivors are written with a **`MERGE ... WHEN NOT MATCHED`** on a deterministic
+   `memory_id` (escaped, never raw-interpolated), so reprocessing writes no duplicate.
+7. **Advance the watermark** to the newest assessment processed — but **only if no
+   `submit_memory` call failed**. A SQL error or a provenance-wall regression is
+   recorded, the watermark is left untouched, and the run raises loudly so the window
+   is retried next time (duplicate-free thanks to the deterministic id + MERGE).
 
 ## The read mechanism (verified live)
 
@@ -61,11 +66,14 @@ experiment's harness store. If neither path yields assessments the run writes no
 Task-Suite traces too (e.g. suite trace `bdb3b11e597555cda869ed7ab5b123dd` carries a
 `token_efficiency` score), so without the wall those would leak straight into the
 agent's memory. `partition_rows` drops any candidate whose `source_trace_ids` touch
-the frozen **Task-Suite** or **Human-Anchor** pools, and re-proves the kept set
-disjoint with `ail.pools.assert_pools_disjoint` (the same guard the loop controller
-uses) so a regression fails closed instead of leaking. Matching is exact-id **or** a
-shared ≥12-char prefix, because the frozen suite stores some ids truncated. Dropped
-rows are recorded with a reason, never written.
+the frozen **Task-Suite** or **Human-Anchor** pools. Matching is exact-id **or** a
+shared ≥12-char prefix, because the frozen suite stores some ids truncated. It then
+re-proves the kept set disjoint with **two independent guards** so a regression in the
+drop logic *raises* instead of leaking: the shared `ail.pools.assert_pools_disjoint`
+(exact) **and** a memory-specific prefix guard (`_shares_reserved_prefix`, deliberately
+not reusing the drop-pass code) that catches a full id sharing a ≥12-char prefix with a
+truncated reserved id — which exact set-intersection cannot see. Dropped rows are
+recorded with a reason, never written.
 
 The frozen Task Suite is bundled into the wheel (`pyproject.toml`
 `force-include: eval/task_suite`) so the serverless Job — where `eval/` is not on disk

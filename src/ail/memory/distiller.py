@@ -11,7 +11,7 @@ One firing:
    — fail-closed: if the Task Suite can't load, nothing is written;
 5. drives the **Claude Agent SDK** ``query()`` loop, exposing the ``submit_memory``
    tool (:func:`ail.memory.writeback.create_submit_memory_tool`) which validates,
-   walls, and INSERTs; and
+   grounds, walls, and MERGEs (idempotent upsert); and
 6. advances the watermark to the newest assessment it processed, so a re-run over
    the same window is a no-op.
 
@@ -191,6 +191,7 @@ def _default_distill(
     config: DistillerConfig,
     client: Any,
     reserved: ReservedPools,
+    read_trace_ids: frozenset[str],
     now: Callable[[], str],
 ) -> Callable[[list[AssessmentRow], WriteTally], None]:
     """Build the real agent-driven distill step (Claude Agent SDK ``query()`` loop)."""
@@ -214,6 +215,7 @@ def _default_distill(
             schema=config.schema,
             cohort=config.cohort,
             reserved=reserved,
+            read_trace_ids=read_trace_ids,
             tally=tally,
             now=now,
         )
@@ -223,7 +225,10 @@ def _default_distill(
 
         options = ClaudeAgentOptions(
             cwd=str(project_dir),
-            allowed_tools=["Read", "Write", "TodoWrite", *tool_names],
+            # submit_memory ONLY: the feedback is in the prompt and output goes back
+            # through the tool, so the loop needs no Read/Write/TodoWrite — narrowing
+            # the tool surface removes fabrication vectors (reading unrelated files).
+            allowed_tools=list(tool_names),
             permission_mode="bypassPermissions",
             mcp_servers={"memory-tools": server},
             system_prompt=_SYSTEM_PROMPT,
@@ -264,8 +269,10 @@ def run_memory_distiller(
 
     Fail-closed throughout: an empty assessment window returns without writing or
     advancing the watermark; a Task-Suite pool that cannot load raises before any
-    write; the watermark is advanced only after the distill step returns without
-    error, so a failed run re-processes the same window next time.
+    write; a memory row may cite ONLY trace ids read this run (anti-fabrication); and
+    the watermark is advanced ONLY if the distill step recorded no errors (a SQL
+    failure or a provenance-wall regression), so a failed run re-processes the same
+    window next time — duplicate-free, thanks to the deterministic id + MERGE upsert.
     """
     deps = deps or DistillerDeps()
     now = deps.now
@@ -305,9 +312,23 @@ def run_memory_distiller(
         )
     )
 
+    # The anti-fabrication grounding set: a memory row may cite ONLY these trace ids
+    # (the ones whose feedback we actually read this run).
+    read_trace_ids = frozenset(a.trace_id for a in assessments)
+
     tally = WriteTally()
-    distill = deps.distill or _default_distill(config, client, reserved, now)
+    distill = deps.distill or _default_distill(config, client, reserved, read_trace_ids, now)
     distill(assessments, tally)
+
+    # Fail-closed: if any submit_memory call failed (a SQL/MERGE error, or a
+    # provenance-wall regression), do NOT advance the watermark — surface it loudly so
+    # the window is retried next run. The deterministic memory_id + MERGE upsert make
+    # that retry duplicate-free.
+    if tally.errors:
+        raise RuntimeError(
+            f"memory distiller: {len(tally.errors)} submit_memory failure(s), "
+            f"watermark NOT advanced: {'; '.join(tally.errors)}"
+        )
 
     # Advance the watermark to the newest assessment PROCESSED (whether it produced
     # a memory row or was dropped by the wall) so this window is never re-distilled.
