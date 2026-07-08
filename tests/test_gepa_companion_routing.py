@@ -744,9 +744,13 @@ def test_evidence_cycle_carries_gepa_proof_and_quick_edit_none(tmp_path: Path) -
     assert gepa.status is ProposalStatus.PENDING
     assert gepa.change.kind is ChangeKind.EVOLVED_BODY_REF
     # the self-proving GEPA candidate's pre-computed held-out proof rode through the
-    # evidence-first cycle (which called NO prover) onto the proposal
+    # evidence-first cycle (which called NO prover) onto the proposal — and because the
+    # GEPA builder built it from a real Phase2Artifact, it carries the genuine held-out
+    # provenance (n_promote >= 1, a frozen-suite content hash) the emit boundary requires,
+    # so the genuine-builder path clears the fail-closed provenance gate.
     assert gepa.proof is not None
     assert gepa.proof.proved_improvement and gepa.proof.correctness_held
+    assert gepa.proof.n_promote >= 1 and gepa.proof.suite_content_hash
     assert Path(gepa.change.evolved_body_ref).is_file()
 
 
@@ -802,12 +806,16 @@ def test_evidence_cycle_refuses_gepa_without_genuine_proof() -> None:
 
 
 def test_evidence_cycle_emits_gepa_with_genuine_matching_proof() -> None:
-    # Control: a GEPA_PROMPT with a genuine proof for the goal objective IS emitted,
-    # carrying that proof — the emit boundary blocks only the missing/fake/unrelated ones.
+    # Control: a GEPA_PROMPT with a GENUINE proof for the goal objective IS emitted,
+    # carrying that proof — the emit boundary blocks only the missing/fake/unrelated/
+    # provenance-less ones. The proof is built the way the GEPA builder builds it
+    # (``ProofSummary.from_phase2_artifact`` over a real Phase2Artifact), so it carries
+    # genuine held-out provenance (n_promote >= 1, a frozen-suite content hash) — not just
+    # the boolean flags.
     gepa_dec = _token_gepa_decision(n_traces=5)
-    good = ProofSummary(
-        objective_metric="total_tokens", proved_improvement=True, correctness_held=True
-    )
+    good = ProofSummary.from_phase2_artifact(_phase2(50.0))
+    assert good.proved_improvement and good.correctness_held  # genuine flags...
+    assert good.n_promote >= 1 and good.suite_content_hash  # ...backed by real provenance
     ecr = run_evidence_cycle(
         _agent(),
         _token_goal(),
@@ -821,3 +829,29 @@ def test_evidence_cycle_emits_gepa_with_genuine_matching_proof() -> None:
     emitted = ecr.result.proposals[0]
     assert emitted.action_kind is ActionKind.GEPA_PROMPT
     assert emitted.proof is not None and emitted.proof.proved_improvement
+    assert emitted.proof.n_promote >= 1 and emitted.proof.suite_content_hash
+
+
+def test_evidence_cycle_refuses_flags_only_gepa_proof() -> None:
+    # B2: a GEPA_PROMPT candidate whose proof sets the right objective and BOTH flags true
+    # but carries NO genuine held-out provenance (n_promote == 0, empty suite metadata) is
+    # a hand-constructed flags-only proof — it evidences no real run. It must NOT reach
+    # PENDING: the emit boundary fails closed to a SkippedDecision. This is the residual
+    # the earlier flags-only "good" proof would have wrongly satisfied.
+    gepa_dec = _token_gepa_decision(n_traces=5)
+    flags_only = ProofSummary(
+        objective_metric="total_tokens", proved_improvement=True, correctness_held=True
+    )
+    assert flags_only.n_promote == 0 and not flags_only.suite_content_hash
+    ecr = run_evidence_cycle(
+        _agent(),
+        _token_goal(),
+        feedback_source=lambda: FeedbackBundle(),
+        candidate_builder=lambda decision, *, goal, agent: _gepa_candidate_with_proof(flags_only),
+        gate=lambda *, goal, agent: _ready_token(),
+        planner=lambda feedback, goal, agent: [gepa_dec],
+        now="2026-07-08T00:00:00+00:00",
+    )
+    assert ecr.result.proposals == ()  # never reaches PENDING
+    assert len(ecr.result.skipped) == 1
+    assert ecr.result.skipped[0].action_kind == ActionKind.GEPA_PROMPT.value

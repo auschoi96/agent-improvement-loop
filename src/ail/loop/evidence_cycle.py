@@ -210,11 +210,15 @@ def run_evidence_cycle(
 
             # Emit-boundary proof invariant (fail-closed): a proof-REQUIRED action kind
             # (GEPA_PROMPT — its apply re-verifies a held-out proof) must carry a GENUINE
-            # ProofSummary or it is NOT emitted. This guards the EMIT boundary itself, so a
-            # builder that hands back a proof-required candidate with proof=None or a
-            # fake/unrelated proof cannot create a broken PENDING row the apply engine
-            # would later have to refuse. "Cannot reach PENDING without a real proof" is an
-            # invariant of THIS cycle, not merely a downstream apply refusal.
+            # ProofSummary or it is NOT emitted. "Genuine" is all four of: present, both
+            # flags true (proved_improvement + correctness_held), objective matches the
+            # goal, AND held-out provenance from a real run (n_promote >= 1 + a frozen-suite
+            # identity) — the last blocks a hand-built flags-only proof that merely sets the
+            # booleans. This guards the EMIT boundary itself, so a builder that hands back a
+            # proof-required candidate with proof=None, a fake/unrelated proof, or a
+            # provenance-less flags-only proof cannot create a broken PENDING row the apply
+            # engine would later have to refuse. "Cannot reach PENDING without a real proof"
+            # is an invariant of THIS cycle, not merely a downstream apply refusal.
             if decision.action_kind in _PROOF_REQUIRED_ACTION_KINDS:
                 proof = candidate.proof
                 if proof is None or not (proof.proved_improvement and proof.correctness_held):
@@ -240,6 +244,31 @@ def run_evidence_cycle(
                             f"proof objective {proof.objective_metric!r} does not match the goal "
                             f"objective {goal.objective_metric!r} — mislabeled/unrelated proof, "
                             "fail-closed",
+                        )
+                    )
+                    continue
+                # Genuine held-out PROVENANCE (fail-closed): the boolean flags + objective
+                # are hand-settable, so a matching-objective proof with both flags True is
+                # NOT enough — a proof-required kind must additionally carry the provenance a
+                # REAL held-out run populates. A genuine proof is built by
+                # ``ProofSummary.from_phase2_artifact`` from a Phase2Artifact
+                # ``run_gepa_optimization``/``run_phase2_comparison`` produced: it PROMOTEd at
+                # least one held-out task (``n_promote >= 1`` — ``proved_improvement`` is
+                # literally ``artifact.n_promote > 0``) and records the frozen suite it
+                # validated against (a non-empty ``suite_content_hash`` — always a sha256 for
+                # a frozen suite). A hand-constructed flags-only / provenance-less proof
+                # (``n_promote == 0``, empty suite identity) evidences NO real run, so it is
+                # REJECTED here: it cannot reach PENDING for a kind whose apply re-verifies a
+                # held-out proof.
+                if proof.n_promote < 1 or not proof.suite_content_hash.strip():
+                    skipped.append(
+                        SkippedDecision(
+                            ak,
+                            tk,
+                            "proof-required action kind carries a flags-only / provenance-less "
+                            f"proof (no genuine held-out run: n_promote={proof.n_promote}, "
+                            f"suite_content_hash={proof.suite_content_hash!r}) — fail-closed, "
+                            "cannot reach PENDING",
                         )
                     )
                     continue
