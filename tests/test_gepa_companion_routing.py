@@ -28,10 +28,12 @@ from ail.loop.candidate_builders import (
     registry_candidate_builder,
 )
 from ail.loop.controller import Candidate
-from ail.loop.decision_rules import Decision
+from ail.loop.decision_rules import Decision, FeedbackBundle
+from ail.loop.evidence_cycle import run_evidence_cycle
 from ail.loop.proposals import (
     ActionKind,
     ChangeKind,
+    ProposalStatus,
     ProposedChange,
     TriggerKind,
     TriggerSignal,
@@ -39,6 +41,14 @@ from ail.loop.proposals import (
 )
 from ail.optimize.gepa_runner import GepaOptimizationResult
 from ail.optimize.phase2 import L1Outcome, Phase2Artifact, TaskOutcome
+from ail.readiness.contract import (
+    EvalHealth,
+    Gate,
+    GateName,
+    JudgeHealth,
+    ReadinessStatus,
+    ReadinessTier,
+)
 from ail.registry import Agent
 
 # -- fixtures --------------------------------------------------------------
@@ -536,3 +546,86 @@ def test_capstone_persistent_gepa_routes_to_gepa(tmp_path: Path) -> None:
 def test_capstone_trivial_gepa_is_cost_gated_to_none(tmp_path: Path) -> None:
     registry = _companion_registry(tmp_path)
     assert registry(_gepa_decision(n_traces=1), goal=_quality_goal(), agent=_agent()) is None
+
+
+# ==========================================================================
+# End-to-end through the evidence-first cycle (the companion's real cycle):
+# a GEPA candidate's pre-computed proof flows onto the PENDING proposal, and a
+# quick-edit flows through with proof=None — the crux of the design.
+# ==========================================================================
+
+
+def _ready_modularity() -> ReadinessStatus:
+    return ReadinessStatus(
+        cohort_name="claude_code",
+        objective_metric="modularity",
+        requires_quality=True,
+        guardrail_names=["modularity"],
+        trace_count=80,
+        tier=ReadinessTier.READY_TO_PROVE,
+        gates=[Gate(name=GateName.TRACE_PROVE, passed=True, reason="enough traces")],
+        reasons=[],
+        eval_health=EvalHealth(
+            cohort_name="claude_code",
+            scored_coverage=0.9,
+            judges=[
+                JudgeHealth(
+                    judge_name="modularity",
+                    measured=True,
+                    agreement_rate=0.82,
+                    distrusted=False,
+                    reason="trusted",
+                )
+            ],
+        ),
+    )
+
+
+def test_evidence_cycle_carries_gepa_proof_and_quick_edit_none(tmp_path: Path) -> None:
+    registry = _companion_registry(tmp_path)
+    # Lane B proposes both a SKILL_UPDATE (quick-edit) and a persistent judged-dimension
+    # GEPA_PROMPT; Lane A contributes nothing (empty feedback).
+    skill_dec = Decision(
+        ActionKind.SKILL_UPDATE,
+        default_risk_class(ActionKind.SKILL_UPDATE),
+        TriggerSignal(
+            kind=TriggerKind.AGENT_PLANNER,
+            summary="planner: revise modularity skill",
+            metric="modularity",
+            judge_name="modularity",
+            n_traces=4,
+        ),
+    )
+    gepa_dec = _gepa_decision(
+        trigger=TriggerKind.AGENT_PLANNER, judge_name="modularity", n_traces=5
+    )
+
+    def _planner(feedback: FeedbackBundle, goal: CompiledGoal, agent: Agent) -> list[Decision]:
+        return [skill_dec, gepa_dec]
+
+    ecr = run_evidence_cycle(
+        _agent(),
+        _quality_goal(),
+        feedback_source=lambda: FeedbackBundle(),
+        candidate_builder=registry,
+        gate=lambda *, goal, agent: _ready_modularity(),
+        planner=_planner,
+        now="2026-07-08T00:00:00+00:00",
+    )
+
+    proposals = {p.action_kind: p for p in ecr.result.proposals}
+    assert set(proposals) == {ActionKind.SKILL_UPDATE, ActionKind.GEPA_PROMPT}
+
+    quick = proposals[ActionKind.SKILL_UPDATE]
+    assert quick.status is ProposalStatus.PENDING
+    assert quick.change.kind is ChangeKind.SKILL_DIFF
+    assert quick.proof is None  # evidence-first: no frozen-suite proof
+
+    gepa = proposals[ActionKind.GEPA_PROMPT]
+    assert gepa.status is ProposalStatus.PENDING
+    assert gepa.change.kind is ChangeKind.EVOLVED_BODY_REF
+    # the self-proving GEPA candidate's pre-computed held-out proof rode through the
+    # evidence-first cycle (which called NO prover) onto the proposal
+    assert gepa.proof is not None
+    assert gepa.proof.proved_improvement and gepa.proof.correctness_held
+    assert Path(gepa.change.evolved_body_ref).is_file()
