@@ -50,8 +50,12 @@ def _inserts(client) -> list[str]:
 
 
 def _watermark_writes(client) -> list[str]:
-    # INSERTs against the watermark table only — the read SELECT also names the table.
-    return [s for s in _inserts(client) if "agent_memory_watermark" in s]
+    # The watermark upsert MERGE only — the read SELECT also names the table.
+    return [
+        s
+        for s in client.statement_execution.executed
+        if "agent_memory_watermark" in s and s.lstrip().upper().startswith("MERGE")
+    ]
 
 
 def test_fail_closed_when_no_assessments(fake_sql_client) -> None:
