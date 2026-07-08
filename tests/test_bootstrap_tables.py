@@ -23,6 +23,7 @@ from databricks.sdk.service.sql import StatementState
 from ail.jobs import bootstrap_tables
 from ail.jobs.bootstrap_tables import (
     APP_QUERY_TABLES,
+    FRAMEWORK_TABLES,
     ensure_app_tables,
     reconcile_app_table_columns,
     table_ensure_statements,
@@ -174,9 +175,11 @@ def test_ensure_app_tables_issues_writer_ddl_for_full_set() -> None:
         for forbidden in forbidden_verbs:
             assert forbidden not in body, f"unexpected {forbidden!r} in: {stmt[:80]}"
 
-    # A CREATE TABLE for exactly the full app-referenced set, and the returned
-    # coverage matches — proving every covered table is actually created.
-    assert _created_tables(stmts) == set(APP_QUERY_TABLES)
+    # A CREATE TABLE for exactly the app-referenced set PLUS the framework tables
+    # the bootstrap also owns (advisory memory + its watermark — created/migrated
+    # but not app-read); the returned coverage is the app-read set only, proving
+    # every covered app table is actually created.
+    assert _created_tables(stmts) == set(APP_QUERY_TABLES) | set(FRAMEWORK_TABLES)
     assert set(covered) == set(APP_QUERY_TABLES)
 
     # The DDL targets the caller's catalog.schema — not a hardcoded default.

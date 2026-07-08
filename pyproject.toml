@@ -104,6 +104,12 @@ ail-agent-executor = "ail.jobs.agent_executor:main"
 # --profile is used only to mint; it is never passed to the companion (which refuses OAuth).
 # Fail-closed: a failed mint exits non-zero and never runs the companion unauthenticated.
 ail-companion-start = "ail.companion.bootstrap:main"
+# Scheduled advisory-memory distiller (resources/memory_distiller.job.yml): reads
+# recent RLM + L2-judge feedback off the trace store, drives the Claude Agent SDK to
+# distil it into short guideline rows, and writes them behind the provenance wall to
+# the governed austin_choi_omni_agent_catalog.agent_improvement_loop.agent_memory
+# table. Watermarked/idempotent. WRITE side only (Lakebase sync/read side is separate).
+ail-memory-distiller = "ail.memory.distiller:main"
 
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
@@ -139,6 +145,14 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ail"]
+
+# Bundle the FROZEN Task Suite artifact into the wheel so the serverless memory
+# distiller — where the repo's eval/ tree is not on disk — can load it to seed the
+# provenance wall's Task-Suite reserved set. Placed under ail/_eval_bundle/eval/...
+# so ail.memory.provenance._packaged_eval_root() finds <site-packages>/ail/_eval_bundle
+# and load_task_suite(root=...) resolves <root>/eval/task_suite/<v>/tasks.yaml.
+[tool.hatch.build.targets.wheel.force-include]
+"eval/task_suite" = "ail/_eval_bundle/eval/task_suite"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -186,6 +200,6 @@ strict_equality = true
 # their imports (lazy, inside the reviewer) must not fail the typecheck.
 # ``gepa.*`` is the GEPA optimizer (ships with the ``align`` extra via dspy);
 # only the GEPA loop's lazy ``gepa.optimize`` resolver imports it.
-module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*", "agents.*", "yaml", "gepa.*"]
+module = ["mlflow.*", "databricks.*", "claude_agent_sdk.*", "engine.*", "agents.*", "yaml", "gepa.*", "nest_asyncio"]
 ignore_missing_imports = true
 follow_imports = "skip"
