@@ -44,6 +44,7 @@ wiring (:func:`run_action`, :func:`main`) is a thin composition on top.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from collections.abc import Callable, Iterable
@@ -592,12 +593,19 @@ def run_confirm_requirements(
     def _fail(
         outcome: OnboardingOutcome, *, error: str | None = None, refused: str | None = None
     ) -> RequirementsConfirmResult:
+        # Never echo a non-finite target (NaN/inf) back — it is invalid JSON and would
+        # misrepresent what was refused; a rejected target reads back as "no target".
+        echoed = (
+            objective_target
+            if objective_target is not None and math.isfinite(objective_target)
+            else None
+        )
         return RequirementsConfirmResult(
             outcome=outcome,
             agent_name=agent_name.strip(),
             experiment_id=experiment_id.strip(),
             cohort=resolved_cohort,
-            objective_target=objective_target,
+            objective_target=echoed,
             actor=actor,
             error=error,
             refused_reason=refused,
@@ -608,12 +616,17 @@ def run_confirm_requirements(
             OnboardingOutcome.REFUSED,
             refused="refusing an anonymous confirmation — no authenticated actor identity",
         )
-    if objective_target is None:
+    # Fail closed on a missing OR non-finite target (defense-in-depth: the service
+    # cannot assume its only caller is the TS route). JSON admits NaN/Infinity, and
+    # the CompiledGoal sign checks (value < 0 / value > 0) are BOTH False for NaN, so
+    # a non-finite target would otherwise slip past plan.confirm()/execute_plan() and
+    # author judges + persist a goal carrying a meaningless target. Refuse, never coerce.
+    if objective_target is None or not math.isfinite(objective_target):
         return _fail(
             OnboardingOutcome.REFUSED,
             refused=(
-                "an explicit objective target is required to confirm — set or acknowledge the "
-                "suggested target before confirming (propose-then-confirm)"
+                "a finite, explicit objective target is required to confirm — set or acknowledge "
+                "the suggested target before confirming (propose-then-confirm); NaN/inf are refused"
             ),
         )
     text = requirements_text.strip() if requirements_text else ""
@@ -890,12 +903,19 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
         )
     if action == "confirm_requirements":
         raw_target = payload.get("objective_target")
-        # A bool is an int subclass — reject it so a stray `true` is never a 1.0 target.
-        target = (
-            float(raw_target)
-            if isinstance(raw_target, (int, float)) and not isinstance(raw_target, bool)
-            else None
-        )
+        # Coerce a JSON numeric to a finite float. A bool is an int subclass — reject it
+        # so a stray `true` is never a 1.0 target. json.loads also admits NaN/Infinity/
+        # -Infinity and a huge integer overflows float; all of those become None here so
+        # confirm_requirements refuses honestly rather than crashing or letting a
+        # non-finite target slip past the sign checks (NaN < 0 and NaN > 0 are both False).
+        target: float | None = None
+        if isinstance(raw_target, (int, float)) and not isinstance(raw_target, bool):
+            try:
+                coerced = float(raw_target)
+            except (OverflowError, ValueError):
+                coerced = None
+            if coerced is not None and math.isfinite(coerced):
+                target = coerced
         return run_confirm_requirements(
             str(payload.get("requirements_text") or ""),
             objective_target=target,

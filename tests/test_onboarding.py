@@ -713,6 +713,47 @@ def test_confirm_authors_then_persists_with_human_target() -> None:
     assert order == ["author", "author", "persist"]
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_confirm_rejects_non_finite_target_failclosed(bad: float) -> None:
+    # A non-finite target must fail closed: the CompiledGoal sign checks (value < 0 /
+    # value > 0) are BOTH False for NaN, so without this guard a NaN would slip past
+    # plan.confirm()/execute_plan() and author judges + persist a meaningless goal.
+    log: list[tuple[str, str]] = []
+    persisted: list[Any] = []
+    result = run_confirm_requirements(
+        "never hallucinate a tool call",
+        objective_target=bad,
+        experiment_id="exp-1",
+        agent_name="claude_code",
+        actor="dev@databricks.com",
+        llm=_mock_llm(_THREE_DIMS),
+        author=_spy_author(log),
+        persist=lambda g: persisted.append(g),
+    )
+    assert result.outcome is OnboardingOutcome.REFUSED
+    assert "finite" in (result.refused_reason or "")
+    assert log == [] and persisted == []  # nothing authored / persisted
+    # the non-finite value is NOT echoed back, and the result stays valid JSON.
+    assert result.objective_target is None
+    json.loads(result.model_dump_json())  # must not raise (no NaN/Infinity token)
+
+
+def test_run_action_confirm_drops_non_finite_target() -> None:
+    # Defense-in-depth at the dispatcher: json.loads admits Infinity, so run_action's
+    # coercion must drop a non-finite numeric to None => an honest refusal, no crash.
+    result = run_action(
+        {
+            "action": "confirm_requirements",
+            "requirements_text": "be fast",
+            "agent_name": "claude_code",
+            "experiment_id": "exp-1",
+            "objective_target": float("inf"),
+            "actor": "a@b.com",
+        }
+    )
+    assert result.outcome is OnboardingOutcome.REFUSED
+
+
 def test_confirm_wrong_sign_target_fails_closed_as_error() -> None:
     # The objective is an authored judge (maximize); a negative relative target
     # contradicts the derived direction and must be an honest error, not a bad goal.
