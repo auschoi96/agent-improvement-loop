@@ -69,6 +69,7 @@ from ail.loop.controller import (
 from ail.loop.decision_rules import DecisionThresholds
 from ail.loop.planner import CombinedDecisions, Planner, agent_planner, combined_decisions
 from ail.loop.proposals import (
+    ActionKind,
     GateStatus,
     ProposalStatus,
     ProposedAction,
@@ -80,6 +81,19 @@ __all__ = [
     "EvidenceCycleResult",
     "run_evidence_cycle",
 ]
+
+#: Action kinds whose apply RE-VERIFIES a frozen-suite proof and so are **absent** from
+#: the apply engine's ``ail.loop.apply._EVIDENCE_ONLY_APPLYABLE_KINDS`` allowlist: they
+#: cannot be applied on evidence + gate alone. This evidence-first cycle calls **no**
+#: prover, so such a kind can only legitimately reach PENDING carrying a *pre-computed*
+#: genuine :class:`~ail.loop.proposals.ProofSummary` from a builder that is itself a
+#: frozen-suite verification (the GEPA candidate builder). The cycle therefore refuses to
+#: **emit** one without a genuine proof — the invariant "a proof-required proposal cannot
+#: reach PENDING without a real proof" is enforced here at the emit boundary, not merely
+#: relied upon as a downstream apply refusal. Kept narrow to the kind this cycle's
+#: builders can produce (``GEPA_PROMPT``); ``REVERT`` / ``AGENT_TASK`` are never emitted
+#: by the companion's builders and the apply engine remains the backstop for them.
+_PROOF_REQUIRED_ACTION_KINDS: frozenset[ActionKind] = frozenset({ActionKind.GEPA_PROMPT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +207,42 @@ def run_evidence_cycle(
             if not gated:
                 skipped.append(SkippedDecision(ak, tk, "not gated: " + "; ".join(gate_reasons)))
                 continue
+
+            # Emit-boundary proof invariant (fail-closed): a proof-REQUIRED action kind
+            # (GEPA_PROMPT — its apply re-verifies a held-out proof) must carry a GENUINE
+            # ProofSummary or it is NOT emitted. This guards the EMIT boundary itself, so a
+            # builder that hands back a proof-required candidate with proof=None or a
+            # fake/unrelated proof cannot create a broken PENDING row the apply engine
+            # would later have to refuse. "Cannot reach PENDING without a real proof" is an
+            # invariant of THIS cycle, not merely a downstream apply refusal.
+            if decision.action_kind in _PROOF_REQUIRED_ACTION_KINDS:
+                proof = candidate.proof
+                if proof is None or not (proof.proved_improvement and proof.correctness_held):
+                    skipped.append(
+                        SkippedDecision(
+                            ak,
+                            tk,
+                            "proof-required action kind carries no genuine frozen-suite proof "
+                            "(missing, or does not prove an improvement with correctness held) "
+                            "— fail-closed, cannot reach PENDING",
+                        )
+                    )
+                    continue
+                # The proof must speak to the objective this proposal claims to optimize;
+                # an unrelated-objective proof (e.g. a token-savings proof on a quality
+                # goal) is mislabeled and rejected. (The GEPA builder already binds to the
+                # routed target; this is the independent emit-boundary backstop.)
+                if proof.objective_metric != goal.objective_metric:
+                    skipped.append(
+                        SkippedDecision(
+                            ak,
+                            tk,
+                            f"proof objective {proof.objective_metric!r} does not match the goal "
+                            f"objective {goal.objective_metric!r} — mislabeled/unrelated proof, "
+                            "fail-closed",
+                        )
+                    )
+                    continue
 
             proposal = ProposedAction(
                 proposal_id=derive_proposal_id(

@@ -34,6 +34,7 @@ from ail.loop.evidence_cycle import run_evidence_cycle
 from ail.loop.proposals import (
     ActionKind,
     ChangeKind,
+    ProofSummary,
     ProposalStatus,
     ProposedChange,
     TriggerKind,
@@ -713,3 +714,76 @@ def test_evidence_cycle_carries_gepa_proof_and_quick_edit_none(tmp_path: Path) -
     assert gepa.proof is not None
     assert gepa.proof.proved_improvement and gepa.proof.correctness_held
     assert Path(gepa.change.evolved_body_ref).is_file()
+
+
+# ==========================================================================
+# BLOCKING 2 — the emit boundary refuses a proof-REQUIRED kind (GEPA_PROMPT)
+# that lacks a genuine ProofSummary: it cannot reach PENDING (fail-closed).
+# ==========================================================================
+
+
+def _gepa_candidate_with_proof(proof: ProofSummary | None) -> Candidate:
+    """A GEPA_PROMPT (EVOLVED_BODY_REF, proof-required) candidate carrying ``proof``."""
+    return Candidate(
+        change=ProposedChange(
+            kind=ChangeKind.EVOLVED_BODY_REF,
+            summary="gepa-evolved (test)",
+            evolved_body_ref="/tmp/gepa_candidate_test.json",
+        ),
+        proof=proof,
+    )
+
+
+def test_evidence_cycle_refuses_gepa_without_genuine_proof() -> None:
+    # A GEPA_PROMPT candidate reaching an otherwise-GATED emit is NOT emitted unless it
+    # carries a genuine, matching-objective proof. proof=None, a non-improving "fake"
+    # proof, and an unrelated-objective proof are each fail-closed to a SkippedDecision —
+    # never a PENDING proposal (the invariant is enforced at the emit boundary itself).
+    gepa_dec = _token_gepa_decision(n_traces=5)
+
+    bad_proofs: list[ProofSummary | None] = [
+        None,
+        # fake: claims nothing genuine (does not prove an improvement)
+        ProofSummary(
+            objective_metric="total_tokens", proved_improvement=False, correctness_held=False
+        ),
+        # unrelated: proves a DIFFERENT objective than the goal optimizes
+        ProofSummary(objective_metric="modularity", proved_improvement=True, correctness_held=True),
+    ]
+    for proof in bad_proofs:
+        ecr = run_evidence_cycle(
+            _agent(),
+            _token_goal(),
+            feedback_source=lambda: FeedbackBundle(),
+            candidate_builder=lambda decision, *, goal, agent, _p=proof: _gepa_candidate_with_proof(
+                _p
+            ),
+            gate=lambda *, goal, agent: _ready_token(),
+            planner=lambda feedback, goal, agent: [gepa_dec],
+            now="2026-07-08T00:00:00+00:00",
+        )
+        assert ecr.result.proposals == ()  # never reaches PENDING
+        assert len(ecr.result.skipped) == 1
+        assert ecr.result.skipped[0].action_kind == ActionKind.GEPA_PROMPT.value
+
+
+def test_evidence_cycle_emits_gepa_with_genuine_matching_proof() -> None:
+    # Control: a GEPA_PROMPT with a genuine proof for the goal objective IS emitted,
+    # carrying that proof — the emit boundary blocks only the missing/fake/unrelated ones.
+    gepa_dec = _token_gepa_decision(n_traces=5)
+    good = ProofSummary(
+        objective_metric="total_tokens", proved_improvement=True, correctness_held=True
+    )
+    ecr = run_evidence_cycle(
+        _agent(),
+        _token_goal(),
+        feedback_source=lambda: FeedbackBundle(),
+        candidate_builder=lambda decision, *, goal, agent: _gepa_candidate_with_proof(good),
+        gate=lambda *, goal, agent: _ready_token(),
+        planner=lambda feedback, goal, agent: [gepa_dec],
+        now="2026-07-08T00:00:00+00:00",
+    )
+    assert len(ecr.result.proposals) == 1
+    emitted = ecr.result.proposals[0]
+    assert emitted.action_kind is ActionKind.GEPA_PROMPT
+    assert emitted.proof is not None and emitted.proof.proved_improvement
