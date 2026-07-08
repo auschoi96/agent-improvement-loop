@@ -10,8 +10,9 @@ The watermark lives in the small governed table
 :data:`ail.memory.schema.WATERMARK_TABLE` (created by the same bootstrap machinery
 as ``agent_memory``). Reads/writes go through the shared statement seams
 (:func:`ail.publish._execute` / :func:`ail.jobs.bootstrap_tables._read_rows`), and
-the per-scope row is swapped atomically with ``INSERT ... REPLACE WHERE`` so a run
-never leaves a torn watermark.
+the per-scope row is upserted atomically with a single ``MERGE`` keyed on ``scope``
+(the same pattern :func:`ail.memory.writeback.build_memory_merge` uses for
+``agent_memory``) so a run never leaves a torn watermark.
 """
 
 from __future__ import annotations
@@ -56,6 +57,54 @@ def read_watermark(
     return str(value) if value else None
 
 
+def build_watermark_merge(
+    catalog: str,
+    schema: str,
+    *,
+    scope: str,
+    last_created_at: str,
+    run_at: str,
+    n_assessments_seen: int,
+    n_memories_written: int,
+    n_dropped_provenance: int,
+) -> str:
+    """An idempotent, escaped single-row ``MERGE`` that upserts the ``scope`` row.
+
+    Databricks SQL rejects ``INSERT ... REPLACE WHERE`` combined with an explicit
+    column list, so the per-scope upsert is a ``MERGE`` keyed on ``scope`` —
+    ``WHEN MATCHED THEN UPDATE`` advances an existing watermark, ``WHEN NOT MATCHED
+    THEN INSERT`` seeds it on the first run — one atomic Delta transaction, exactly
+    one row per scope. Mirrors :func:`ail.memory.writeback.build_memory_merge`:
+    column list/order come from :data:`WATERMARK_COLUMNS` and every value is escaped
+    via :func:`ail.publish._lit`, never interpolated raw.
+    """
+    fqn = _fqn(catalog, schema)
+    cols = ", ".join(WATERMARK_COLUMNS)
+    source_cols = ", ".join(f"s.{c}" for c in WATERMARK_COLUMNS)
+    update_set = ", ".join(f"{c} = s.{c}" for c in WATERMARK_COLUMNS if c != "scope")
+    values = ", ".join(
+        _lit(v)
+        for v in (
+            scope,
+            last_created_at,
+            run_at,
+            n_assessments_seen,
+            n_memories_written,
+            n_dropped_provenance,
+        )
+    )
+    # Column aliases are illegal directly on a MERGE ``USING`` source, so name the
+    # columns on the inner derived table (VALUES ... AS v(cols)) and give the USING
+    # source a bare alias — the same shape as ``build_memory_merge``.
+    return (
+        f"MERGE INTO {fqn} AS t\n"
+        f"USING (SELECT * FROM (VALUES ({values})) AS v ({cols})) AS s\n"
+        "ON t.scope = s.scope\n"
+        f"WHEN MATCHED THEN UPDATE SET {update_set}\n"
+        f"WHEN NOT MATCHED THEN INSERT ({cols}) VALUES ({source_cols})"
+    )
+
+
 def write_watermark(
     client: Any,
     warehouse_id: str,
@@ -69,27 +118,23 @@ def write_watermark(
     n_memories_written: int,
     n_dropped_provenance: int,
 ) -> None:
-    """Atomically upsert the watermark row for ``scope``.
+    """Atomically upsert the watermark row for ``scope`` via :func:`build_watermark_merge`.
 
-    Uses ``INSERT ... REPLACE WHERE scope = ...`` so exactly the one scope's row is
-    replaced (created on first run, overwritten thereafter) in a single Delta
-    transaction — never a delete-then-insert gap.
+    The ``MERGE`` upserts on ``scope`` so exactly the one scope's row is created on
+    the first run and overwritten thereafter, in a single Delta transaction — never a
+    delete-then-insert gap, and never more than one row per scope.
     """
-    fqn = _fqn(catalog, schema)
-    cols = ", ".join(WATERMARK_COLUMNS)
-    values = ", ".join(
-        _lit(v)
-        for v in (
-            scope,
-            last_created_at,
-            run_at,
-            n_assessments_seen,
-            n_memories_written,
-            n_dropped_provenance,
-        )
-    )
     _execute(
         client,
         warehouse_id,
-        f"INSERT INTO {fqn} ({cols}) REPLACE WHERE scope = {_lit(scope)} VALUES ({values})",
+        build_watermark_merge(
+            catalog,
+            schema,
+            scope=scope,
+            last_created_at=last_created_at,
+            run_at=run_at,
+            n_assessments_seen=n_assessments_seen,
+            n_memories_written=n_memories_written,
+            n_dropped_provenance=n_dropped_provenance,
+        ),
     )
