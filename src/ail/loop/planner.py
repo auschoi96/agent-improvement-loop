@@ -42,6 +42,8 @@ call is ever made.
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -84,6 +86,8 @@ __all__ = [
     "combined_decisions",
     "run_cycle_with_planner",
 ]
+
+logger = logging.getLogger(__name__)
 
 #: Default planner model URI (MLflow ``provider:/endpoint`` form). Matches the
 #: repo's existing reflection/judge default
@@ -487,14 +491,107 @@ def parse_plan(
 # ---------------------------------------------------------------------------
 
 
+def _is_bad_request(exc: BaseException, message: str) -> bool:
+    """Best-effort detection that ``exc`` is an HTTP 400 / BAD_REQUEST.
+
+    Robust across the shapes the Databricks deploy client raises, checked in order:
+    a ``requests.HTTPError`` (``response.status_code``); an ``MlflowException`` /
+    ``RestException`` (``get_http_status_code()`` — note its ``str()`` does *not*
+    include the status — or ``error_code == "BAD_REQUEST"``); a generic
+    ``http_status_code`` attribute; and, only when no structured status is exposed, a
+    ``400`` / ``bad request`` token in the (already-lowercased) message. An
+    authoritative non-400 status (e.g. a 500) returns ``False`` without consulting the
+    message, so a 500 whose text merely mentions "400" is not misread as a 400.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status == 400
+
+    getter = getattr(exc, "get_http_status_code", None)
+    if callable(getter):
+        try:
+            code = getter()
+        except Exception:
+            code = None
+        if isinstance(code, int):
+            return code == 400
+
+    http_status = getattr(exc, "http_status_code", None)
+    if isinstance(http_status, int):
+        return http_status == 400
+
+    error_code = getattr(exc, "error_code", None)
+    if isinstance(error_code, str) and error_code.upper() == "BAD_REQUEST":
+        return True
+
+    return "400" in message or "bad request" in message or "bad_request" in message
+
+
+def _is_unsupported_temperature_error(exc: BaseException) -> bool:
+    """True when ``exc`` is a **400 / BAD_REQUEST** that rejects ``temperature``.
+
+    Databricks Claude serving endpoints (e.g. ``databricks-claude-opus-4-7``, backed
+    by ``us.anthropic.claude-opus-4-7``) reject ``temperature`` with a
+    ``400 BAD_REQUEST: ... does not support the temperature parameter``. **Both**
+    conditions must hold — the error is a 400 (:func:`_is_bad_request`) **and** its
+    message names ``temperature`` as unsupported. Requiring the 400 is what keeps
+    Lane B fail-closed: a non-400 failure (500 / auth / proxy) whose text merely
+    happens to mention temperature re-raises instead of taking the retry path, so
+    Lane B never emits decisions for an error that was not the temperature 400. We
+    inspect the message text (not an exception type) because the deploy client
+    surfaces the rejection as a generic ``MlflowException`` / ``HTTPError``.
+    """
+    message = str(exc).lower()
+    names_temperature = "temperature" in message and (
+        "not support" in message or "unsupported" in message
+    )
+    return names_temperature and _is_bad_request(exc, message)
+
+
+def _predict_with_temperature_fallback(
+    predict: Callable[[dict[str, Any]], Any],
+    messages: list[dict[str, str]],
+) -> Any:
+    """Call ``predict`` at ``temperature: 0``, retrying without it iff the endpoint
+    rejects that parameter.
+
+    Databricks Claude endpoints reject ``temperature``; OpenAI/GPT-family endpoints
+    accept it. Rather than hardcode-drop ``temperature`` for every endpoint (some
+    models want it), we send it and, **only** on the specific
+    ``does not support the temperature parameter`` 400, retry the *same* request
+    without it (logging that we did). Temperature-accepting endpoints therefore see
+    exactly one call, unchanged. Every other error propagates untouched, preserving
+    the fail-closed contract: a genuine planner failure yields zero Lane-B decisions
+    (:func:`combined_decisions` catches it), never a fabricated one.
+    """
+    try:
+        return predict({"messages": messages, "temperature": 0})
+    except Exception as exc:
+        if not _is_unsupported_temperature_error(exc):
+            raise
+        logger.warning(
+            "planner endpoint rejected the temperature parameter (%s); "
+            "retrying the same request without temperature",
+            exc,
+        )
+        return predict({"messages": messages})
+
+
 def _default_planner_llm(model: str) -> PlannerLLM:
     """Build the production planner LLM: a Databricks chat serving endpoint.
 
     Reuses the model-call path :func:`ail.goals.compiler._default_databricks_proposer`
-    uses — MLflow's Databricks deploy client at temperature 0 — rather than adding a
-    new client. ``model`` is an MLflow ``databricks:/<endpoint>`` URI; the leading
+    uses — MLflow's Databricks deploy client — rather than adding a new client.
+    ``model`` is an MLflow ``databricks:/<endpoint>`` URI; the leading
     ``databricks:/`` is stripped to the bare endpoint the deploy client wants. No
     hardcoded host: the client resolves the workspace from ambient Databricks auth.
+
+    The request is sent at ``temperature: 0`` for a deterministic response, but
+    Databricks Claude endpoints reject ``temperature`` outright, so the call goes
+    through :func:`_predict_with_temperature_fallback`, which retries without the
+    parameter on that specific 400 (and leaves temperature-accepting endpoints
+    untouched).
     """
     endpoint = model.split(":/", 1)[1] if model.startswith("databricks:/") else model
     if not endpoint:
@@ -504,15 +601,13 @@ def _default_planner_llm(model: str) -> PlannerLLM:
         from mlflow.deployments import get_deploy_client
 
         client = get_deploy_client("databricks")
-        response = client.predict(
-            endpoint=endpoint,
-            inputs={
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0,
-            },
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        response = _predict_with_temperature_fallback(
+            lambda inputs: client.predict(endpoint=endpoint, inputs=inputs),
+            messages,
         )
         return str(response["choices"][0]["message"]["content"])
 
