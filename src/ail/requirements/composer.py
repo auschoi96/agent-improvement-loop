@@ -70,12 +70,14 @@ DimensionKind = Literal["deterministic_l0", "memalign_judge"]
 #: A dimension's role in the composed goal.
 DimensionRole = Literal["objective", "guardrail"]
 
-#: The default relative target magnitude per direction, used for the composed goal's
-#: primary objective. These are conservative *placeholders* the human reviews and
-#: confirms in the propose-then-confirm flow (the arg-based loop already defaults a
-#: relative ``-0.30`` token target); the goal schema requires a signed relative
-#: target whose sign matches the direction, so a non-zero default is needed.
-_DEFAULT_RELATIVE_TARGET: dict[GoalDirection, float] = {"minimize": -0.30, "maximize": 0.10}
+#: A **suggested** relative-target magnitude per direction, seeded into the composed
+#: goal so the schema (which requires a signed relative target whose sign matches the
+#: direction) is satisfiable while the plan is still a proposal. It is explicitly a
+#: *suggestion*, not an approved value: :meth:`RequirementsPlan.describe` labels it
+#: "adjust before confirming", and :meth:`RequirementsPlan.confirm` applies the
+#: human's own ``objective_target`` — the goal is never treated as human-confirmed
+#: carrying a target the human never set or acknowledged.
+_SUGGESTED_RELATIVE_TARGET: dict[GoalDirection, float] = {"minimize": -0.30, "maximize": 0.10}
 
 
 class RequirementsRoutingError(Exception):
@@ -178,24 +180,58 @@ class RequirementsPlan:
         """The primary (highest-priority) dimension — the goal's objective."""
         return next(d for d in self.dimensions if d.role == "objective")
 
-    def confirm(self) -> RequirementsPlan:
-        """Return a confirmed copy (the human gate), with the goal itself confirmed.
+    def confirm(self, *, objective_target: float | None = None) -> RequirementsPlan:
+        """Return a confirmed copy (the human gate), applying the human's target.
 
-        Returns a new plan with ``confirmed=True`` and its :attr:`goal` replaced by
-        :meth:`goal.confirm() <ail.goals.compiler.CompiledGoal.confirm>` (which uses
-        ``model_copy`` — no re-validation), so the goal composed under the authored-
-        judge allowlist stays valid without re-entering that context.
+        The objective's relative target is an **explicit human input at confirm
+        time**, not a value baked in at compose time: pass ``objective_target`` (a
+        signed relative fraction, e.g. ``-0.5`` = cut 50%, ``0.2`` = lift 20%) and it
+        replaces the composed goal's *suggested* default. The goal is rebuilt and
+        **re-validated** (re-admitting its judge names), so a target whose sign
+        disagrees with the derived direction fails closed here rather than shipping a
+        contradictory goal.
+
+        ``objective_target=None`` confirms the plan as shown — the human is
+        acknowledging the suggested default (surfaced, labelled "adjust before
+        confirming", by :meth:`describe`). Either way the returned plan's goal is
+        ``human_confirmed`` and carries a target the human saw and accepted; a target
+        the human never acknowledged is never marked confirmed.
         """
-        return replace(self, confirmed=True, goal=self.goal.confirm())
+        goal = self.goal
+        if objective_target is not None:
+            judge_names = frozenset(g.name for g in goal.guardrails if g.kind == "judge")
+            with judge_allowlist(judge_names):
+                goal = CompiledGoal(
+                    objective_metric=goal.objective_metric,
+                    direction=goal.direction,
+                    target=GoalTarget(value=objective_target, kind=goal.target.kind),
+                    guardrails=goal.guardrails,
+                    cohort=goal.cohort,
+                    human_confirmed=False,
+                )
+        return replace(self, confirmed=True, goal=goal.confirm())
 
     def describe(self) -> str:
-        """A one-line, human-readable summary of the plan (for operator surfacing)."""
+        """A one-line, human-readable summary of the plan (for operator surfacing).
+
+        The objective target is flagged as a **suggested default** on an unconfirmed
+        plan so a reviewer knows to set/acknowledge it via
+        :meth:`confirm(objective_target=…) <confirm>`; on a confirmed plan it is the
+        human-accepted value.
+        """
         judges = ", ".join(d.judge_name or d.name for d in self.judges_to_author) or "none"
         metrics = ", ".join(d.metric or d.name for d in self.deterministic_metrics) or "none"
         obj = self.objective
         obj_scorer = obj.judge_name if obj.kind == "memalign_judge" else obj.metric
+        target = self.goal.target
+        target_note = (
+            f"{target.kind}:{target.value}"
+            if self.confirmed
+            else f"{target.kind}:{target.value} (suggested default, adjust before confirming)"
+        )
         return (
             f"objective={self.goal.objective_metric} ({obj_scorer}, {self.goal.direction}); "
+            f"target={target_note}; "
             f"judges to author=[{judges}]; deterministic metrics=[{metrics}]; "
             f"confirmed={self.confirmed}"
         )
@@ -356,7 +392,10 @@ def _compose_goal(planned: Sequence[PlannedDimension], cohort: Cohort | str) -> 
     return CompiledGoal(
         objective_metric=objective_metric,
         direction=direction,
-        target=GoalTarget(value=_DEFAULT_RELATIVE_TARGET[direction], kind="relative"),
+        # A SUGGESTED default only — the human sets/acknowledges the real target at
+        # confirm time (RequirementsPlan.confirm(objective_target=...)). It is never
+        # confirmed carrying a value the human did not set.
+        target=GoalTarget(value=_SUGGESTED_RELATIVE_TARGET[direction], kind="relative"),
         guardrails=tuple(guardrails),
         cohort=cohort,
         human_confirmed=False,
@@ -414,10 +453,16 @@ def execute_plan(
         A :class:`PlanExecution` recording the authored judges and whether the goal
         was persisted.
     """
-    if not plan.confirmed:
+    # Require BOTH gates at the side-effect boundary: the plan is confirmed AND the
+    # goal it carries is human_confirmed. confirm() always sets both, so this is a
+    # defense-in-depth guard — a hand-constructed plan with confirmed=True but an
+    # unconfirmed goal (a target the human never acknowledged) can still not author or
+    # persist anything.
+    if not plan.confirmed or not plan.goal.human_confirmed:
         raise RequirementsNotConfirmedError(
-            "refusing to author judges / persist the goal: the plan is not confirmed. "
-            "Review it and call RequirementsPlan.confirm() first (propose-then-confirm)."
+            "refusing to author judges / persist the goal: the plan is not confirmed "
+            "(plan.confirmed and goal.human_confirmed must both hold). Review it and "
+            "call RequirementsPlan.confirm(objective_target=...) first (propose-then-confirm)."
         )
 
     author_fn: JudgeAuthor
