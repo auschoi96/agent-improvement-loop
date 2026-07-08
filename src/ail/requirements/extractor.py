@@ -129,25 +129,21 @@ def build_extractor_system_prompt() -> str:
 def _parse_dimension_array(raw: str) -> list[Any]:
     """Parse the LLM's raw text into a JSON array, failing loud on bad output.
 
-    Mirrors :func:`ail.goals.compiler._parse_proposal_json` but expects a JSON
-    *array*: strips a markdown fence, then falls back to the outermost ``[...]``
-    span if the model wrapped the array in stray prose.
+    **Strict, fail-closed.** After stripping an optional surrounding markdown fence
+    the *entire* response must be a single JSON array. Non-JSON output — including
+    prose with an embedded array like ``Here you go: [ {...} ]`` — RAISES
+    :class:`RequirementsExtractionError` rather than being salvaged. A model that
+    ignores the "JSON-array-only" instruction fails closed; a dimension list is never
+    guessed out of the outermost ``[...]`` span of arbitrary prose (which could pick
+    up a bracketed aside and fabricate dimensions).
     """
     text = _strip_code_fences(raw)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        start, end = text.find("["), text.rfind("]")
-        if start == -1 or end <= start:
-            raise RequirementsExtractionError(
-                f"LLM did not return a valid JSON array of dimensions: {exc}"
-            ) from exc
-        try:
-            data = json.loads(text[start : end + 1])
-        except json.JSONDecodeError as exc2:
-            raise RequirementsExtractionError(
-                f"LLM did not return a valid JSON array of dimensions: {exc2}"
-            ) from exc2
+        raise RequirementsExtractionError(
+            f"LLM did not return a valid JSON array of dimensions: {exc}"
+        ) from exc
     if not isinstance(data, list):
         raise RequirementsExtractionError(
             f"LLM dimensions output must be a JSON array, got {type(data).__name__}."
