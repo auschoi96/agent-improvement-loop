@@ -11,12 +11,18 @@ import {
   validateExperimentBody,
   createExperimentBody,
   registerBody,
+  previewRequirementsBody,
+  confirmRequirementsBody,
   freshnessMessage,
   creationMessage,
   registerMessage,
+  requirementsPlanView,
+  previewRequirementsMessage,
+  confirmRequirementsMessage,
   resolvedFromValidation,
   resolvedFromCreation,
   dataGateView,
+  type RequirementsPreviewResponse,
   type RequirementsResponse,
   type WizardState,
 } from './onboarding';
@@ -201,5 +207,123 @@ describe('dataGateView — renders Python gate facts verbatim (no TS thresholds/
       selected: [{ ...req.selected[0], requires_labels: false, summary: 'PY_SUMMARY_WINS' }],
     };
     expect(dataGateView(flipped).perGoal[0].summary).toBe('PY_SUMMARY_WINS');
+  });
+});
+
+describe('requirementsPlanView — the routed plan is rendered from Python, nothing derived in TS', () => {
+  // A preview whose routing facts are DISTINCTIVE sentinels: if the client ever
+  // re-derived a dimension's kind/role/direction, the objective, the judge/metric
+  // split, or the target instead of rendering the Python response, these exact
+  // sentinels could not appear.
+  const preview: RequirementsPreviewResponse = {
+    outcome: 'requirements_preview',
+    requirements_text: 'be great',
+    agent_name: 'my_agent',
+    describe: 'PY_DESCRIBE_TEXT confirmed=False',
+    objective_metric: 'PY_OBJECTIVE_METRIC',
+    direction: 'PY_DIRECTION',
+    requires_quality: true,
+    dimensions: [
+      {
+        name: 'no hallucinated tool calls',
+        description: 'never invent tools',
+        user_priority: 1,
+        kind: 'memalign_judge',
+        role: 'objective',
+        metric: null,
+        judge_name: 'PY_JUDGE_NAME',
+        direction: 'maximize',
+      },
+      {
+        name: 'latency',
+        description: 'be fast',
+        user_priority: 2,
+        kind: 'deterministic_l0',
+        role: 'guardrail',
+        metric: 'PY_METRIC_NAME',
+        judge_name: null,
+        direction: 'minimize',
+      },
+    ],
+    judges_to_author: ['PY_JUDGE_NAME'],
+    deterministic_metrics: ['PY_METRIC_NAME'],
+    // A distinctive, non-round SUGGESTED target: a hardcoded TS default could not
+    // reproduce it — it can only come from the response.
+    suggested_target: { value: 0.4242, kind: 'PY_TARGET_KIND', is_suggestion: true },
+  };
+
+  it('passes objective, dimensions, kinds/roles/directions, split, and describe through verbatim', () => {
+    const view = requirementsPlanView(preview);
+    expect(view.objectiveMetric).toBe('PY_OBJECTIVE_METRIC');
+    expect(view.direction).toBe('PY_DIRECTION');
+    expect(view.requiresQuality).toBe(true);
+    expect(view.describe).toBe('PY_DESCRIBE_TEXT confirmed=False');
+    expect(view.dimensions.map((d) => [d.role, d.kind, d.direction, d.metric ?? d.judge_name])).toEqual([
+      ['objective', 'memalign_judge', 'maximize', 'PY_JUDGE_NAME'],
+      ['guardrail', 'deterministic_l0', 'minimize', 'PY_METRIC_NAME'],
+    ]);
+    expect(view.judgesToAuthor).toEqual(['PY_JUDGE_NAME']);
+    expect(view.deterministicMetrics).toEqual(['PY_METRIC_NAME']);
+  });
+
+  it('the suggested target comes from the response (a TS constant could not produce 0.4242)', () => {
+    const view = requirementsPlanView(preview);
+    expect(view.suggestedTarget).toEqual({ value: 0.4242, kind: 'PY_TARGET_KIND', is_suggestion: true });
+  });
+
+  it('never fabricates a target when Python sent none', () => {
+    const view = requirementsPlanView({ ...preview, suggested_target: null });
+    expect(view.suggestedTarget).toBeNull();
+  });
+});
+
+describe('preview / confirm request builders — trim, no actor, target relayed verbatim', () => {
+  it('preview body carries the trimmed text + agent name and no actor', () => {
+    const body = previewRequirementsBody('  be fast  ', '  my_agent ');
+    expect(body).toEqual({ requirements_text: 'be fast', agent_name: 'my_agent' });
+    expect('actor' in body).toBe(false);
+  });
+
+  it('confirm body relays the human target EXACTLY (TS neither defaults nor clamps it)', () => {
+    const body = confirmRequirementsBody('  be safe ', ' my_agent ', ' exp-1 ', -0.5);
+    expect(body).toEqual({
+      requirements_text: 'be safe',
+      agent_name: 'my_agent',
+      experiment_id: 'exp-1',
+      objective_target: -0.5,
+    });
+    expect('actor' in body).toBe(false);
+    // A different human value passes through unchanged — no TS-side normalization.
+    expect(confirmRequirementsBody('x', 'a', 'e', 0.9999).objective_target).toBe(0.9999);
+  });
+});
+
+describe('previewRequirementsMessage / confirmRequirementsMessage — honest verdicts', () => {
+  it('a preview engine error is surfaced verbatim, never a fabricated plan', () => {
+    const msg = previewRequirementsMessage({ outcome: 'error', error: 'LICENSE_TO_ILL: bad blob' });
+    expect(msg?.tone).toBe('error');
+    expect(msg?.text).toMatch(/LICENSE_TO_ILL/);
+    expect(previewRequirementsMessage({ outcome: 'requirements_preview' })).toBeNull();
+  });
+
+  it('confirm success names the authored judges + persistence honestly', () => {
+    const msg = confirmRequirementsMessage({
+      outcome: 'requirements_confirmed',
+      authored_judges: ['no_hallucinated_tool_calls', 'response_conciseness'],
+      persisted: true,
+    });
+    expect(msg.tone).toBe('success');
+    expect(msg.text).toMatch(/no_hallucinated_tool_calls/);
+    expect(msg.text).toMatch(/persisted/);
+  });
+
+  it('a refusal (no target) is an error, not a fake success', () => {
+    const msg = confirmRequirementsMessage({ outcome: 'refused', refused_reason: 'target required' });
+    expect(msg.tone).toBe('error');
+    expect(msg.text).toMatch(/target required/);
+  });
+
+  it('an engine error (wrong-sign target) is an error', () => {
+    expect(confirmRequirementsMessage({ outcome: 'error', error: 'negative relative target' }).tone).toBe('error');
   });
 });

@@ -100,6 +100,61 @@ export interface RegisterResponse {
   error?: string | null;
 }
 
+// --- Free-form requirements intake (slice 2) -------------------------------
+// The engine (ail.requirements) owns every routing / kind / target fact; these
+// shapes are the JSON it prints, rendered VERBATIM. Nothing here re-derives which
+// dimension is a judge vs a metric, nor invents a target — two-tier discipline.
+
+export interface PreviewedDimension {
+  name: string;
+  description: string;
+  user_priority: number;
+  kind: string; // 'deterministic_l0' | 'memalign_judge' — from Python
+  role: string; // 'objective' | 'guardrail' — from Python
+  metric: string | null;
+  judge_name: string | null;
+  direction: string; // 'minimize' | 'maximize' — from Python
+}
+
+// The composed objective target — a SUGGESTION the human must set/acknowledge.
+// `value` is Python's signed relative default; the client pre-fills an editable
+// field with it (never a TS constant) and sends back whatever the human commits.
+export interface SuggestedTarget {
+  value: number;
+  kind: string;
+  is_suggestion: boolean;
+}
+
+export interface RequirementsPreviewResponse {
+  outcome: 'requirements_preview' | 'error';
+  requirements_text?: string;
+  cohort?: string;
+  agent_name?: string;
+  describe?: string;
+  objective_metric?: string;
+  direction?: string;
+  requires_quality?: boolean;
+  dimensions?: PreviewedDimension[];
+  judges_to_author?: string[];
+  deterministic_metrics?: string[];
+  suggested_target?: SuggestedTarget | null;
+  error?: string | null;
+  action?: string; // present on an ErrorResult
+}
+
+export interface RequirementsConfirmResponse {
+  outcome: 'requirements_confirmed' | 'refused' | 'error';
+  agent_name?: string;
+  experiment_id?: string;
+  cohort?: string;
+  objective_metric?: string;
+  objective_target?: number | null;
+  authored_judges?: string[];
+  persisted?: boolean;
+  refused_reason?: string | null;
+  error?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // The stepper
 // ---------------------------------------------------------------------------
@@ -233,6 +288,29 @@ export const registerBody = (
   goals: [...goals],
 });
 
+export const previewRequirementsBody = (
+  requirementsText: string,
+  agentName: string
+): { requirements_text: string; agent_name: string } => ({
+  requirements_text: requirementsText.trim(),
+  agent_name: agentName.trim(),
+});
+
+// The confirm body carries the human's target VERBATIM — the client never computes,
+// clamps, or defaults it here (two-tier: Python validates the sign against the
+// derived direction and fails closed on a mismatch).
+export const confirmRequirementsBody = (
+  requirementsText: string,
+  agentName: string,
+  experimentId: string,
+  objectiveTarget: number
+): { requirements_text: string; agent_name: string; experiment_id: string; objective_target: number } => ({
+  requirements_text: requirementsText.trim(),
+  agent_name: agentName.trim(),
+  experiment_id: experimentId.trim(),
+  objective_target: objectiveTarget,
+});
+
 // ---------------------------------------------------------------------------
 // Honest message mapping
 // ---------------------------------------------------------------------------
@@ -343,4 +421,62 @@ export function dataGateView(req: RequirementsResponse): DataGateView {
       summary: g.summary ?? '',
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Free-form requirements plan view model (two-tier: rendered VERBATIM from Python)
+// ---------------------------------------------------------------------------
+
+export interface RequirementsPlanView {
+  describe: string; // plan.describe() text, verbatim
+  objectiveMetric: string;
+  direction: string;
+  requiresQuality: boolean;
+  dimensions: PreviewedDimension[]; // routed dimensions, verbatim
+  judgesToAuthor: string[]; // judge names Python would author
+  deterministicMetrics: string[]; // L0 metric names (no judge)
+  suggestedTarget: SuggestedTarget | null; // Python's suggestion, NOT a TS default
+}
+
+// Project a preview response into the render model. Every routing/target fact is
+// passed through VERBATIM: the client authors no `kind`, no `direction`, no
+// threshold, and — crucially — no target. The suggested target is whatever Python
+// sent (or null); the UI pre-fills the editable field from it, never a constant.
+export function requirementsPlanView(resp: RequirementsPreviewResponse): RequirementsPlanView {
+  return {
+    describe: resp.describe ?? '',
+    objectiveMetric: resp.objective_metric ?? '',
+    direction: resp.direction ?? '',
+    requiresQuality: resp.requires_quality ?? false,
+    dimensions: resp.dimensions ?? [],
+    judgesToAuthor: resp.judges_to_author ?? [],
+    deterministicMetrics: resp.deterministic_metrics ?? [],
+    suggestedTarget: resp.suggested_target ?? null,
+  };
+}
+
+// The preview verdict, honestly: an engine error (garbage blob, mis-mapped metric,
+// unconfigured LLM) is surfaced verbatim — never a fabricated plan.
+export function previewRequirementsMessage(resp: RequirementsPreviewResponse): ToneMessage | null {
+  if (resp.outcome === 'error') {
+    return { tone: 'error', text: resp.error ?? 'Could not preview the requirements.' };
+  }
+  return null;
+}
+
+// The confirm result, honestly: success names the authored judges and whether the
+// goal was persisted; a refusal (anonymous actor / no target) or an error (wrong-sign
+// target / infra) is never dressed up as a confirmation.
+export function confirmRequirementsMessage(resp: RequirementsConfirmResponse): ToneMessage {
+  switch (resp.outcome) {
+    case 'requirements_confirmed': {
+      const judges = (resp.authored_judges ?? []).join(', ') || 'none';
+      const persisted = resp.persisted ? 'and the goal was persisted to the loop' : 'but the goal was NOT persisted';
+      return { tone: 'success', text: `Authored judges: ${judges} — ${persisted}.` };
+    }
+    case 'refused':
+      return { tone: 'error', text: `Not confirmed — ${resp.refused_reason ?? 'a fail-closed check blocked it'}.` };
+    default:
+      return { tone: 'error', text: `Error — ${resp.error ?? 'the requirements could not be confirmed'}.` };
+  }
 }
