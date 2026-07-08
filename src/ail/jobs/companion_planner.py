@@ -50,6 +50,7 @@ import argparse
 import os
 from functools import partial
 
+from ail.goals.compiler import CompiledGoal
 from ail.jobs import optimization_cycle as oc
 from ail.jobs.publish_job import resolve_job_auth
 from ail.loop.candidate_builders import evidence_candidate_builder
@@ -65,6 +66,8 @@ __all__ = [
     "surface_evidence",
     "surface_plan",
     "surface_proposals",
+    "load_persisted_goal",
+    "resolve_goal",
     "run",
     "main",
 ]
@@ -230,6 +233,62 @@ def surface_proposals(ecr: EvidenceCycleResult, *, published: dict[str, str]) ->
 
 
 # ---------------------------------------------------------------------------
+# Goal load (GAP A): prefer the confirmed intake goal, fall back to CLI args.
+# ---------------------------------------------------------------------------
+
+
+def load_persisted_goal(args: argparse.Namespace) -> CompiledGoal | None:
+    """Read this agent's confirmed intake goal from UC, or ``None`` (fall back to args).
+
+    Closes the intake→loop bridge on the read side: the confirmed goal the user
+    stated (:mod:`ail.requirements.persistence`) is preferred over the operator's CLI
+    ``--objective-metric``/``--goal-*`` flags. Fail-soft — returns ``None`` (so
+    :func:`resolve_goal` uses the arg-based goal) when:
+
+    * no static token is set (the read needs one; tests drive :func:`run` without a
+      token, so this keeps them offline — the companion's :func:`resolve_static_auth`
+      pins one before a real run), or
+    * the table / the agent's row is absent (a first run before any intake), or
+    * any read/parse error occurs (never fabricates or blocks the cycle).
+    """
+    if not (os.environ.get("DATABRICKS_HOST") and os.environ.get("DATABRICKS_TOKEN")):
+        return None
+    try:
+        from ail.publish import _build_workspace_client
+        from ail.requirements.persistence import load_persisted_goal as _load
+
+        client = _build_workspace_client(None)  # static env token (resolve_static_auth pinned it)
+        return _load(
+            agent_name=args.agent,
+            client=client,
+            warehouse_id=args.warehouse_id,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
+    except Exception as exc:  # noqa: BLE001 - a read failure falls back to args, never blocks
+        print(
+            f"{_TAG} note: could not read a persisted intake goal "
+            f"({type(exc).__name__}: {exc}); using the CLI-arg goal."
+        )
+        return None
+
+
+def resolve_goal(args: argparse.Namespace) -> tuple[CompiledGoal, str]:
+    """Resolve the goal the cycle runs, preferring the confirmed intake goal.
+
+    Returns ``(goal, source)`` where ``source`` is ``"persisted-intake"`` when a
+    **confirmed** persisted goal was loaded, else ``"cli-args"`` (the existing
+    :func:`ail.jobs.optimization_cycle._build_goal` arg-based path). Only a
+    human-confirmed persisted goal is preferred — an unconfirmed one is ignored so
+    the controller's confirm gate is never bypassed by a stale write.
+    """
+    persisted = load_persisted_goal(args)
+    if persisted is not None and persisted.human_confirmed:
+        return persisted, "persisted-intake"
+    return oc._build_goal(args), "cli-args"
+
+
+# ---------------------------------------------------------------------------
 # One evidence-first run: read evidence -> plan/gate/propose -> publish.
 # ---------------------------------------------------------------------------
 
@@ -244,7 +303,7 @@ def run(args: argparse.Namespace) -> int:
     never fabricates a proposal).
     """
     agent = Agent(agent_name=args.agent, experiment_id=args.experiment)
-    goal = oc._build_goal(args)
+    goal, goal_source = resolve_goal(args)
 
     planner: Planner = (
         partial(agent_planner, model=args.planner_model) if args.planner_model else agent_planner
@@ -252,7 +311,8 @@ def run(args: argparse.Namespace) -> int:
 
     print(
         f"{_TAG} agent={agent.agent_name} experiment={args.experiment} "
-        f"host={os.environ.get('DATABRICKS_HOST')} objective={goal.objective_metric} "
+        f"host={os.environ.get('DATABRICKS_HOST')} goal_source={goal_source} "
+        f"objective={goal.objective_metric} "
         f"target={goal.target.kind}:{goal.target.value} confirmed={goal.human_confirmed} "
         f"table={args.catalog}.{args.schema}.agent_proposed_actions dry_run={args.dry_run}"
     )
