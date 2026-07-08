@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from ail.goals.compiler import CompiledGoal, GoalTarget, Guardrail
 from ail.loop.candidate_builders import (
+    agent_skill_edit_builder,
     chain_candidate_builders,
     registry_candidate_builder,
 )
@@ -164,3 +165,73 @@ def test_chain_returns_first_non_none() -> None:
 def test_chain_all_decline_is_none() -> None:
     chain = chain_candidate_builders(lambda d, *, goal, agent: None, lambda d, *, goal, agent: None)
     assert chain(_skill_decision(), goal=_quality_goal(), agent=_agent()) is None
+
+
+# ==========================================================================
+# Piece 3 — the generic agent-authored quick-edit builder
+# ==========================================================================
+
+_CURRENT_BODY = "# Modularity skill\n\nWrite one function per responsibility.\n"
+_EDITED_BODY = (
+    "# Modularity skill\n\n"
+    "Write one function per responsibility.\n"
+    "Extract shared logic into small, named helpers; avoid functions over ~40 lines.\n"
+)
+
+
+def _editor(edit: str | None) -> object:
+    """A deterministic SkillEditor that returns ``edit`` (or declines with None)."""
+
+    def _e(
+        *, current_body: str, decision: Decision, goal: CompiledGoal, agent: Agent
+    ) -> str | None:
+        return edit
+
+    return _e
+
+
+def _resolver(body: str | None) -> object:
+    def _r(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> str | None:
+        return body
+
+    return _r
+
+
+def test_quick_edit_produces_a_real_diff() -> None:
+    build = agent_skill_edit_builder(
+        editor=_editor(_EDITED_BODY), body_resolver=_resolver(_CURRENT_BODY)
+    )
+    candidate = build(_skill_decision(), goal=_quality_goal(), agent=_agent())
+    assert candidate is not None
+    assert candidate.change.kind is ChangeKind.SKILL_DIFF
+    assert candidate.proof is None  # evidence-only-applyable kind: no frozen-suite proof
+    diff = candidate.change.diff
+    assert diff and diff.strip()
+    # a genuine unified diff carrying the added line (generic, not token-efficiency text)
+    assert "@@" in diff
+    assert "+Extract shared logic into small, named helpers" in diff
+
+
+def test_quick_edit_fails_closed_when_editor_declines() -> None:
+    build = agent_skill_edit_builder(editor=_editor(None), body_resolver=_resolver(_CURRENT_BODY))
+    assert build(_skill_decision(), goal=_quality_goal(), agent=_agent()) is None
+
+
+def test_quick_edit_fails_closed_on_no_real_edit() -> None:
+    # editor returns the same body (only trailing whitespace differs) -> no real change
+    build = agent_skill_edit_builder(
+        editor=_editor(_CURRENT_BODY + "\n  "), body_resolver=_resolver(_CURRENT_BODY)
+    )
+    assert build(_skill_decision(), goal=_quality_goal(), agent=_agent()) is None
+
+
+def test_quick_edit_fails_closed_when_no_champion_body() -> None:
+    build = agent_skill_edit_builder(editor=_editor(_EDITED_BODY), body_resolver=_resolver(None))
+    assert build(_skill_decision(), goal=_quality_goal(), agent=_agent()) is None
+
+
+def test_quick_edit_ignores_non_skill_update() -> None:
+    build = agent_skill_edit_builder(
+        editor=_editor(_EDITED_BODY), body_resolver=_resolver(_CURRENT_BODY)
+    )
+    assert build(_gepa_decision(), goal=_quality_goal(), agent=_agent()) is None

@@ -87,6 +87,10 @@ __all__ = [
     # Pluggable dispatch (piece 1)
     "registry_candidate_builder",
     "chain_candidate_builders",
+    # Generic agent-authored quick-edit (piece 3)
+    "ChampionBodyResolver",
+    "SkillEditor",
+    "agent_skill_edit_builder",
 ]
 
 #: The deterministic headline objective the token-efficiency skill is proven against
@@ -322,3 +326,115 @@ def chain_candidate_builders(*builders: CandidateBuilder) -> CandidateBuilder:
         return None
 
     return _chain
+
+
+# ===========================================================================
+# Piece 3 — the generic agent-authored quick-edit builder (SKILL_UPDATE)
+# ===========================================================================
+
+
+class ChampionBodyResolver(Protocol):
+    """Resolve the **current champion body** a decision would change, or ``None``.
+
+    The injectable read seam behind the generic builders: given a decision (its
+    trigger names the dimension/target), return the agent's current champion skill /
+    prompt body — the text a quick edit revises, or a GEPA run seeds from. Production
+    reads it from the prompt registry (the champion alias) or the agent's skill file;
+    tests inject a canned body. Returning ``None`` (or empty) is the first-class
+    fail-closed outcome: there is no champion body to change, so the builder produces
+    no candidate rather than editing a fabricated one.
+    """
+
+    def __call__(self, decision: Decision, *, goal: CompiledGoal, agent: Agent) -> str | None: ...
+
+
+class SkillEditor(Protocol):
+    """Author a **small skill edit** of ``current_body`` toward the goal, or decline.
+
+    The injectable authoring seam: the local companion agent (Claude Agent SDK)
+    reads the current champion body plus the decision's evidence (which
+    dimension/target fell short) and returns a *revised* body — a lightweight,
+    targeted edit, **generic across any skill/judge dimension** (never the fixed
+    token-efficiency install). It returns ``None`` to **decline** (it saw no
+    worthwhile edit), and the builder fails closed on a decline or on an edit that
+    does not actually change the body. Tests inject a deterministic editor; nothing
+    here calls a live model.
+    """
+
+    def __call__(
+        self, *, current_body: str, decision: Decision, goal: CompiledGoal, agent: Agent
+    ) -> str | None: ...
+
+
+def _unified_body_diff(before: str, after: str, *, fromfile: str, tofile: str) -> str:
+    """A stable unified diff between two bodies (same shape as the token-eff install).
+
+    Splits on lines (no keepends) with ``lineterm=""`` so the rendered diff is
+    deterministic and matches :func:`token_efficiency_skill_change`'s form — a human
+    reviewer sees exactly what changes, and lane-3b reconstructs the full body
+    server-side from the current champion + this diff.
+    """
+    return "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=fromfile,
+            tofile=tofile,
+            lineterm="",
+        )
+    )
+
+
+def agent_skill_edit_builder(
+    *,
+    editor: SkillEditor,
+    body_resolver: ChampionBodyResolver,
+) -> CandidateBuilder:
+    """Build a ``SKILL_UPDATE`` candidate from an **agent-authored** small skill edit.
+
+    The generic, dimension-agnostic counterpart to the token-efficiency install: for
+    a ``SKILL_UPDATE`` decision (whatever its trigger/dimension), it resolves the
+    current champion body (``body_resolver``), asks the agent to author a targeted
+    edit toward the goal (``editor``), and packages the *real* change as a
+    :class:`~ail.loop.proposals.ChangeKind.SKILL_DIFF` :class:`Candidate` (unified
+    diff of current → edited body). Its proof is ``None``: a skill update is an
+    evidence-only-applyable kind (the apply engine reconstructs + registers the body
+    on human approval, re-running the gate — no frozen-suite proof required).
+
+    Fail-closed (no fabricated candidate) at every step: not a ``SKILL_UPDATE`` → the
+    builder is not for this decision; no champion body to edit → ``None``; the editor
+    declines (``None``) → ``None``; the edit does not change the body (identical after
+    strip, or an empty diff) → ``None``. Chaining (:func:`chain_candidate_builders`)
+    places this **after** the proven token-efficiency builder so the specific waste
+    signal keeps its proven skill and only *other* SKILL_UPDATE dimensions reach here.
+    """
+
+    def _build(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+        if decision.action_kind is not ActionKind.SKILL_UPDATE:
+            return None
+        current = body_resolver(decision, goal=goal, agent=agent)
+        if current is None or not current.strip():
+            return None
+        edited = editor(current_body=current, decision=decision, goal=goal, agent=agent)
+        if edited is None or not edited.strip():
+            return None
+        # A real edit, not a no-op: reject an unchanged body (identical after strip).
+        if edited.strip() == current.strip():
+            return None
+        diff = _unified_body_diff(
+            current, edited, fromfile="champion_skill", tofile="champion_skill+agent_edit"
+        )
+        # Defensive: an empty/whitespace-only diff is no change to review — fail closed.
+        if not diff.strip():
+            return None
+        change = ProposedChange(
+            kind=ChangeKind.SKILL_DIFF,
+            summary=(
+                f"Agent-authored skill edit toward goal {goal.objective_metric!r} "
+                f"(direction {goal.direction}): {decision.trigger.summary}"
+            ),
+            diff=diff,
+        )
+        return Candidate(change=change, prover_input=None, proof=None)
+
+    return _build
