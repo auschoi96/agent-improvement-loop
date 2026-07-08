@@ -73,6 +73,7 @@ from ail.loop.proposals import (
     derive_proposal_id,
 )
 from ail.optimize.lever import token_efficiency_intervention, token_efficiency_skill
+from ail.optimize.prompt_registry import candidate_improvement
 from ail.registry import Agent
 
 if TYPE_CHECKING:
@@ -91,6 +92,12 @@ __all__ = [
     "ChampionBodyResolver",
     "SkillEditor",
     "agent_skill_edit_builder",
+    # Generic GEPA optimization builder (piece 2)
+    "GepaSeed",
+    "GepaSeedResolver",
+    "GepaRunFn",
+    "gepa_target_key",
+    "gepa_candidate_builder",
 ]
 
 #: The deterministic headline objective the token-efficiency skill is proven against
@@ -436,5 +443,183 @@ def agent_skill_edit_builder(
             diff=diff,
         )
         return Candidate(change=change, prover_input=None, proof=None)
+
+    return _build
+
+
+# ===========================================================================
+# Piece 2 — the generic GEPA optimization candidate builder (GEPA_PROMPT)
+# ===========================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class GepaSeed:
+    """The resolved GEPA target: *which* champion artifact to evolve + its seed body.
+
+    Generic, **not hardcoded to token_efficiency**: ``target_key``
+    (:func:`gepa_target_key`) is the artifact's stable identity — derived from the
+    decision's evidence (the judged dimension / metric it fired on), used for
+    provenance, the candidate-artifact filename, and the GEPA component name.
+    ``seed_body`` is the current champion skill/prompt body GEPA starts evolving from
+    (resolved from the prompt registry / champion alias by the injected
+    :class:`GepaSeedResolver`). What *fitness* GEPA climbs is owned by the injected
+    :class:`GepaRunFn` (it configures :func:`ail.optimize.gepa_runner.run_gepa_optimization`'s
+    frozen-suite objective), so this seed carries only the target, keeping the builder
+    agnostic to how the run is scored.
+    """
+
+    target_key: str
+    seed_body: str
+
+
+class GepaSeedResolver(Protocol):
+    """Resolve the champion artifact a GEPA_PROMPT decision should evolve, or ``None``.
+
+    The generic-target seam: maps a decision (its trigger names the judged dimension /
+    metric) + goal + agent to the :class:`GepaSeed` GEPA seeds from — reading the
+    relevant champion body from the prompt registry / skill file. Returns ``None``
+    (fail-closed) when no champion target is resolvable, so the builder proposes
+    nothing rather than evolving a fabricated seed. Tests inject a canned seed; the
+    production resolver reads the registry (and is the single place that decides
+    *which* artifact to evolve — never a hardcoded token-efficiency default).
+    """
+
+    def __call__(
+        self, decision: Decision, *, goal: CompiledGoal, agent: Agent
+    ) -> GepaSeed | None: ...
+
+
+class GepaRunFn(Protocol):
+    """Run a **local** GEPA optimization for a resolved seed, or ``None`` fail-closed.
+
+    The single expensive seam, wrapping
+    :func:`ail.optimize.gepa_runner.run_gepa_optimization` bound to the deployer's
+    frozen Task Suite + live local agent adapter (many real agent sessions, minutes).
+    It returns the :class:`~ail.optimize.gepa_runner.GepaOptimizationResult` — the
+    evolved body **already held-out-validated** against the seed on a disjoint split
+    (the anti-overfit wall) — or ``None`` when GEPA **cannot run locally**: no frozen
+    suite present, no local Claude/agent available, or the run otherwise could not
+    produce a result. ``None`` is the fail-closed signal (no fabricated candidate);
+    tests inject a fake that returns a canned result (or ``None``) so nothing runs
+    live GEPA, a live agent arm, or a live model.
+    """
+
+    def __call__(
+        self, seed: GepaSeed, *, decision: Decision, goal: CompiledGoal, agent: Agent
+    ) -> GepaOptimizationResult | None: ...
+
+
+def gepa_target_key(decision: Decision, *, goal: CompiledGoal) -> str:
+    """The stable, **generic** identity of the artifact a GEPA_PROMPT decision evolves.
+
+    Resolved from the decision's own evidence, never hardcoded: the judged dimension's
+    judge (``judge:<judge_name>``) when the trigger rests on a judge — the dominant
+    GEPA case (a trusted judge dimension below goal, Lane A
+    :func:`ail.loop.decision_rules.decide_judge_dimension`, or a Lane B planner
+    GEPA proposal for a judge) — else the targeted ``metric:<metric>``, else the goal's
+    own ``goal:<objective_metric>``. Used for provenance, the candidate-artifact
+    filename, and the GEPA component name, so two decisions about the same target
+    resolve to the same key.
+    """
+    t = decision.trigger
+    if t.judge_name:
+        return f"judge:{t.judge_name}"
+    if t.metric:
+        return f"metric:{t.metric}"
+    return f"goal:{goal.objective_metric}"
+
+
+def _write_gepa_candidate_artifact(
+    result: GepaOptimizationResult, *, root: Path, target_key: str
+) -> str:
+    """Persist ``result`` as the ``gepa_candidate*.json`` the apply engine consumes.
+
+    Writes the full :class:`~ail.optimize.gepa_runner.GepaOptimizationResult` JSON to a
+    real file under ``root`` and returns its path — the ``evolved_body_ref`` the
+    proposal carries. :func:`ail.loop.apply._apply_gepa_prompt` reads this file back
+    (:func:`ail.optimize.prompt_registry.register_gepa_candidate` →
+    ``GepaOptimizationResult.model_validate_json``) and **re-runs** the held-out
+    improvement check at apply time, so the on-disk artifact is the source of truth.
+    The filename embeds a sanitized ``target_key`` (provenance) and a content digest
+    (a re-decided identical run overwrites its own file rather than proliferating).
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    payload = result.model_dump_json()
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", target_key).strip("-") or "gepa"
+    path = root / f"gepa_candidate_{slug}_{digest}.json"
+    path.write_text(payload, encoding="utf-8")
+    return str(path)
+
+
+def gepa_candidate_builder(
+    *,
+    gepa_run: GepaRunFn,
+    seed_resolver: GepaSeedResolver,
+    artifacts_root: str | Path,
+) -> CandidateBuilder:
+    """Build a ``GEPA_PROMPT`` candidate from a **local, self-proving** GEPA run.
+
+    For a ``GEPA_PROMPT`` decision it resolves the champion artifact to evolve
+    (``seed_resolver`` — generic, not token-efficiency-bound), runs GEPA **locally**
+    on it (``gepa_run``, wrapping
+    :func:`ail.optimize.gepa_runner.run_gepa_optimization`), and packages the result
+    as an :class:`~ail.loop.proposals.ChangeKind.EVOLVED_BODY_REF` :class:`Candidate`.
+    A GEPA candidate is **self-proving**: ``run_gepa_optimization`` already
+    held-out-validated the evolved body against the seed on a disjoint split, so the
+    candidate carries a **pre-computed** :class:`~ail.loop.proposals.ProofSummary`
+    (:attr:`Candidate.proof`). That proof is what lets a GEPA_PROMPT proposal flow
+    through the evidence-first companion (which runs no prover) *and* clear the apply
+    engine, which refuses a proof-less GEPA_PROMPT (its apply re-verifies the held-out
+    check). The ``evolved_body_ref`` points at a written ``gepa_candidate*.json`` that
+    :func:`ail.optimize.prompt_registry.register_gepa_candidate` consumes on approval.
+
+    Fail-closed everywhere (no fabricated candidate): not a ``GEPA_PROMPT`` decision,
+    no resolvable seed, ``gepa_run`` returned ``None`` (no frozen suite / no local
+    Claude), the run did not change the body (``changed=False``), the held-out result
+    did not beat the seed (:func:`ail.optimize.prompt_registry.candidate_improvement`),
+    or the held-out proof does not both prove an improvement and hold correctness —
+    each returns ``None``.
+    """
+    root = Path(artifacts_root)
+
+    def _build(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+        if decision.action_kind is not ActionKind.GEPA_PROMPT:
+            return None
+        seed = seed_resolver(decision, goal=goal, agent=agent)
+        if seed is None or not seed.seed_body.strip():
+            return None
+        # The expensive, self-proving run. None => GEPA could not run locally
+        # (no frozen suite / no local Claude) => fail-closed, no candidate.
+        result = gepa_run(seed, decision=decision, goal=goal, agent=agent)
+        if result is None:
+            return None
+        # A no-op evolution proves nothing to ship.
+        if not result.changed:
+            return None
+        # The honest anti-overfit gate the apply path re-runs: the evolved body must
+        # have beaten the seed on the held-out split GEPA never trained on.
+        improving, _reason = candidate_improvement(result)
+        if not improving:
+            return None
+        artifact = result.holdout_evolved
+        if artifact is None:  # defensive: candidate_improvement already required it
+            return None
+        # The pre-computed proof carried onto the proposal. Only surface a GEPA_PROMPT
+        # the apply engine will accept: a real proved improvement with correctness held.
+        proof = ProofSummary.from_phase2_artifact(artifact)
+        if not (proof.proved_improvement and proof.correctness_held):
+            return None
+        ref = _write_gepa_candidate_artifact(result, root=root, target_key=seed.target_key)
+        change = ProposedChange(
+            kind=ChangeKind.EVOLVED_BODY_REF,
+            summary=(
+                f"GEPA-evolved champion body for {seed.target_key} (toward goal "
+                f"{goal.objective_metric!r}); held-out realized-savings delta "
+                f"{result.holdout_savings_delta_pct} pct-pts beats seed."
+            ),
+            evolved_body_ref=ref,
+        )
+        return Candidate(change=change, prover_input=None, proof=proof)
 
     return _build
