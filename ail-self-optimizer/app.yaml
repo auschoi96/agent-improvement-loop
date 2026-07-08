@@ -21,3 +21,19 @@ env:
   # stays workspace-agnostic. Mirrors DATABRICKS_WAREHOUSE_ID <- sql-warehouse.
   - name: AIL_APPLY_JOB_ID
     valueFrom: apply-job
+  # Select the Node-native labeling transport (docs/LABELING_UI.md). Generic
+  # literal, correct for every deployment: the Node-only deployed image can't
+  # spawn the Python labeling engine, so the labeling routes talk to the
+  # Databricks-managed MLflow assessments REST API directly (NOT a per-grade Job
+  # trigger — labeling is rapid-fire). Local dev/self-hosted omits this and falls
+  # back to the subprocess engine. Reuses DATABRICKS_WAREHOUSE_ID (above) as the
+  # SQL warehouse for the v4 UC tracing endpoints.
+  - name: AIL_LABELING_TRANSPORT
+    value: rest
+  # Optional: the label floor (ail.readiness.ReadinessThresholds.quality_min_labels)
+  # relayed to the deployed transport so the labeling panel shows the "N / floor"
+  # target. Two-tier: the NUMBER lives in Python — never authored in TS/YAML. Left
+  # unset here so nothing hardcodes it; when unset the panel honestly renders `—`.
+  # A deployer may set it from the engine, e.g.
+  #   AIL_LABEL_FLOOR: "$(python -c 'import ail.readiness as r; print(r.ReadinessThresholds().quality_min_labels)')"
+  # (set via the deploy environment, not a committed literal).
