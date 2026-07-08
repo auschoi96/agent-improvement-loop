@@ -19,6 +19,7 @@ Coverage map (the slice-1 acceptance list):
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -33,7 +34,7 @@ from ail.goals.allowlist import (
     judge_allowlist,
     sourced_judge_names,
 )
-from ail.goals.compiler import CompiledGoal, GoalTarget, Guardrail
+from ail.goals.compiler import CompiledGoal, GoalContractError, GoalTarget, Guardrail
 from ail.requirements import (
     COMPILED_GOAL_COLUMNS,
     PlanExecution,
@@ -120,9 +121,22 @@ class TestExtraction:
         dims = extract_dimensions("just be concise", llm=mock_llm([THREE_DIMS[1]]))
         assert len(dims) == 1 and dims[0].name == "response conciseness"
 
-    def test_fenced_and_prose_wrapped_json_recovered(self) -> None:
+    def test_fenced_json_recovered(self) -> None:
+        # A surrounding ```json fence is stripped; the payload is still a pure array.
         assert len(extract_dimensions("x", llm=mock_llm(THREE_DIMS, fence=True))) == 3
-        assert len(extract_dimensions("x", llm=mock_llm(THREE_DIMS, prose=True))) == 3
+
+    def test_prose_wrapped_json_fails_closed(self) -> None:
+        # Strict: prose with an embedded array must RAISE, not be salvaged out of the
+        # outermost [...] span (which could fabricate dimensions from a bracketed aside).
+        with pytest.raises(RequirementsExtractionError, match="valid JSON array"):
+            extract_dimensions("x", llm=mock_llm(THREE_DIMS, prose=True))
+        with pytest.raises(RequirementsExtractionError, match="valid JSON array"):
+            extract_dimensions(
+                "x",
+                llm=mock_llm(
+                    'Here you go: [{"name": "a", "description": "b", "user_priority": 1}]'
+                ),
+            )
 
     def test_blank_metric_string_becomes_none(self) -> None:
         payload = [
@@ -325,6 +339,83 @@ class TestProposeThenConfirm:
         assert result.persisted is False
         assert [k for k, _ in log] == ["author", "author"]
 
+    def test_execute_refuses_confirmed_plan_with_unconfirmed_goal(self) -> None:
+        # Defense-in-depth: a hand-constructed plan with confirmed=True but a goal the
+        # human never confirmed (a fabricated target) must still author/persist nothing.
+        log: list[tuple[str, str]] = []
+        plan = plan_requirements("...", "claude_code", llm=mock_llm(THREE_DIMS))
+        forced = dataclasses.replace(plan, confirmed=True)  # goal.human_confirmed stays False
+        assert forced.confirmed is True and forced.goal.human_confirmed is False
+        persisted: list[CompiledGoal] = []
+        with pytest.raises(RequirementsNotConfirmedError, match="human_confirmed"):
+            execute_plan(
+                forced,
+                experiment_id="e",
+                author=_spy_author(log),
+                persist=lambda g: persisted.append(g),
+            )
+        assert log == [] and persisted == []
+
+
+# ---------------------------------------------------------------------------
+# BLOCKING 2: the objective target is an explicit human input at confirm time
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmTarget:
+    def test_default_target_is_labelled_a_suggestion_before_confirm(self) -> None:
+        plan = plan_requirements("...", "claude_code", llm=mock_llm(THREE_DIMS))
+        desc = plan.describe()
+        assert "suggested default, adjust before confirming" in desc
+        # the unconfirmed goal carries the suggested placeholder, not an approved value
+        assert plan.goal.human_confirmed is False
+
+    def test_confirm_applies_human_supplied_target(self) -> None:
+        # A deterministic (minimize) objective so a negative relative target is valid.
+        dims = [
+            RequirementDimension(
+                name="latency", description="fast", user_priority=1, metric="duration_seconds"
+            )
+        ]
+        plan = build_plan(dims, "claude_code")
+        assert plan.goal.target.value == -0.30  # suggested default
+        confirmed = plan.confirm(objective_target=-0.5)
+        assert confirmed.goal.human_confirmed is True
+        assert confirmed.goal.target.value == -0.5
+        assert confirmed.goal.target.kind == "relative"
+        # a confirmed plan surfaces the accepted value without the suggestion label
+        assert "suggested default" not in confirmed.describe()
+        assert "relative:-0.5" in confirmed.describe()
+
+    def test_confirm_without_target_keeps_suggestion_and_confirms(self) -> None:
+        plan = plan_requirements("...", "claude_code", llm=mock_llm(THREE_DIMS))
+        confirmed = plan.confirm()  # human accepts the shown suggestion
+        assert confirmed.goal.human_confirmed is True
+        assert confirmed.goal.target.value == 0.10  # maximize suggestion, unchanged
+
+    def test_confirm_wrong_sign_target_fails_closed(self) -> None:
+        # Direction is derived (minimize for an L0 metric); a positive relative target
+        # contradicts it and must fail closed at confirm, not ship a bad goal.
+        dims = [
+            RequirementDimension(
+                name="cost", description="cheap", user_priority=1, metric="total_usd"
+            )
+        ]
+        plan = build_plan(dims, "claude_code")
+        with pytest.raises(GoalContractError, match="negative relative target"):
+            plan.confirm(objective_target=0.5)
+
+    def test_confirm_target_preserved_for_authored_judge_objective(self) -> None:
+        # The objective is an authored judge (maximize); confirming with a target must
+        # re-admit the judge name so rebuild+revalidate succeeds.
+        plan = plan_requirements("...", "claude_code", llm=mock_llm(THREE_DIMS))
+        confirmed = plan.confirm(objective_target=0.25)
+        assert confirmed.goal.objective_metric == "no_hallucinated_tool_calls"
+        assert confirmed.goal.target.value == 0.25
+        assert confirmed.goal.human_confirmed is True
+        # no leak of the authored judge name past confirm
+        assert is_judge("no_hallucinated_tool_calls") is False
+
 
 # ---------------------------------------------------------------------------
 # GAP B: dynamic allowlist
@@ -481,6 +572,26 @@ class TestGapAPersistence:
                 raise RuntimeError("TABLE_OR_VIEW_NOT_FOUND")
 
         client = SimpleNamespace(statement_execution=_Exec())
+        assert (
+            load_persisted_goal(agent_name="claude_code", client=client, warehouse_id="w") is None
+        )
+
+    def test_load_ignores_unconfirmed_row(self, fake_sql_client) -> None:  # type: ignore[no-untyped-def]
+        # Defense-in-depth on the READ side: an unconfirmed persisted row is treated
+        # as "no usable persisted goal" — the loader never returns it to any caller.
+        goal = self._confirmed_goal()
+        row = [
+            _warehouse_cell(v)
+            for v in persistence_mod._goal_row(
+                goal,
+                agent_name="claude_code",
+                requirements_text=None,
+                stamp="2026-07-08T00:00:00+00:00",
+            )
+        ]
+        # flip human_confirmed (the 9th column) to false on the wire
+        row[COMPILED_GOAL_COLUMNS.index("human_confirmed")] = "false"
+        client = fake_sql_client({"SELECT": (COMPILED_GOAL_COLUMNS, [row])})
         assert (
             load_persisted_goal(agent_name="claude_code", client=client, warehouse_id="w") is None
         )

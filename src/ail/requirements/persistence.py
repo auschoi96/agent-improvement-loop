@@ -203,16 +203,22 @@ def load_persisted_goal(
     """Load ``agent_name``'s confirmed goal from ``agent_compiled_goals``, or ``None``.
 
     Fail-soft: returns ``None`` when the table or the agent's row is absent (a first
-    run before any intake), so the loop falls back to its arg-based goal. A present
-    row is reconstructed into a :class:`~ail.goals.compiler.CompiledGoal`; its own
-    judge-guardrail names are re-admitted via
-    :func:`ail.goals.allowlist.judge_allowlist` so a goal referencing an authored
-    judge (not in the static built-in set) validates on reconstruction (GAP B). The
-    reconstructed goal keeps its persisted ``human_confirmed`` flag.
+    run before any intake), so the loop falls back to its arg-based goal.
 
-    A backend/parse error other than "table/row absent" propagates — the caller
-    (:func:`ail.jobs.companion_planner._load_persisted_goal`) decides how to treat a
-    hard read failure (it, too, falls back to args, fail-soft).
+    Confirmed-only (defense-in-depth on the READ side): a row whose
+    ``human_confirmed`` is false is treated as **no usable persisted goal** and
+    ``None`` is returned — the loader never hands an unconfirmed goal to *any* caller,
+    complementing :func:`persist_compiled_goal`'s refusal to *write* one. (The live
+    loop path also re-checks, but this makes the named loader safe on its own.)
+
+    A present, confirmed row is reconstructed into a
+    :class:`~ail.goals.compiler.CompiledGoal`; its own judge-guardrail names are
+    re-admitted via :func:`ail.goals.allowlist.judge_allowlist` so a goal referencing
+    an authored judge (not in the static built-in set) validates on reconstruction
+    (GAP B).
+
+    A backend/parse error other than "table/row absent" reads as "no persisted goal"
+    (``None``) — the loop then falls back to its arg-based goal, fail-soft.
     """
     fqn = f"`{catalog}`.`{schema}`.{COMPILED_GOAL_TABLE}"
     columns = ", ".join(COMPILED_GOAL_COLUMNS)
@@ -225,6 +231,10 @@ def load_persisted_goal(
         return None
 
     row = rows[0]
+    # Confirmed-only: never return an unconfirmed goal, regardless of caller.
+    if not _as_bool(row["human_confirmed"]):
+        return None
+
     raw_guardrails = json.loads(row["guardrails_json"] or "[]")
     # The judge names to re-admit come from the RAW dicts (before constructing any
     # Guardrail), because Guardrail's own validator calls is_judge at construction —
