@@ -1,0 +1,91 @@
+resources:
+  jobs:
+    memory_distiller:
+      name: ail-advisory-memory-distiller
+      description: >-
+        Advisory memory (WRITE side / system of record). Each firing distils the
+        recent agent-evaluation feedback attached to the trace store — the RLM/HALO
+        rlm_* assessments AND the L2 MLflow-judge assessments (correctness,
+        modularity, groundedness, token_efficiency) read from the OTEL annotations
+        table — into short 'memory guideline' rows and writes them to the governed
+        UC Delta table austin_choi_omni_agent_catalog.agent_improvement_loop.agent_memory.
+        The distillation is driven in-process by the Claude Agent SDK query() loop
+        (zero-secret Databricks FMAPI auth); a custom submit_memory @tool validates,
+        applies the PROVENANCE WALL (any row whose source_trace_ids touch the frozen
+        Task-Suite or Human-Anchor pools is dropped, never written), and INSERTs the
+        survivors. WATERMARKED + idempotent: only feedback newer than the last
+        successful run is processed, so a re-run over the same window writes no
+        duplicate rows. The Lakebase sync + read/injection side are SEPARATE and not
+        part of this job.
+      tags:
+        project: agent-improvement-loop
+        tier: advisory-memory
+        managed_by: dab
+
+      # run_as is inherited from the bundle level (databricks.yml -> `run_as:
+      # ${var.job_run_as}`), so this job shares the single framework identity (and
+      # thus one warehouse grant) with the other jobs. That identity needs CAN_USE on
+      # the warehouse, READ on the trace-store annotations table, and CREATE/MODIFY on
+      # the memory schema. Do NOT set a per-job run_as here.
+
+      # DAILY off-peak (08:30 UTC, after the 07:00 L0 publish). A schedule, not a
+      # trace-arrival trigger: the trace store is a VIEW, so table_update is infeasible
+      # (same reason as the RLM job). Shipped PAUSED by default — unpause explicitly at
+      # deploy (the schedule-footgun lesson): do NOT ship it UNPAUSED.
+      schedule:
+        quartz_cron_expression: ${var.memory_distiller_cron}
+        timezone_id: ${var.schedule_timezone}
+        pause_status: ${var.memory_distiller_pause_status}
+
+      # Idempotent (watermark skips already-processed feedback); the distill run holds
+      # a single minted OAuth bearer with no refresh, so never overlap runs and keep
+      # each firing bounded (max-turns + max-assessments below).
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      queue:
+        enabled: true
+
+      tasks:
+        - task_key: distill_memory
+          environment_key: serverless
+          description: >-
+            Claude Agent SDK distills recent RLM + judge feedback into agent_memory
+            rows behind the provenance wall.
+          spark_python_task:
+            # File-relative like the ../dist/*.whl dep below: ../ reaches the bundle
+            # root, so this is <bundle-root>/src/ail/jobs/memory_distiller.py.
+            python_file: ../src/ail/jobs/memory_distiller.py
+            parameters:
+              - --experiment-id=${var.experiment_id}
+              - --warehouse-id=${var.warehouse_id}
+              - --catalog=${var.catalog}
+              - --schema=${var.schema}
+              - --annotations-table=${var.memory_annotations_table}
+              - --cohort=${var.agent_name}
+              - --model=${var.memory_distiller_model}
+              - --max-turns=${var.memory_max_turns}
+              - --max-assessments=${var.memory_max_assessments}
+              - --task-suite-version=${var.memory_task_suite_version}
+              - --groundtruth-root=${var.memory_groundtruth_root}
+              # Empty by default -> the entrypoint mints a short-lived bearer from the
+              # run-as identity. Set both to read a stored token from a secret scope.
+              - --token-secret-scope=${var.token_secret_scope}
+              - --token-secret-key=${var.token_secret_key}
+
+      # Serverless compute mirroring the reference agent's shape: the Claude Agent SDK
+      # runs IN-PROCESS. environment_version '3' (not the reference's client '2') keeps
+      # this consistent with the other ail jobs AND gives Python 3.12 — the `ail` wheel
+      # requires >=3.11, and the wheel is installed here so the entrypoint can import
+      # ail.memory.* / ail.pools / the frozen Task Suite bundled into it.
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
+              - ../dist/*.whl
+              # The Claude Agent SDK drives the in-process distillation query() loop.
+              - claude-agent-sdk>=0.1.39
+              # nest_asyncio lets the SDK's asyncio loop run inside the job runtime
+              # (same as the reference agent).
+              - nest_asyncio

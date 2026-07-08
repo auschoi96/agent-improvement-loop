@@ -156,6 +156,53 @@ variables:
   auto_align_embedding_model:
     description: MemAlign episodic-memory embedding model URI (only used with auto_align_reflection_lm).
     default: ''
+  # Advisory-memory distiller — the standalone scheduled ail-advisory-memory-distiller
+  # job (resources/memory_distiller.job.yml). WRITE side only; the Lakebase sync +
+  # read/injection side are separate. Reuses the shared catalog/schema/experiment_id/
+  # warehouse_id/agent_name/schedule_timezone/token_secret_* vars.
+  memory_annotations_table:
+    description: >-
+      Fully-qualified OTEL annotations table the distiller reads RLM + L2-judge
+      feedback from. Fail-closed empty default (do NOT hardcode a reference-workspace
+      id — #67/#5). On dais-demo this is
+      austin_choi_omni_agent_catalog.mlflow_traces.cc_otel_annotations.
+    default: ''
+  memory_distiller_model:
+    description: >-
+      Claude model (served via FMAPI) the distiller uses to distill feedback into
+      guideline rows. Plain SDK loop (not HALO), so Opus is fine. Verified served on
+      dais-demo.
+    default: databricks-claude-opus-4-6
+  memory_distiller_cron:
+    description: >-
+      Quartz cron for the distiller schedule (sec min hour day-of-month month
+      day-of-week). Default DAILY at 08:30 UTC (after the 07:00 L0 publish).
+    default: '0 30 8 * * ?'
+  memory_distiller_pause_status:
+    description: >-
+      PAUSED (the default — shipped deployed-but-dormant; unpause explicitly at
+      deploy) or UNPAUSED. Do NOT ship UNPAUSED (the schedule-footgun lesson).
+    default: PAUSED
+  memory_max_turns:
+    description: HALO-free Claude Agent SDK max turns per distiller firing (keeps a run bounded).
+    default: '30'
+  memory_max_assessments:
+    description: >-
+      Max recent assessments distilled per firing. Bounds the single-run token budget
+      so the once-minted OAuth bearer never expires mid-run.
+    default: '200'
+  memory_task_suite_version:
+    description: >-
+      Frozen Task Suite artifact version whose source_trace_ids seed the provenance
+      wall's Task-Suite reserved set (bundled into the wheel).
+    default: v1
+  memory_groundtruth_root:
+    description: >-
+      Optional path to a JSON ground-truth store; when set, the Human-Anchor pool's
+      case ids extend the provenance wall. Empty => Human-Anchor reserved set is empty
+      (honest for a workspace with no promoted anchor cases); the Task-Suite wall is
+      always enforced.
+    default: ''
   token_secret_scope:
     description: >-
       Optional Databricks secret scope holding the run-as bearer token for the

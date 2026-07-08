@@ -47,6 +47,8 @@ from typing import Any
 
 from ail.loop.publish_proposals import PROPOSALS_TABLE
 from ail.loop.publish_proposals import _ddl as _proposals_ddl
+from ail.memory.schema import MEMORY_TABLE, WATERMARK_TABLE
+from ail.memory.schema import _ddl as _memory_ddl
 from ail.publish import (
     DEFAULT_CATALOG,
     DEFAULT_SCHEMA,
@@ -77,6 +79,7 @@ _DDL_PRODUCERS: tuple[Callable[[str, str], list[str]], ...] = (
     _versions_ddl,  # agent_registry, agent_version_{l0,comparison,readiness}
     _lineage_ddl,  # agent_prompt_lineage
     _proposals_ddl,  # agent_proposed_actions
+    _memory_ddl,  # agent_memory, agent_memory_watermark (framework, not app-read)
 )
 
 #: The exact set of tables the deployed app's ``config/queries/*.sql`` SELECT
@@ -98,6 +101,18 @@ APP_QUERY_TABLES: frozenset[str] = frozenset(
         PROPOSALS_TABLE,
     }
 )
+
+#: Framework tables the bootstrap creates + column-migrates but the deployed app
+#: does NOT ``SELECT`` from — so they are deliberately NOT in
+#: :data:`APP_QUERY_TABLES` (which the drift guard pins to the app's
+#: ``config/queries/*.sql``). The advisory-memory system of record
+#: (:data:`ail.memory.schema.MEMORY_TABLE`) and its idempotency watermark
+#: (:data:`~ail.memory.schema.WATERMARK_TABLE`) are written by the scheduled
+#: distiller Job and read by the separate (out-of-scope) Lakebase/retrieval side,
+#: never by AppKit typegen. They still need bootstrap create + additive migration,
+#: so their ``_ddl`` producer is in :data:`_DDL_PRODUCERS`; this constant is how
+#: the bootstrap coverage test accounts for the tables produced beyond the app set.
+FRAMEWORK_TABLES: frozenset[str] = frozenset({MEMORY_TABLE, WATERMARK_TABLE})
 
 
 #: The ONLY statement shapes the bootstrap is ever allowed to execute against a
