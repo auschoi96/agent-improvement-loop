@@ -496,6 +496,35 @@ only per-workspace step is supplying `apply_job_id` at deploy (a missing/empty i
 leaves the deployed app selecting the Job transport but with no job to trigger — it
 fails closed rather than silently applying via a bridge it can't run).
 
+### The in-app labeling transport (deployed, no job)
+
+The app's authenticated labeling panel (L4, `docs/LABELING_UI.md`) has the **same**
+Node-only problem as approve/reject — but labeling is **rapid-fire** (one write per
+grade), so a per-grade Job trigger's startup latency would be unusable. It therefore
+uses a **Node-native MLflow REST** transport instead: the labeling routes read the
+registered judges + progress and write each HUMAN label as an MLflow assessment
+(name-matched to the judge) by calling the Databricks-managed MLflow assessments REST API
+directly, under the app's service principal. **No extra job or resource is required.**
+
+What the operator sets: **nothing per-workspace.** `AIL_LABELING_TRANSPORT: rest` is a
+committed literal in `app.yaml` (the deployed image can't spawn the Python engine), and
+the transport reuses the app's existing `DATABRICKS_WAREHOUSE_ID` (from the `sql-warehouse`
+resource) as the SQL warehouse for the v4 UC tracing endpoints. The app SP needs read
+access to the experiment's traces and write access to its assessments — the same
+experiment access the framework already relies on. Without `AIL_LABELING_TRANSPORT=rest`
+the app falls back to the subprocess bridge (correct for local dev only).
+
+Optional: set `AIL_LABEL_FLOOR` (from the engine —
+`python -c "import ail.readiness as r; print(r.ReadinessThresholds().quality_min_labels)"`)
+in the deploy environment so the panel shows the `N / floor` target. It is deliberately
+**not** a committed literal (two-tier: the floor number lives in Python, never in
+TS/YAML); when unset the panel honestly renders `—` rather than a fabricated number.
+
+Fail-closed: a grade is only reported "labeled" when the REST write returns an
+`assessment_id`. If the transport can't confirm a write (missing warehouse, unresolvable
+trace, scorer-list failure, unknown judge, write error), the panel shows an honest error
+directing the user to the MLflow Traces UI — never a fabricated success.
+
 ---
 
 ## 8. Local companion plan → propose → execute path
