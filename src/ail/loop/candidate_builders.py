@@ -87,19 +87,6 @@ __all__ = [
     # Pluggable dispatch (piece 1)
     "registry_candidate_builder",
     "chain_candidate_builders",
-    # Generic agent-authored quick-edit (piece 3)
-    "SkillEditor",
-    "ChampionBodyResolver",
-    "agent_skill_edit_builder",
-    # Generic GEPA optimization builder (piece 2)
-    "GepaSeed",
-    "GepaSeedResolver",
-    "GepaRunFn",
-    "gepa_candidate_builder",
-    # Cost-aware routing (piece 4)
-    "GepaCostPolicy",
-    "gepa_cost_gate",
-    "gepa_target_key",
 ]
 
 #: The deterministic headline objective the token-efficiency skill is proven against
@@ -270,3 +257,68 @@ def evidence_candidate_builder() -> CandidateBuilder:
         )
 
     return _build
+
+
+# ===========================================================================
+# Piece 1 — the pluggable candidate-builder registry (dispatch by ActionKind)
+# ===========================================================================
+
+
+def registry_candidate_builder(
+    builders: Mapping[ActionKind, CandidateBuilder],
+) -> CandidateBuilder:
+    """A :class:`~ail.loop.controller.CandidateBuilder` that dispatches by action kind.
+
+    The single seam the loop hands to :func:`ail.loop.controller.run_cycle` /
+    :func:`ail.loop.evidence_cycle.run_evidence_cycle`, so *which* builder handles a
+    decision is data, not a hardwired ``if action_kind is …`` ladder. It looks up
+    ``decision.action_kind`` in ``builders`` and delegates to the registered builder
+    (which may itself decline and return ``None``, e.g. on a trigger it does not
+    serve); an action kind with **no** registered builder returns ``None`` — the
+    first-class fail-closed "no candidate ⇒ no proposal" outcome the controller
+    records as a :class:`~ail.loop.controller.SkippedDecision`. The controller
+    contract is preserved exactly: this *is* a ``CandidateBuilder``, so nothing about
+    proving, gating, or propose-only emission changes.
+
+    A production wiring registers the existing, unregressed token-efficiency /
+    evidence builders under :attr:`~ail.loop.proposals.ActionKind.SKILL_UPDATE`
+    (typically :func:`chain_candidate_builders`-ed ahead of the generic quick-edit
+    builder) and the GEPA builder under
+    :attr:`~ail.loop.proposals.ActionKind.GEPA_PROMPT`; every unregistered kind
+    (``METRIC_VIEW``, ``INSTRUCTION_UPDATE``, ``REVERT``, ``AGENT_TASK``) falls
+    through to the fail-closed ``None``.
+    """
+    table: dict[ActionKind, CandidateBuilder] = dict(builders)
+
+    def _dispatch(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+        builder = table.get(decision.action_kind)
+        if builder is None:
+            return None
+        return builder(decision, goal=goal, agent=agent)
+
+    return _dispatch
+
+
+def chain_candidate_builders(*builders: CandidateBuilder) -> CandidateBuilder:
+    """Compose builders that serve the *same* action kind: first non-``None`` wins.
+
+    Several builders can legitimately serve one action kind by *trigger*: under
+    :attr:`~ail.loop.proposals.ActionKind.SKILL_UPDATE` the proven token-efficiency
+    builder handles the dominant
+    :attr:`~ail.loop.proposals.TriggerKind.REDUNDANT_READ_PATTERN` waste signal, while
+    the generic agent-authored quick-edit builder (:func:`agent_skill_edit_builder`)
+    handles every *other* SKILL_UPDATE trigger/dimension. This tries each builder in
+    order and returns the first :class:`~ail.loop.controller.Candidate` produced —
+    so the specific, cost-guarded/proven builder is consulted first and the generic
+    one only fills the gap it declined — or ``None`` if all decline (fail-closed).
+    """
+    chain = tuple(builders)
+
+    def _chain(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+        for builder in chain:
+            candidate = builder(decision, goal=goal, agent=agent)
+            if candidate is not None:
+                return candidate
+        return None
+
+    return _chain
