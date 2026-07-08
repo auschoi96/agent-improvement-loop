@@ -6,6 +6,8 @@ export {
   handleValidateExperiment,
   handleCreateExperiment,
   handleRegisterAgent,
+  handlePreviewRequirements,
+  handleConfirmRequirements,
 } from './onboarding';
 export type { OnboardingHttpRequest, OnboardingHttpResponse } from './onboarding';
 export { spawnPythonOnboardingBridge, selectOnboardingBridge } from './bridge';

@@ -5,12 +5,24 @@ import path from 'node:path';
 // `actor` is set SERVER-SIDE by the route (from the authenticated request) — it is
 // never trusted from the browser (mirrors the approvals write-path's `approver`).
 export interface OnboardingAction {
-  action: 'requirements' | 'validate_experiment' | 'create_experiment' | 'register_agent';
+  action:
+    | 'requirements'
+    | 'validate_experiment'
+    | 'create_experiment'
+    | 'register_agent'
+    | 'preview_requirements'
+    | 'confirm_requirements';
   actor: string;
   goals?: string[];
   experiment_id?: string;
   name?: string;
   agent_name?: string;
+  // Free-form requirements intake (preview_requirements / confirm_requirements).
+  // The engine owns extraction/routing/target facts (two-tier); the client only
+  // relays the raw text and the human's explicit objective target back.
+  requirements_text?: string;
+  objective_target?: number;
+  cohort?: string;
 }
 
 // The JSON ail.onboarding.service prints — a typed onboarding result. Kept open

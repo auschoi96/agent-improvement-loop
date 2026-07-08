@@ -67,6 +67,14 @@ function goalsField(body: Record<string, unknown>): string[] {
   return Array.isArray(v) ? v.filter((g): g is string => typeof g === 'string') : [];
 }
 
+// The human's explicit objective target (a signed relative fraction). Only a finite
+// number is forwarded; anything else is omitted so the engine refuses honestly
+// ("set/acknowledge the target first") rather than being handed a fabricated value.
+function numberField(body: Record<string, unknown>, key: string): number | undefined {
+  const v = body[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
 // Page 2/3 source: the fixed goal catalog + the data gates a selection needs. The
 // gate/floor facts come from the Python engine (ail.onboarding.goals), so the app
 // never re-derives readiness thresholds in TS.
@@ -131,6 +139,57 @@ export async function handleRegisterAgent(
   await dispatch(res, bridge, { action: 'register_agent', actor, agent_name, experiment_id, goals });
 }
 
+// Free-form requirements PREVIEW: hand the raw requirements blob to the engine,
+// which extracts + routes + composes and returns the plan for human review. A pure
+// proposal — authors nothing, persists nothing. The engine owns every routing /
+// threshold / target fact (two-tier); the client renders the response verbatim. The
+// actor is the AUTHENTICATED identity; a body actor is never trusted.
+export async function handlePreviewRequirements(
+  req: OnboardingHttpRequest,
+  res: OnboardingHttpResponse,
+  bridge: OnboardingBridge
+): Promise<void> {
+  const actor = readActor(req);
+  if (!actor) return unauthorized(res);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const requirements_text = stringField(body, 'requirements_text');
+  if (!requirements_text) return badRequest(res, 'requirements_text is required');
+  const agent_name = stringField(body, 'agent_name');
+  const cohort = stringField(body, 'cohort');
+  await dispatch(res, bridge, { action: 'preview_requirements', actor, requirements_text, agent_name, cohort });
+}
+
+// Free-form requirements CONFIRM (a write): re-derive the plan, apply the human's
+// explicit objective target, author the judges + persist the goal. Fail-closed in
+// the engine (nothing authored/persisted unless the plan is confirmed AND the goal
+// is human_confirmed; a missing target is refused). The actor is server-set.
+export async function handleConfirmRequirements(
+  req: OnboardingHttpRequest,
+  res: OnboardingHttpResponse,
+  bridge: OnboardingBridge
+): Promise<void> {
+  const actor = readActor(req);
+  if (!actor) return unauthorized(res);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const requirements_text = stringField(body, 'requirements_text');
+  const agent_name = stringField(body, 'agent_name');
+  const experiment_id = stringField(body, 'experiment_id');
+  if (!requirements_text || !agent_name || !experiment_id) {
+    return badRequest(res, 'requirements_text, agent_name, and experiment_id are required');
+  }
+  const objective_target = numberField(body, 'objective_target');
+  const cohort = stringField(body, 'cohort');
+  await dispatch(res, bridge, {
+    action: 'confirm_requirements',
+    actor,
+    requirements_text,
+    agent_name,
+    experiment_id,
+    objective_target,
+    cohort,
+  });
+}
+
 // The custom AppKit plugin exposing the onboarding write-path. Routes mount under
 // /api/onboarding/... (server plugin convention). Reads stay two-tier SELECT-only
 // via the analytics plugin; only these authenticated routes write / read the
@@ -164,6 +223,18 @@ export class OnboardingPlugin extends Plugin {
       method: 'post',
       path: '/register',
       handler: (req, res) => handleRegisterAgent(req, res, this.bridge),
+    });
+    this.route(router, {
+      name: 'preview-requirements',
+      method: 'post',
+      path: '/requirements/preview',
+      handler: (req, res) => handlePreviewRequirements(req, res, this.bridge),
+    });
+    this.route(router, {
+      name: 'confirm-requirements',
+      method: 'post',
+      path: '/requirements/confirm',
+      handler: (req, res) => handleConfirmRequirements(req, res, this.bridge),
     });
   }
 }
