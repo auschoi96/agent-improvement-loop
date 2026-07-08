@@ -1,50 +1,51 @@
-"""Provenance wall: the advisory memory must not be distilled from the eval suite.
+"""Provenance wall: advisory memory must never be distilled from the eval suite.
 
-The frozen Task Suite is a held-out benchmark (``docs/ARCHITECTURE.md`` §2,
-:mod:`ail.pools`): if a "learning" the candidate is handed were distilled from
-one of the very traces the eval reconstructs, the spike would be teaching to the
-test — the memory would encode the answer rather than a transferable lesson.
+The frozen Task Suite and Human-Anchor pools are held-out benchmarks
+(docs/ARCHITECTURE.md section 2, ail.pools). If a "learning" the candidate is
+handed were distilled from one of the very traces the eval reconstructs, the
+spike would be teaching to the test and the memory would encode the answer
+rather than a transferable lesson. Advisory memory is read back into the agent,
+so a guideline distilled from a Task-Suite or Human-Anchor trace would leak the
+eval set into the agent's context -- exactly the co-adaptation the frozen wall
+exists to prevent. Feedback does land on those traces (the L2 judges score them
+too), so without this wall the distiller would happily mint memory from them.
 
-The RLM findings come from **organic** production traces, so this holds by
-construction; this module makes it an **explicit, tested** guard rather than an
-assumption. It reuses the :mod:`ail.pools` disjointness vocabulary
-(:class:`~ail.pools.Pool`, :class:`~ail.pools.PoolOverlapError`): the memory's
-provenance ids (the traces each :class:`~ail.l3.contract.RankedAsset` was drawn
-from) must be disjoint from the suite's ids (task ids **and** each task's
-``source_trace_id``).
-"""The provenance wall: no eval-set trace may ever seed advisory memory.
+This module is that wall. The read/spike side (memory_provenance_ids,
+task_suite_ids, assert_memory_disjoint_from_suite) proves a memory source shares
+no id with the frozen suite, reusing the ail.pools disjointness vocabulary
+(Pool, PoolOverlapError). The write/distiller side (partition_rows) splits
+candidate memory rows into clean and dropped, and the clean set is proven
+disjoint from the reserved pools with ail.pools.assert_pools_disjoint -- the same
+guard the loop controller uses -- so a regression in the drop logic fails closed
+(raises) rather than silently leaking. A dropped row is recorded with a reason
+and never written.
 
-``docs/ARCHITECTURE.md`` §2 forbids the agent being optimized against data drawn
-from the frozen evaluation pools. Advisory memory is read back into the agent, so
-a guideline distilled from a **Task-Suite** or **Human-Anchor** trace would leak
-the eval set into the agent's context — exactly the co-adaptation the frozen wall
-(:mod:`ail.pools`) exists to prevent. Feedback DOES land on those traces (the L2
-judges score them too), so without this wall the distiller would happily mint
-memory from them.
-
-This module is that wall. :func:`partition_rows` splits candidate memory rows into
-those that are clean and those that must be dropped, and the clean set is proven
-disjoint from the reserved pools with :func:`ail.pools.assert_pools_disjoint` — the
-same guard the loop controller uses — so a regression in the drop logic fails
-closed (raises) rather than silently leaking. A dropped row is recorded with a
-reason and never written.
-
-Truncated ids
--------------
-The frozen Task-Suite artifact stores some ``source_trace_id`` values as short
-(12-char) prefixes, while assessment ``target_id`` values are full 32-char ids.
-Exact-set intersection would miss those, so :func:`partition_rows` drops on an
-exact match **or** a shared prefix of at least :data:`_MIN_PREFIX_LEN` chars — the
-strictly safer (fail-closed toward dropping) reading. The exact subset is what the
-``assert_pools_disjoint`` verification then re-checks.
+Truncated ids: the frozen Task-Suite artifact stores some source_trace_id values
+as short (12-char) prefixes, while assessment target_id values are full 32-char
+ids. Exact-set intersection would miss those, so partition_rows drops on an exact
+match or a shared prefix of at least _MIN_PREFIX_LEN chars -- the strictly safer
+(fail-closed toward dropping) reading. The exact subset is what the
+assert_pools_disjoint verification then re-checks.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
 
 from ail.l3.contract import RankedAsset
-from ail.pools import Pool, PoolOverlapError
+from ail.memory.schema import MemoryRow
+from ail.pools import (
+    AlignmentSet,
+    AnchorItem,
+    HumanAnchor,
+    Pool,
+    PoolOverlapError,
+    assert_pools_disjoint,
+)
 from ail.task_suite.schema import TaskSuite
 
 __all__ = [
@@ -92,21 +93,7 @@ def assert_memory_disjoint_from_suite(*, assets: Iterable[RankedAsset], suite: T
             f"{len(overlap)} shared id(s), e.g. {shown}. The frozen evaluation wall forbids "
             "distilling a learning from a trace the eval suite is built on (teaching to the test)."
         )
-import os
-from collections.abc import Iterable
-from dataclasses import dataclass, field
-from pathlib import Path
-from types import SimpleNamespace
 
-from ail.memory.schema import MemoryRow
-from ail.pools import (
-    AlignmentSet,
-    AnchorItem,
-    HumanAnchor,
-    Pool,
-    PoolOverlapError,
-    assert_pools_disjoint,
-)
 
 #: The shortest id-overlap treated as a match. The frozen suite's truncated ids are
 #: 12 chars; 12 keeps a full-id prefix collision astronomically unlikely while still
