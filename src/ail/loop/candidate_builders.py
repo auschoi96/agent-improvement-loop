@@ -54,7 +54,12 @@ toward **not** spending, never re-proving blindly.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Collection
+import hashlib
+import re
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from ail.goals.compiler import CompiledGoal
 from ail.loop.controller import Candidate, CandidateBuilder
@@ -62,6 +67,7 @@ from ail.loop.decision_rules import Decision
 from ail.loop.proposals import (
     ActionKind,
     ChangeKind,
+    ProofSummary,
     ProposedChange,
     TriggerKind,
     derive_proposal_id,
@@ -69,12 +75,31 @@ from ail.loop.proposals import (
 from ail.optimize.lever import token_efficiency_intervention, token_efficiency_skill
 from ail.registry import Agent
 
+if TYPE_CHECKING:
+    from ail.optimize.gepa_runner import GepaOptimizationResult
+
 __all__ = [
     "TOKEN_REDUCTION_METRIC",
     "is_token_reduction_goal",
     "token_efficiency_skill_change",
     "token_efficiency_candidate_builder",
     "evidence_candidate_builder",
+    # Pluggable dispatch (piece 1)
+    "registry_candidate_builder",
+    "chain_candidate_builders",
+    # Generic agent-authored quick-edit (piece 3)
+    "SkillEditor",
+    "ChampionBodyResolver",
+    "agent_skill_edit_builder",
+    # Generic GEPA optimization builder (piece 2)
+    "GepaSeed",
+    "GepaSeedResolver",
+    "GepaRunFn",
+    "gepa_candidate_builder",
+    # Cost-aware routing (piece 4)
+    "GepaCostPolicy",
+    "gepa_cost_gate",
+    "gepa_target_key",
 ]
 
 #: The deterministic headline objective the token-efficiency skill is proven against

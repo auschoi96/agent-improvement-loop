@@ -82,10 +82,24 @@ class Candidate:
     lever config. The controller **never introspects** ``prover_input``; it only
     hands it back to the prover, keeping the controller agnostic to how each action
     kind is proved.
+
+    ``proof`` is an **optional pre-computed** :class:`~ail.loop.proposals.ProofSummary`
+    for the rare builder that *is itself a frozen-suite verification* — the GEPA
+    candidate builder, whose :func:`ail.optimize.gepa_runner.run_gepa_optimization`
+    already validates the evolved body on the held-out split (a real
+    :func:`ail.optimize.phase2.run_phase2_comparison`). The **prove-before-propose**
+    controller (:func:`run_cycle`) ignores this field — it always re-proves through
+    its injected ``prover`` — so the proving path is unchanged. The **evidence-first**
+    cycle (:func:`ail.loop.evidence_cycle.run_evidence_cycle`), which calls no prover,
+    carries this proof onto the proposal when present (``None`` for every ordinary
+    evidence-first builder, unchanged). This is what lets a GEPA_PROMPT proposal —
+    which the apply engine refuses to apply without a proof (its apply re-verifies the
+    held-out check) — flow through the evidence-first companion at all.
     """
 
     change: ProposedChange
     prover_input: object | None = None
+    proof: ProofSummary | None = None
 
 
 class FeedbackSource(Protocol):

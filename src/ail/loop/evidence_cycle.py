@@ -6,7 +6,14 @@ decide (Lane A + Lane B) → build-a-candidate pipeline, but it **decouples prov
 from proposing**. Where :func:`~ail.loop.controller.run_cycle` hardwires a frozen-suite
 ``prover(candidate)`` into the emit condition — a proposal only exists after it
 *proved* an improvement — this cycle emits a PENDING proposal on **evidence + gate
-alone**, carrying no :class:`~ail.loop.proposals.ProofSummary`.
+alone**, calling **no prover** and (for every ordinary builder) carrying no
+:class:`~ail.loop.proposals.ProofSummary`. The lone exception is a builder that is
+*itself* a frozen-suite verification — the GEPA candidate builder, whose
+:func:`ail.optimize.gepa_runner.run_gepa_optimization` already held-out-validated the
+evolved body; it hands that proof through on the :class:`~ail.loop.controller.Candidate`
+(``candidate.proof``) so the GEPA_PROMPT proposal it produces is applyable at all (the
+apply engine refuses a proof-less GEPA_PROMPT). The cycle still runs no prover — it
+merely records the proof the builder computed.
 
 Why this is the product's default path (not a weakening):
 
@@ -201,7 +208,16 @@ def run_evidence_cycle(
                 goal_cohort=goal.cohort_name,
                 trigger=decision.trigger,
                 change=candidate.change,
-                proof=None,  # evidence-first: no frozen-suite proof (opt-in Tier-2)
+                # Evidence-first: this cycle runs NO prover, so ordinary builders carry
+                # no frozen-suite proof (``candidate.proof is None`` -> ``proof=None``,
+                # opt-in Tier-2). The one exception is a builder that is *itself* a
+                # frozen-suite verification — the GEPA candidate builder, whose
+                # run_gepa_optimization already held-out-validated the evolved body
+                # (a real run_phase2_comparison). It hands that ProofSummary through on
+                # the Candidate so the resulting GEPA_PROMPT proposal carries a proof
+                # (the apply engine refuses a proof-less GEPA_PROMPT — its apply
+                # re-verifies the held-out check). No prover is called here either way.
+                proof=candidate.proof,
                 gate_status=gate_status,
                 created_at=stamp,
             )
