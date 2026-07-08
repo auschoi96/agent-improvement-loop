@@ -98,6 +98,9 @@ __all__ = [
     "GepaRunFn",
     "gepa_target_key",
     "gepa_candidate_builder",
+    # Cost-aware routing (piece 4)
+    "GepaCostPolicy",
+    "gepa_cost_gate",
 ]
 
 #: The deterministic headline objective the token-efficiency skill is proven against
@@ -623,3 +626,110 @@ def gepa_candidate_builder(
         return Candidate(change=change, prover_input=None, proof=proof)
 
     return _build
+
+
+# ===========================================================================
+# Piece 4 — cost-aware routing: keep the expensive GEPA run the exception
+# ===========================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class GepaCostPolicy:
+    """The deterministic guard that keeps a GEPA run the **exception**, not the default.
+
+    A GEPA run is expensive — real agent arms, minutes, the whole frozen suite — so it
+    must never fire on a trivial or every-cycle signal. The routing has two layers,
+    and this is the *floor* under the second:
+
+    * **Prefer the LLM planner's judgment.** Lane B (:mod:`ail.loop.planner`) already
+      decides *what to try* and can propose a ``GEPA_PROMPT`` when a judged dimension
+      warrants a full optimization; Lane A's :func:`ail.loop.decision_rules.decide_judge_dimension`
+      likewise emits ``GEPA_PROMPT`` only for a **trusted** judge dimension below the
+      goal's own threshold. Routing GEPA is thus primarily their call.
+    * **A deterministic backstop.** This policy is a cheap, explainable gate that runs
+      *before* the expensive builder, so GEPA cannot fire on a trivial signal even if
+      one reaches the GEPA slot. It permits a ``GEPA_PROMPT`` decision only when **all**
+      hold: its trigger is a GEPA-warranting kind (:attr:`allowed_triggers` — the
+      trusted-judge Lane-A rule or a Lane-B planner proposal, never a redundant-read /
+      asset signal); it rests on a **judged dimension** (``trigger.judge_name`` is set)
+      when :attr:`require_judge_dimension`; and the signal is **persistent** —
+      recurring across at least :attr:`min_trace_recurrence` traces (a one-off is not
+      worth a GEPA run). Anything else is declined (the expensive builder is never
+      even consulted).
+
+    Every bar is a visible, adjustable field (mirroring
+    :class:`ail.loop.decision_rules.DecisionThresholds`), never a constant buried in a
+    function body.
+    """
+
+    min_trace_recurrence: int = 3
+    require_judge_dimension: bool = True
+    allowed_triggers: frozenset[TriggerKind] = frozenset(
+        {TriggerKind.JUDGE_DIMENSION_BELOW_THRESHOLD, TriggerKind.AGENT_PLANNER}
+    )
+
+    def permits(self, decision: Decision) -> tuple[bool, str]:
+        """Whether ``decision`` warrants an (expensive) GEPA run, with a reason.
+
+        Returns ``(permitted, reason)``; ``permitted`` is ``True`` only when the
+        decision clears every bar above. The ``reason`` explains a decline so a
+        reviewer sees *why* GEPA was (or was not) warranted — the same auditable-skip
+        discipline the controller applies.
+        """
+        t = decision.trigger
+        if t.kind not in self.allowed_triggers:
+            allowed = ", ".join(sorted(k.value for k in self.allowed_triggers))
+            return (
+                False,
+                f"trigger {t.kind.value!r} is not a GEPA-warranting signal (allowed: {allowed}); "
+                "GEPA is the exception, not fired on every signal",
+            )
+        if self.require_judge_dimension and not t.judge_name:
+            return (
+                False,
+                "GEPA only fires on a judged-dimension signal, but the trigger names no judge "
+                "(judge_name is unset) — declining the expensive run",
+            )
+        if t.n_traces < self.min_trace_recurrence:
+            return (
+                False,
+                f"signal recurs on only {t.n_traces} trace(s) (< {self.min_trace_recurrence}); "
+                "not persistent enough to warrant an expensive GEPA run",
+            )
+        return (
+            True,
+            f"trusted judged-dimension signal persistent across {t.n_traces} trace(s) — "
+            "GEPA run warranted",
+        )
+
+
+def gepa_cost_gate(
+    builder: CandidateBuilder, *, policy: GepaCostPolicy | None = None
+) -> CandidateBuilder:
+    """Wrap the (expensive) GEPA builder in the deterministic :class:`GepaCostPolicy`.
+
+    Returns a :class:`~ail.loop.controller.CandidateBuilder` that, for a
+    ``GEPA_PROMPT`` decision, consults ``policy`` (default :class:`GepaCostPolicy`)
+    **before** the wrapped ``builder`` runs: if the policy declines, it returns
+    ``None`` (a fail-closed :class:`~ail.loop.controller.SkippedDecision` upstream) and
+    the expensive GEPA run is **never invoked**; only a permitted decision reaches
+    ``builder``. Every non-``GEPA_PROMPT`` decision passes straight through to
+    ``builder`` untouched (the gate guards GEPA cost only). Registered under
+    :attr:`~ail.loop.proposals.ActionKind.GEPA_PROMPT` in
+    :func:`registry_candidate_builder`, this is what makes GEPA the exception rather
+    than firing on every judged-dimension blip.
+    """
+    pol = policy or GepaCostPolicy()
+
+    def _gated(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+        # The gate guards the expensive GEPA path only; anything else is not its concern.
+        if decision.action_kind is not ActionKind.GEPA_PROMPT:
+            return builder(decision, goal=goal, agent=agent)
+        permitted, _reason = pol.permits(decision)
+        if not permitted:
+            # Deterministic cost guard: GEPA not warranted — decline BEFORE the expensive
+            # run (the wrapped builder is never consulted). Fail-closed, no candidate.
+            return None
+        return builder(decision, goal=goal, agent=agent)
+
+    return _gated

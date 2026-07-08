@@ -18,10 +18,12 @@ from pathlib import Path
 from ail.compare.contract import Recommendation
 from ail.goals.compiler import CompiledGoal, GoalTarget, Guardrail
 from ail.loop.candidate_builders import (
+    GepaCostPolicy,
     GepaSeed,
     agent_skill_edit_builder,
     chain_candidate_builders,
     gepa_candidate_builder,
+    gepa_cost_gate,
     gepa_target_key,
     registry_candidate_builder,
 )
@@ -412,3 +414,125 @@ def test_gepa_builder_ignores_non_gepa_decision(tmp_path: Path) -> None:
         artifacts_root=tmp_path,
     )
     assert build(_skill_decision(), goal=_quality_goal(), agent=_agent()) is None
+
+
+# ==========================================================================
+# Piece 4 — cost-aware routing (GEPA is the exception, not fired on trivia)
+# ==========================================================================
+
+
+def _spy_builder() -> tuple[object, list[Decision]]:
+    calls: list[Decision] = []
+
+    def _b(decision: Decision, *, goal: CompiledGoal, agent: Agent) -> Candidate | None:
+        calls.append(decision)
+        return _fake_candidate("gepa-ran")
+
+    return _b, calls
+
+
+def test_cost_gate_permits_persistent_judge_signal() -> None:
+    builder, calls = _spy_builder()
+    gated = gepa_cost_gate(builder)  # default policy
+    out = gated(_gepa_decision(n_traces=5), goal=_quality_goal(), agent=_agent())
+    assert out is not None and out.change.diff == "gepa-ran"
+    assert len(calls) == 1  # the expensive builder WAS consulted for a warranted signal
+
+
+def test_cost_gate_does_not_fire_gepa_on_a_one_off_signal() -> None:
+    # a single-trace (non-persistent) judged-dimension signal must NOT trigger GEPA
+    builder, calls = _spy_builder()
+    gated = gepa_cost_gate(builder)
+    assert gated(_gepa_decision(n_traces=1), goal=_quality_goal(), agent=_agent()) is None
+    assert calls == []  # the expensive builder was never even consulted
+
+
+def test_cost_gate_blocks_non_judge_signal() -> None:
+    # a GEPA_PROMPT that rests on no judged dimension (judge_name=None) is not warranted
+    builder, calls = _spy_builder()
+    gated = gepa_cost_gate(builder)
+    decision = _gepa_decision(trigger=TriggerKind.AGENT_PLANNER, judge_name=None, n_traces=9)
+    assert gated(decision, goal=_quality_goal(), agent=_agent()) is None
+    assert calls == []
+
+
+def test_cost_gate_blocks_disallowed_trigger_kind() -> None:
+    # a GEPA_PROMPT off a redundant-read / asset signal (trivial for GEPA) is declined,
+    # even with a judge_name and high recurrence set
+    builder, calls = _spy_builder()
+    gated = gepa_cost_gate(builder)
+    decision = Decision(
+        ActionKind.GEPA_PROMPT,
+        default_risk_class(ActionKind.GEPA_PROMPT),
+        TriggerSignal(
+            kind=TriggerKind.REDUNDANT_READ_PATTERN,
+            summary="redundant reads",
+            judge_name="modularity",
+            n_traces=9,
+        ),
+    )
+    assert gated(decision, goal=_quality_goal(), agent=_agent()) is None
+    assert calls == []
+
+
+def test_cost_gate_passes_non_gepa_through() -> None:
+    # the gate guards GEPA cost only; a SKILL_UPDATE goes straight to the wrapped builder
+    builder, calls = _spy_builder()
+    gated = gepa_cost_gate(builder)
+    out = gated(_skill_decision(), goal=_quality_goal(), agent=_agent())
+    assert out is not None
+    assert len(calls) == 1
+
+
+def test_cost_policy_permits_lane_b_planner_gepa() -> None:
+    # Lane B (AGENT_PLANNER) proposing GEPA for a persistent judged dimension is permitted
+    policy = GepaCostPolicy()
+    ok, _reason = policy.permits(
+        _gepa_decision(trigger=TriggerKind.AGENT_PLANNER, judge_name="modularity", n_traces=4)
+    )
+    assert ok is True
+
+
+# ==========================================================================
+# Capstone — the full companion registry: quick-edit vs GEPA, cost-guarded
+# ==========================================================================
+
+
+def _companion_registry(tmp_path: Path) -> object:
+    """The companion wiring: SKILL_UPDATE -> quick-edit, GEPA_PROMPT -> cost-gated GEPA."""
+    return registry_candidate_builder(
+        {
+            ActionKind.SKILL_UPDATE: agent_skill_edit_builder(
+                editor=_editor(_EDITED_BODY), body_resolver=_resolver(_CURRENT_BODY)
+            ),
+            ActionKind.GEPA_PROMPT: gepa_cost_gate(
+                gepa_candidate_builder(
+                    gepa_run=_gepa_run(_result(evolved_pct=50.0, seed_pct=30.0)),
+                    seed_resolver=_seed_resolver(_SEED),
+                    artifacts_root=tmp_path,
+                ),
+                policy=GepaCostPolicy(),
+            ),
+        }
+    )
+
+
+def test_capstone_skill_update_routes_to_quick_edit(tmp_path: Path) -> None:
+    registry = _companion_registry(tmp_path)
+    out = registry(_skill_decision(), goal=_quality_goal(), agent=_agent())
+    assert out is not None
+    assert out.change.kind is ChangeKind.SKILL_DIFF  # the lightweight agent-authored edit
+    assert out.proof is None
+
+
+def test_capstone_persistent_gepa_routes_to_gepa(tmp_path: Path) -> None:
+    registry = _companion_registry(tmp_path)
+    out = registry(_gepa_decision(n_traces=5), goal=_quality_goal(), agent=_agent())
+    assert out is not None
+    assert out.change.kind is ChangeKind.EVOLVED_BODY_REF  # the full GEPA run
+    assert out.proof is not None and out.proof.proved_improvement
+
+
+def test_capstone_trivial_gepa_is_cost_gated_to_none(tmp_path: Path) -> None:
+    registry = _companion_registry(tmp_path)
+    assert registry(_gepa_decision(n_traces=1), goal=_quality_goal(), agent=_agent()) is None
