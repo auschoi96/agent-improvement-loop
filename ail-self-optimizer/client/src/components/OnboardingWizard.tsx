@@ -15,20 +15,29 @@ import {
   RadioGroupItem,
   Separator,
   Skeleton,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+  Textarea,
 } from '@databricks/appkit-ui/react';
 import {
   WIZARD_STEPS,
   canAdvance,
   clampStep,
+  confirmRequirementsBody,
+  confirmRequirementsMessage,
   createExperimentBody,
   creationMessage,
   dataGateView,
   freshnessMessage,
   initialWizardState,
   isLastStep,
+  previewRequirementsBody,
+  previewRequirementsMessage,
   registerBody,
   registerMessage,
   requirementsBody,
+  requirementsPlanView,
   resolvedFromCreation,
   resolvedFromValidation,
   stepValidation,
@@ -36,6 +45,8 @@ import {
   validateExperimentBody,
   type CreationResponse,
   type RegisterResponse,
+  type RequirementsConfirmResponse,
+  type RequirementsPreviewResponse,
   type RequirementsResponse,
   type Tone,
   type ToneMessage,
@@ -48,7 +59,14 @@ const API = {
   validate: '/api/onboarding/experiment/validate',
   create: '/api/onboarding/experiment/create',
   register: '/api/onboarding/register',
+  previewRequirements: '/api/onboarding/requirements/preview',
+  confirmRequirements: '/api/onboarding/requirements/confirm',
 } as const;
+
+// The two intake modes — pick from the fixed goal catalog (the slice-1 stepper) or
+// describe requirements in free text (slice 2). Additive: the catalog path is
+// unchanged; requirements mode is a parallel flow behind a tab.
+type OnboardingMode = 'catalog' | 'requirements';
 
 const TONE_CLASS: Record<Tone, string> = {
   success: 'text-emerald-700 dark:text-emerald-300',
@@ -87,6 +105,7 @@ export function OnboardingWizard({
   onRegistered: (agentName: string) => void;
   onClose: () => void;
 }) {
+  const [mode, setMode] = useState<OnboardingMode>('catalog');
   const [state, setState] = useState<WizardState>(initialWizardState);
   const [requirements, setRequirements] = useState<RequirementsResponse | null>(null);
   const [reqError, setReqError] = useState<string | null>(null);
@@ -146,51 +165,70 @@ export function OnboardingWizard({
         <div className="flex items-start justify-between gap-4">
           <div>
             <CardTitle>Add an agent</CardTitle>
-            <CardDescription>{WIZARD_STEPS[state.stepIndex].description}</CardDescription>
+            <CardDescription>
+              {mode === 'catalog'
+                ? WIZARD_STEPS[state.stepIndex].description
+                : 'Describe what to improve in your own words — the engine extracts the dimensions, routes each to a judge or a deterministic metric, and composes the goal.'}
+            </CardDescription>
           </div>
           <Button variant="ghost" onClick={onClose} aria-label="Close wizard">
             Close
           </Button>
         </div>
-        <Stepper stepIndex={state.stepIndex} />
+        <Tabs value={mode} onValueChange={(v) => setMode(v as OnboardingMode)}>
+          <TabsList>
+            <TabsTrigger value="catalog">Goal catalog</TabsTrigger>
+            <TabsTrigger value="requirements">Describe requirements</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        {mode === 'catalog' && <Stepper stepIndex={state.stepIndex} />}
       </CardHeader>
       <CardContent className="space-y-5">
-        {stepKey === 'experiment' && <ExperimentStep state={state} patch={patch} />}
-        {stepKey === 'goals' && (
-          <GoalsStep state={state} patch={patch} requirements={requirements} reqError={reqError} />
-        )}
-        {stepKey === 'data_gate' && (
-          <DataGateStep state={state} patch={patch} requirements={requirements} reqError={reqError} />
-        )}
-        {stepKey === 'register' && <RegisterStep state={state} patch={patch} result={registerResult} />}
+        {mode === 'catalog' ? (
+          <>
+            {stepKey === 'experiment' && <ExperimentStep state={state} patch={patch} />}
+            {stepKey === 'goals' && (
+              <GoalsStep state={state} patch={patch} requirements={requirements} reqError={reqError} />
+            )}
+            {stepKey === 'data_gate' && (
+              <DataGateStep state={state} patch={patch} requirements={requirements} reqError={reqError} />
+            )}
+            {stepKey === 'register' && <RegisterStep state={state} patch={patch} result={registerResult} />}
 
-        <Separator />
+            <Separator />
 
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            variant="outline"
-            onClick={() => patch({ stepIndex: clampStep(state.stepIndex - 1) })}
-            disabled={state.stepIndex === 0 || registered}
-          >
-            Back
-          </Button>
-          {isLastStep(state) ? (
-            <Button onClick={finish} disabled={!canAdvance(state) || registered}>
-              Register agent
-            </Button>
-          ) : (
-            <Button onClick={() => patch({ stepIndex: clampStep(state.stepIndex + 1) })} disabled={!canAdvance(state)}>
-              Next
-            </Button>
-          )}
-          {registered ? (
-            <Button variant="outline" onClick={onClose}>
-              Done
-            </Button>
-          ) : (
-            !validation.ok && <span className="text-sm text-muted-foreground">{validation.reason}</span>
-          )}
-        </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                variant="outline"
+                onClick={() => patch({ stepIndex: clampStep(state.stepIndex - 1) })}
+                disabled={state.stepIndex === 0 || registered}
+              >
+                Back
+              </Button>
+              {isLastStep(state) ? (
+                <Button onClick={finish} disabled={!canAdvance(state) || registered}>
+                  Register agent
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => patch({ stepIndex: clampStep(state.stepIndex + 1) })}
+                  disabled={!canAdvance(state)}
+                >
+                  Next
+                </Button>
+              )}
+              {registered ? (
+                <Button variant="outline" onClick={onClose}>
+                  Done
+                </Button>
+              ) : (
+                !validation.ok && <span className="text-sm text-muted-foreground">{validation.reason}</span>
+              )}
+            </div>
+          </>
+        ) : (
+          <RequirementsMode state={state} patch={patch} onClose={onClose} />
+        )}
       </CardContent>
     </Card>
   );
@@ -460,6 +498,242 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
           onChange={(e) => patch({ agentName: e.target.value })}
           disabled={result?.outcome === 'registered'}
         />
+      </div>
+      <Message message={message} />
+    </div>
+  );
+}
+
+// Free-form requirements intake (slice 2). The user resolves a fresh experiment,
+// names the agent, and describes requirements in their own words; the engine
+// previews the routed plan, and — after the human sets/acknowledges the objective
+// target — authors the judges + persists the goal. Every routing/kind/target fact
+// is rendered from the Python response; nothing is re-derived here (two-tier).
+function RequirementsMode({ state, patch, onClose }: StepProps & { onClose: () => void }) {
+  const [requirementsText, setRequirementsText] = useState('');
+  const [preview, setPreview] = useState<RequirementsPreviewResponse | null>(null);
+  const [previewMsg, setPreviewMsg] = useState<ToneMessage | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [targetInput, setTargetInput] = useState('');
+  const [confirmResult, setConfirmResult] = useState<RequirementsConfirmResponse | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const resolved = state.resolved;
+  const agentName = state.agentName.trim();
+  const confirmed = confirmResult?.outcome === 'requirements_confirmed';
+  const canPreview = Boolean(resolved?.fresh) && Boolean(agentName) && Boolean(requirementsText.trim()) && !previewing;
+
+  async function runPreview() {
+    setPreviewing(true);
+    setPreviewMsg(null);
+    setConfirmResult(null);
+    try {
+      const { status, body } = await postJson<RequirementsPreviewResponse>(
+        API.previewRequirements,
+        previewRequirementsBody(requirementsText, agentName)
+      );
+      if (status === 401) {
+        setPreview(null);
+        setPreviewMsg({ tone: 'error', text: 'Sign in to preview requirements.' });
+        return;
+      }
+      if (body.outcome === 'requirements_preview') {
+        setPreview(body);
+        // Pre-fill the editable target from Python's SUGGESTION — never a TS constant.
+        setTargetInput(body.suggested_target ? String(body.suggested_target.value) : '');
+        setPreviewMsg(null);
+      } else {
+        setPreview(null);
+        setPreviewMsg(previewRequirementsMessage(body));
+      }
+    } catch {
+      setPreview(null);
+      setPreviewMsg({ tone: 'error', text: 'Network error previewing requirements.' });
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  const parsedTarget = Number(targetInput);
+  const targetValid = targetInput.trim() !== '' && Number.isFinite(parsedTarget);
+  const canConfirm = Boolean(preview) && targetValid && !confirming && !confirmed;
+
+  async function runConfirm() {
+    if (!resolved) return;
+    setConfirming(true);
+    try {
+      const { status, body } = await postJson<RequirementsConfirmResponse>(
+        API.confirmRequirements,
+        confirmRequirementsBody(requirementsText, agentName, resolved.experiment_id, parsedTarget)
+      );
+      if (status === 401) {
+        setConfirmResult({ outcome: 'error', error: 'Not authenticated — sign in to confirm.' });
+        return;
+      }
+      setConfirmResult(body);
+    } catch {
+      setConfirmResult({ outcome: 'error', error: 'Network error confirming requirements.' });
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  const view = preview ? requirementsPlanView(preview) : null;
+
+  return (
+    <div className="space-y-5">
+      <ExperimentStep state={state} patch={patch} />
+
+      <div className="space-y-2">
+        <Label htmlFor="req-agent-name">Agent name (the cohort these judges + goal attach to)</Label>
+        <Input
+          id="req-agent-name"
+          className="w-72"
+          value={state.agentName}
+          placeholder="e.g. my_claude_code_agent"
+          onChange={(e) => patch({ agentName: e.target.value })}
+          disabled={confirmed}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="req-text">Your requirements</Label>
+        <Textarea
+          id="req-text"
+          rows={4}
+          value={requirementsText}
+          placeholder="e.g. correctness matters most; never hallucinate a tool call; keep latency and cost low"
+          onChange={(e) => setRequirementsText(e.target.value)}
+          disabled={confirmed}
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={() => void runPreview()} disabled={!canPreview}>
+            {previewing ? 'Previewing…' : 'Preview plan'}
+          </Button>
+          {!resolved?.fresh && (
+            <span className="text-sm text-muted-foreground">Resolve a fresh experiment above first.</span>
+          )}
+          {resolved?.fresh && !agentName && (
+            <span className="text-sm text-muted-foreground">Name the agent to preview.</span>
+          )}
+        </div>
+        <Message message={previewMsg} />
+      </div>
+
+      {view && (
+        <RequirementsPlanPanel
+          view={view}
+          targetInput={targetInput}
+          onTargetChange={setTargetInput}
+          onConfirm={() => void runConfirm()}
+          canConfirm={canConfirm}
+          confirming={confirming}
+          confirmResult={confirmResult}
+          onClose={onClose}
+          disabled={confirmed}
+        />
+      )}
+    </div>
+  );
+}
+
+// The routed-plan review panel — rendered PURELY from the preview view model. No
+// routing/threshold/target is authored here: the objective, each dimension's
+// role/kind/direction, the judges-to-author vs deterministic-metrics split, and the
+// SUGGESTED target all come from Python. The target input is pre-filled from the
+// suggestion and editable; the human's value is sent back verbatim on confirm.
+function RequirementsPlanPanel({
+  view,
+  targetInput,
+  onTargetChange,
+  onConfirm,
+  canConfirm,
+  confirming,
+  confirmResult,
+  onClose,
+  disabled,
+}: {
+  view: ReturnType<typeof requirementsPlanView>;
+  targetInput: string;
+  onTargetChange: (value: string) => void;
+  onConfirm: () => void;
+  canConfirm: boolean;
+  confirming: boolean;
+  confirmResult: RequirementsConfirmResponse | null;
+  onClose: () => void;
+  disabled: boolean;
+}) {
+  const confirmed = confirmResult?.outcome === 'requirements_confirmed';
+  const message = confirmResult ? confirmRequirementsMessage(confirmResult) : null;
+  return (
+    <div className="space-y-4 rounded-md border p-3">
+      <div>
+        <p className="text-sm font-medium">Routed plan</p>
+        <p className="text-xs text-muted-foreground">
+          Objective: <span className="text-foreground font-medium">{view.objectiveMetric}</span> ({view.direction})
+          {view.requiresQuality ? ' · needs human labels to align its judge(s)' : ''}
+        </p>
+      </div>
+
+      <ul className="space-y-2">
+        {view.dimensions.map((d) => (
+          <li key={d.name} className="rounded-md border p-2 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">{d.name}</span>
+              <Badge variant={d.role === 'objective' ? 'default' : 'outline'}>{d.role}</Badge>
+              <Badge variant={d.kind === 'memalign_judge' ? 'default' : 'outline'}>
+                {d.kind === 'memalign_judge' ? `judge: ${d.judge_name}` : `metric: ${d.metric}`}
+              </Badge>
+              <Badge variant="outline">{d.direction}</Badge>
+              <span className="text-xs text-muted-foreground">priority {d.user_priority}</span>
+            </div>
+            <p className="text-sm text-muted-foreground">{d.description}</p>
+          </li>
+        ))}
+      </ul>
+
+      <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+        <div>
+          <span className="text-foreground font-medium">Judges to author:</span>{' '}
+          {view.judgesToAuthor.join(', ') || 'none'}
+        </div>
+        <div>
+          <span className="text-foreground font-medium">Deterministic metrics:</span>{' '}
+          {view.deterministicMetrics.join(', ') || 'none'}
+        </div>
+      </div>
+
+      {view.describe && <p className="break-words font-mono text-xs text-muted-foreground">{view.describe}</p>}
+
+      <div className="space-y-2">
+        <Label htmlFor="obj-target">
+          Objective target
+          {view.suggestedTarget ? ` (${view.suggestedTarget.kind}) — suggested, adjust before confirming` : ''}
+        </Label>
+        <Input
+          id="obj-target"
+          className="w-40"
+          type="number"
+          step="0.05"
+          value={targetInput}
+          onChange={(e) => onTargetChange(e.target.value)}
+          disabled={disabled}
+        />
+        <p className="text-xs text-muted-foreground">
+          A signed relative fraction; its sign must match the objective direction ({view.direction}). The engine fails
+          closed on a mismatch — nothing is authored or persisted.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={onConfirm} disabled={!canConfirm}>
+          {confirming ? 'Confirming…' : 'Confirm & author judges'}
+        </Button>
+        {confirmed && (
+          <Button variant="outline" onClick={onClose}>
+            Done
+          </Button>
+        )}
       </div>
       <Message message={message} />
     </div>

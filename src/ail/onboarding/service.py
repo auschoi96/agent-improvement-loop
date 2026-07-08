@@ -5,7 +5,7 @@ The app is a thin AppKit (Node/React) app; the authenticated ``server/plugins/on
 routes resolve the actor from the platform identity headers and hand a JSON action
 to this module (the same bridge shape as :mod:`ail.loop.apply_service`: a single
 CLI reads a JSON action on stdin and prints a typed JSON result on stdout). It does
-exactly four things, **reusing** existing framework capabilities rather than
+a small set of things, **reusing** existing framework capabilities rather than
 reimplementing any:
 
 * ``requirements`` — the fixed goal catalog + the data gates a selection needs,
@@ -17,6 +17,18 @@ reimplementing any:
 * ``register_agent`` — write the new agent to the ``agent_registry`` UC table by
   **reusing** :func:`ail.publish_versions.publish_registry` (never reimplemented),
   so it appears in the app's existing AgentSwitcher.
+* ``preview_requirements`` — run the free-form requirements-intake engine
+  (:func:`ail.requirements.plan_requirements`, with the SAME LLM seam
+  :func:`ail.goals.compile_goal` uses) and return a **structured, machine-readable
+  preview** of the routed plan (which dimensions become authored ``{{trace}}`` judges
+  vs. deterministic L0 metrics, the objective + guardrails, and the *suggested*
+  target). A pure proposal — it authors nothing and persists nothing.
+* ``confirm_requirements`` — re-derive the same plan from the requirements text,
+  apply the human's explicit ``objective_target``, and **reuse**
+  :func:`ail.requirements.execute_plan` to author the judges (via the existing
+  :func:`ail.judges.author_judge` path) and persist the confirmed goal (via
+  :func:`ail.requirements.compiled_goal_persister`). Fail-closed: ``execute_plan``
+  refuses unless the plan is confirmed *and* the goal is ``human_confirmed``.
 
 **Fail-closed / no fabrication everywhere.** An empty actor, a non-fresh
 experiment, a denied create, a name/experiment collision, or any infra failure all
@@ -32,13 +44,22 @@ wiring (:func:`run_action`, :func:`main`) is a thin composition on top.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
+from collections.abc import Callable, Iterable
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ail.goals.compiler import (
+    CompiledGoal,
+    GoalCompileError,
+    GoalContractError,
+    GoalProposerLLM,
+    _default_databricks_proposer,
+)
 from ail.onboarding.experiment import (
     ExperimentAccessError,
     ExperimentClient,
@@ -58,15 +79,31 @@ from ail.onboarding.goals import (
 from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA
 from ail.publish_versions import REGISTRY_TABLE, publish_registry
 from ail.registry import Agent, AgentRegistry
+from ail.requirements import (
+    RequirementsExtractionError,
+    RequirementsNotConfirmedError,
+    RequirementsPlan,
+    RequirementsRoutingError,
+    compiled_goal_persister,
+    execute_plan,
+    plan_requirements,
+)
+from ail.requirements.composer import JudgeAuthor
 
 __all__ = [
     "OnboardingOutcome",
     "ValidationResult",
     "CreationResult",
     "RegisterResult",
+    "PreviewedDimension",
+    "SuggestedTarget",
+    "RequirementsPreviewResult",
+    "RequirementsConfirmResult",
     "ErrorResult",
     "register_agent",
     "run_requirements",
+    "run_preview_requirements",
+    "run_confirm_requirements",
     "run_validate",
     "run_create",
     "run_register",
@@ -83,6 +120,10 @@ class OnboardingOutcome(StrEnum):
     VALIDATED = "validated"
     CREATED = "created"
     REGISTERED = "registered"
+    #: A free-form requirements PREVIEW — the routed plan, authored/persisted nothing.
+    REQUIREMENTS_PREVIEW = "requirements_preview"
+    #: A confirmed free-form requirements intake — judges authored + goal persisted.
+    REQUIREMENTS_CONFIRMED = "requirements_confirmed"
     #: A fail-closed decision-level refusal (collision, bad input, empty actor) —
     #: nothing was written; surface :attr:`refused_reason`.
     REFUSED = "refused"
@@ -130,6 +171,84 @@ class RegisterResult(_Contract):
     experiment_id: str
     goals: list[str] = Field(default_factory=list)
     judge_config: dict[str, Any] | None = None
+    actor: str = ""
+    refused_reason: str | None = None
+    error: str | None = None
+
+
+class PreviewedDimension(_Contract):
+    """One routed dimension in a requirements PREVIEW (machine-readable).
+
+    A JSON-serializable projection of :class:`ail.requirements.PlannedDimension` — the
+    client renders it verbatim (two-tier: Python owns the routing facts).
+    """
+
+    name: str
+    description: str
+    user_priority: int
+    #: ``"deterministic_l0"`` (an exact metric, no judge) or ``"memalign_judge"``.
+    kind: str
+    #: ``"objective"`` (the primary dimension) or ``"guardrail"``.
+    role: str
+    metric: str | None = None
+    judge_name: str | None = None
+    #: ``"minimize"`` (L0 metric) or ``"maximize"`` (quality judge).
+    direction: str
+
+
+class SuggestedTarget(_Contract):
+    """The composed objective target — a **suggestion** the human must set/acknowledge.
+
+    ``is_suggestion`` is always ``True`` on a preview: the value is the composer's
+    signed relative default, surfaced so the wizard can pre-fill an editable field
+    labelled "adjust before confirming". It is never a confirmed/approved value.
+    """
+
+    value: float
+    kind: str
+    is_suggestion: bool = True
+
+
+class RequirementsPreviewResult(_Contract):
+    """The free-form requirements PREVIEW (``preview_requirements``).
+
+    The plan's human-readable :meth:`~ail.requirements.RequirementsPlan.describe`
+    summary plus machine fields per dimension and the suggested objective target.
+    Authored nothing, persisted nothing — a pure proposal for human review.
+    """
+
+    outcome: OnboardingOutcome = OnboardingOutcome.REQUIREMENTS_PREVIEW
+    requirements_text: str = ""
+    cohort: str = ""
+    agent_name: str = ""
+    describe: str = ""
+    objective_metric: str = ""
+    direction: str = ""
+    requires_quality: bool = False
+    dimensions: list[PreviewedDimension] = Field(default_factory=list)
+    judges_to_author: list[str] = Field(default_factory=list)
+    deterministic_metrics: list[str] = Field(default_factory=list)
+    suggested_target: SuggestedTarget | None = None
+    actor: str = ""
+
+
+class RequirementsConfirmResult(_Contract):
+    """The confirmed free-form requirements intake (``confirm_requirements``).
+
+    Honest outcome: ``requirements_confirmed`` with the judges that were authored and
+    whether the goal was persisted; ``refused`` (anonymous actor / no explicit
+    target) or ``error`` (extraction/routing/contract/infra failure) otherwise — a
+    confirm is never fabricated.
+    """
+
+    outcome: OnboardingOutcome
+    agent_name: str = ""
+    experiment_id: str = ""
+    cohort: str = ""
+    objective_metric: str = ""
+    objective_target: float | None = None
+    authored_judges: list[str] = Field(default_factory=list)
+    persisted: bool = False
     actor: str = ""
     refused_reason: str | None = None
     error: str | None = None
@@ -330,6 +449,244 @@ def run_requirements(goal_keys: list[str] | None = None) -> RequirementsResult |
         return build_requirements(goal_keys)
     except UnknownGoalError as exc:
         return ErrorResult(action="requirements", error=str(exc))
+
+
+#: The requirements-engine failures that are honest, expected user-facing outcomes
+#: (a garbage blob, a mis-mapped metric, a wrong-sign target) rather than infra
+#: bugs — surfaced as an ERROR/ErrorResult carrying the engine's own message,
+#: never a fabricated plan/confirm.
+_REQUIREMENTS_ENGINE_ERRORS = (
+    RequirementsExtractionError,
+    RequirementsRoutingError,
+    RequirementsNotConfirmedError,
+    GoalCompileError,
+    GoalContractError,
+    ValueError,
+)
+
+
+def _preview_from_plan(
+    plan: RequirementsPlan,
+    *,
+    requirements_text: str,
+    cohort: str,
+    agent_name: str,
+    actor: str,
+) -> RequirementsPreviewResult:
+    """Project a (proposal) :class:`RequirementsPlan` into the JSON preview contract."""
+    dimensions = [
+        PreviewedDimension(
+            name=d.name,
+            description=d.description,
+            user_priority=d.user_priority,
+            kind=d.kind,
+            role=d.role,
+            metric=d.metric,
+            judge_name=d.judge_name,
+            direction=d.direction,
+        )
+        for d in plan.dimensions
+    ]
+    target = plan.goal.target
+    return RequirementsPreviewResult(
+        requirements_text=requirements_text,
+        cohort=cohort,
+        agent_name=agent_name,
+        describe=plan.describe(),
+        objective_metric=plan.goal.objective_metric,
+        direction=plan.goal.direction,
+        requires_quality=plan.goal.requires_quality,
+        dimensions=dimensions,
+        judges_to_author=[d.judge_name for d in plan.judges_to_author if d.judge_name],
+        deterministic_metrics=[d.metric for d in plan.deterministic_metrics if d.metric],
+        suggested_target=SuggestedTarget(value=target.value, kind=target.kind),
+        actor=actor,
+    )
+
+
+def run_preview_requirements(
+    requirements_text: str,
+    *,
+    cohort: str = "",
+    agent_name: str = "",
+    actor: str = "",
+    llm: GoalProposerLLM | None = None,
+    known_judges: Iterable[str] = (),
+) -> RequirementsPreviewResult | ErrorResult:
+    """PREVIEW a free-form requirements blob — extract + route + compose, no side effects.
+
+    Runs the Slice-1 intake engine (:func:`ail.requirements.plan_requirements`) with
+    the SAME LLM seam :func:`ail.goals.compile_goal` uses (``llm=None`` lazily builds
+    the Databricks proposer; tests inject a mock) and returns a structured,
+    JSON-serializable preview of the routed plan for human review. A pure proposal —
+    it authors **no** judge and persists **nothing**.
+
+    Fail-closed: a blank blob, an extraction/routing/compile failure, or an
+    unconfigured LLM endpoint is an honest :class:`ErrorResult`, never a fabricated
+    plan.
+    """
+    text = requirements_text.strip() if requirements_text else ""
+    if not text:
+        return ErrorResult(
+            action="preview_requirements", error="requirements text must be a non-empty string"
+        )
+    resolved_cohort = cohort.strip() or agent_name.strip()
+    if not resolved_cohort:
+        return ErrorResult(
+            action="preview_requirements",
+            error="a cohort or agent_name is required to compose the plan",
+        )
+    try:
+        proposer = llm if llm is not None else _default_databricks_proposer()
+        plan = plan_requirements(text, resolved_cohort, llm=proposer, known_judges=known_judges)
+    except _REQUIREMENTS_ENGINE_ERRORS as exc:
+        return ErrorResult(action="preview_requirements", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - a live LLM/infra failure is an honest error, never a fake plan
+        return ErrorResult(action="preview_requirements", error=f"{type(exc).__name__}: {exc}")
+    return _preview_from_plan(
+        plan,
+        requirements_text=text,
+        cohort=resolved_cohort,
+        agent_name=agent_name.strip(),
+        actor=actor,
+    )
+
+
+def run_confirm_requirements(
+    requirements_text: str,
+    *,
+    objective_target: float | None,
+    experiment_id: str,
+    agent_name: str,
+    cohort: str = "",
+    actor: str = "",
+    profile: str | None = None,
+    warehouse_id: str | None = None,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+    llm: GoalProposerLLM | None = None,
+    author: JudgeAuthor | None = None,
+    persist: Callable[[CompiledGoal], None] | None = None,
+    known_judges: Iterable[str] = (),
+) -> RequirementsConfirmResult:
+    """CONFIRM a free-form requirements intake — author judges + persist the goal.
+
+    Re-derives the SAME plan from ``requirements_text`` (deterministic given the same
+    text + LLM), applies the human's explicit ``objective_target`` via
+    :meth:`RequirementsPlan.confirm`, then **reuses** :func:`ail.requirements.execute_plan`
+    to author one ``{{trace}}`` judge per quality dimension (via the existing
+    :func:`ail.judges.author_judge` path — ``author=None`` uses it) and persist the
+    confirmed goal (``persist=None`` builds the per-agent
+    :func:`ail.requirements.compiled_goal_persister`; tests inject spies).
+
+    Fail-closed:
+
+    * an anonymous actor or a missing ``objective_target`` is a ``refused`` (the
+      human must set/acknowledge the target the wizard pre-filled from the suggestion);
+    * an extraction/routing/wrong-sign-target failure is an honest ``error``;
+    * ``execute_plan`` itself refuses unless the plan is confirmed AND
+      ``goal.human_confirmed`` — so nothing is authored/persisted for an unconfirmed
+      plan, and any infra failure is an ``error``, never a fabricated confirm.
+    """
+    resolved_cohort = cohort.strip() or agent_name.strip()
+
+    def _fail(
+        outcome: OnboardingOutcome, *, error: str | None = None, refused: str | None = None
+    ) -> RequirementsConfirmResult:
+        # Never echo a non-finite target (NaN/inf) back — it is invalid JSON and would
+        # misrepresent what was refused; a rejected target reads back as "no target".
+        echoed = (
+            objective_target
+            if objective_target is not None and math.isfinite(objective_target)
+            else None
+        )
+        return RequirementsConfirmResult(
+            outcome=outcome,
+            agent_name=agent_name.strip(),
+            experiment_id=experiment_id.strip(),
+            cohort=resolved_cohort,
+            objective_target=echoed,
+            actor=actor,
+            error=error,
+            refused_reason=refused,
+        )
+
+    if not actor.strip():
+        return _fail(
+            OnboardingOutcome.REFUSED,
+            refused="refusing an anonymous confirmation — no authenticated actor identity",
+        )
+    # Fail closed on a missing OR non-finite target (defense-in-depth: the service
+    # cannot assume its only caller is the TS route). JSON admits NaN/Infinity, and
+    # the CompiledGoal sign checks (value < 0 / value > 0) are BOTH False for NaN, so
+    # a non-finite target would otherwise slip past plan.confirm()/execute_plan() and
+    # author judges + persist a goal carrying a meaningless target. Refuse, never coerce.
+    if objective_target is None or not math.isfinite(objective_target):
+        return _fail(
+            OnboardingOutcome.REFUSED,
+            refused=(
+                "a finite, explicit objective target is required to confirm — set or acknowledge "
+                "the suggested target before confirming (propose-then-confirm); NaN/inf are refused"
+            ),
+        )
+    text = requirements_text.strip() if requirements_text else ""
+    if not text:
+        return _fail(OnboardingOutcome.ERROR, error="requirements text must be a non-empty string")
+    if not experiment_id.strip():
+        return _fail(OnboardingOutcome.ERROR, error="an experiment id is required to author judges")
+    if not agent_name.strip():
+        return _fail(OnboardingOutcome.ERROR, error="an agent name is required to persist the goal")
+
+    # Resolve the persist seam. Tests inject `persist`; the live path builds the
+    # per-agent persister, which needs a SQL warehouse to write agent_compiled_goals
+    # (mirrors run_register's warehouse resolution). Judges are authored via the live
+    # author_judge path (author=None) exactly as execute_plan already defaults.
+    persist_fn = persist
+    if persist_fn is None:
+        wh = warehouse_id or os.environ.get("DATABRICKS_WAREHOUSE_ID")
+        if not wh:
+            return _fail(
+                OnboardingOutcome.ERROR,
+                error="no SQL warehouse id (set DATABRICKS_WAREHOUSE_ID) — cannot persist the goal",
+            )
+        try:
+            from ail.publish import _build_workspace_client
+
+            client = _build_workspace_client(profile)
+            persist_fn = compiled_goal_persister(
+                agent_name=agent_name.strip(),
+                client=client,
+                warehouse_id=wh,
+                catalog=catalog,
+                schema=schema,
+                requirements_text=text,
+            )
+        except Exception as exc:  # noqa: BLE001 - client build failure is an honest ERROR
+            return _fail(OnboardingOutcome.ERROR, error=f"{type(exc).__name__}: {exc}")
+
+    try:
+        proposer = llm if llm is not None else _default_databricks_proposer()
+        plan = plan_requirements(text, resolved_cohort, llm=proposer, known_judges=known_judges)
+        confirmed = plan.confirm(objective_target=objective_target)
+        execution = execute_plan(
+            confirmed, experiment_id=experiment_id.strip(), author=author, persist=persist_fn
+        )
+    except _REQUIREMENTS_ENGINE_ERRORS as exc:
+        return _fail(OnboardingOutcome.ERROR, error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - any infra failure is an honest ERROR, never a fake confirm
+        return _fail(OnboardingOutcome.ERROR, error=f"{type(exc).__name__}: {exc}")
+
+    return RequirementsConfirmResult(
+        outcome=OnboardingOutcome.REQUIREMENTS_CONFIRMED,
+        agent_name=agent_name.strip(),
+        experiment_id=experiment_id.strip(),
+        cohort=resolved_cohort,
+        objective_metric=execution.goal.objective_metric,
+        objective_target=objective_target,
+        authored_judges=list(execution.authored_names),
+        persisted=execution.persisted,
+        actor=actor,
+    )
 
 
 def run_validate(
@@ -537,6 +894,40 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
 
     if action == "requirements":
         return run_requirements(goal_keys or None)
+    if action == "preview_requirements":
+        return run_preview_requirements(
+            str(payload.get("requirements_text") or ""),
+            cohort=str(payload.get("cohort") or ""),
+            agent_name=str(payload.get("agent_name") or ""),
+            actor=actor,
+        )
+    if action == "confirm_requirements":
+        raw_target = payload.get("objective_target")
+        # Coerce a JSON numeric to a finite float. A bool is an int subclass — reject it
+        # so a stray `true` is never a 1.0 target. json.loads also admits NaN/Infinity/
+        # -Infinity and a huge integer overflows float; all of those become None here so
+        # confirm_requirements refuses honestly rather than crashing or letting a
+        # non-finite target slip past the sign checks (NaN < 0 and NaN > 0 are both False).
+        target: float | None = None
+        if isinstance(raw_target, (int, float)) and not isinstance(raw_target, bool):
+            try:
+                coerced = float(raw_target)
+            except (OverflowError, ValueError):
+                coerced = None
+            if coerced is not None and math.isfinite(coerced):
+                target = coerced
+        return run_confirm_requirements(
+            str(payload.get("requirements_text") or ""),
+            objective_target=target,
+            experiment_id=str(payload.get("experiment_id") or ""),
+            agent_name=str(payload.get("agent_name") or ""),
+            cohort=str(payload.get("cohort") or ""),
+            actor=actor,
+            profile=profile,
+            warehouse_id=warehouse_id,
+            catalog=catalog,
+            schema=schema,
+        )
     if action == "validate_experiment":
         return run_validate(
             str(payload.get("experiment_id") or ""),

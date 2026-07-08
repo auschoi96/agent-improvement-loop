@@ -4,6 +4,8 @@ import {
   handleValidateExperiment,
   handleCreateExperiment,
   handleRegisterAgent,
+  handlePreviewRequirements,
+  handleConfirmRequirements,
   readActor,
   type OnboardingHttpRequest,
   type OnboardingHttpResponse,
@@ -56,6 +58,12 @@ describe('all onboarding routes are fail-closed authenticated', () => {
     ['validate', handleValidateExperiment, { experiment_id: 'exp-1' }],
     ['create', handleCreateExperiment, { name: 'Fresh' }],
     ['register', handleRegisterAgent, { agent_name: 'a', experiment_id: 'exp-1', goals: ['cost'] }],
+    ['preview_requirements', handlePreviewRequirements, { requirements_text: 'be fast', agent_name: 'a' }],
+    [
+      'confirm_requirements',
+      handleConfirmRequirements,
+      { requirements_text: 'be fast', agent_name: 'a', experiment_id: 'exp-1', objective_target: -0.3 },
+    ],
   ];
   for (const [label, handler, body] of cases) {
     it(`${label} refuses an unauthenticated request (401) and never calls the engine`, async () => {
@@ -199,5 +207,92 @@ describe('handleRegisterAgent — authenticated write, body identity ignored', (
     await handleRegisterAgent(req(AUTH, { agent_name: 'a', experiment_id: 'exp-1', goals: ['cost'] }), res, bridge);
     expect(captured.code).toBe(502);
     expect((captured.body as { outcome: string }).outcome).toBe('error');
+  });
+});
+
+describe('handlePreviewRequirements — free-form intake preview, actor server-set', () => {
+  it('forwards the raw requirements text + AUTHENTICATED actor; a body actor is ignored', async () => {
+    const { bridge, calls } = recordingBridge({ outcome: 'requirements_preview', dimensions: [] });
+    const { res, captured } = fakeRes();
+    await handlePreviewRequirements(
+      req(AUTH, {
+        requirements_text: 'correctness matters most; keep latency low',
+        agent_name: 'my_agent',
+        actor: 'attacker@evil.com',
+      }),
+      res,
+      bridge
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].actor).toBe('onboarder@databricks.com'); // NOT the body actor
+    expect(calls[0]).toMatchObject({
+      action: 'preview_requirements',
+      requirements_text: 'correctness matters most; keep latency low',
+      agent_name: 'my_agent',
+    });
+    expect(captured.code).toBe(200);
+    expect((captured.body as { outcome: string }).outcome).toBe('requirements_preview');
+  });
+
+  it('refuses a missing requirements_text (400) and never calls the engine', async () => {
+    const { bridge, calls } = recordingBridge();
+    const { res, captured } = fakeRes();
+    await handlePreviewRequirements(req(AUTH, { agent_name: 'a' }), res, bridge);
+    expect(captured.code).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('handleConfirmRequirements — authored write, actor server-set, honest target relay', () => {
+  it('forwards the text + human target + AUTHENTICATED actor; a body actor is ignored', async () => {
+    const { bridge, calls } = recordingBridge({ outcome: 'requirements_confirmed', persisted: true });
+    const { res, captured } = fakeRes();
+    await handleConfirmRequirements(
+      req(AUTH, {
+        requirements_text: 'never hallucinate a tool call',
+        agent_name: 'my_agent',
+        experiment_id: 'exp-1',
+        objective_target: 0.25,
+        actor: 'attacker@evil.com',
+      }),
+      res,
+      bridge
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].actor).toBe('onboarder@databricks.com'); // NOT the body actor
+    expect(calls[0]).toMatchObject({
+      action: 'confirm_requirements',
+      requirements_text: 'never hallucinate a tool call',
+      agent_name: 'my_agent',
+      experiment_id: 'exp-1',
+      objective_target: 0.25,
+    });
+    expect(captured.code).toBe(200);
+    expect((captured.body as { outcome: string }).outcome).toBe('requirements_confirmed');
+  });
+
+  it('omits a non-numeric objective_target so the engine refuses honestly (never a fake target)', async () => {
+    const { bridge, calls } = recordingBridge({ outcome: 'refused' });
+    const { res } = fakeRes();
+    await handleConfirmRequirements(
+      req(AUTH, {
+        requirements_text: 'be fast',
+        agent_name: 'my_agent',
+        experiment_id: 'exp-1',
+        objective_target: 'not-a-number',
+      }),
+      res,
+      bridge
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].objective_target).toBeUndefined();
+  });
+
+  it('refuses missing requirements_text / agent_name / experiment_id (400)', async () => {
+    const { bridge, calls } = recordingBridge();
+    const { res, captured } = fakeRes();
+    await handleConfirmRequirements(req(AUTH, { requirements_text: 'be fast', agent_name: 'a' }), res, bridge);
+    expect(captured.code).toBe(400);
+    expect(calls).toHaveLength(0);
   });
 });
