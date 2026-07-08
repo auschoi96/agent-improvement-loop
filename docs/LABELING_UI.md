@@ -49,11 +49,61 @@ MLflow is pointed at the workspace the same way
 registry URI `databricks-uc`, and the active CLI profile — or, in the deployed app,
 ambient service-principal auth (`DATABRICKS_HOST`/`DATABRICKS_TOKEN` or the SP).
 
+That subprocess is the **local-dev / self-hosted** transport. On the **deployed**
+Node-only image the `ail` wheel is not importable, so the same routes instead call the
+Databricks-managed MLflow **assessments REST API** directly from TypeScript (the write is
+the wire-equivalent of `record_label`'s `mlflow.log_feedback`, name-matched and
+`HUMAN`-sourced). See [Deployed labeling transport](#deployed-labeling-transport-node-native-mlflow-rest).
+The name-match convention itself is never re-encoded: the deployed write only ever names a
+judge the live scorer list confirms, and refuses anything else.
+
 **Deployment note.** The deployed Databricks App image is Node-only (the `ail` wheel
 runs as serverless Jobs), so the subprocess bridge is the local-dev / self-hosted
-transport. A Databricks Job-trigger transport (the analogue of the approvals
-`jobTriggerApplyBridge`) is a documented follow-on; the `LabelingBridge` seam and the
-action contract below are unchanged when it lands.
+transport. The Node-only deployed transport is now **built** as `restLabelingBridge`
+(`server/plugins/labeling/bridge.ts`): the same `LabelingBridge` seam over the
+Databricks-managed **MLflow assessments REST API** instead of a subprocess. It is
+selected by env (`AIL_LABELING_TRANSPORT=rest`, committed in `app.yaml`) exactly as the
+approvals bridge selects its transport; the authenticated route, the action contract
+below, and the client are unchanged. It is **not** a per-grade Databricks Job trigger:
+labeling is rapid-fire, and job-startup latency per grade would be unusable — the REST
+write is a single low-latency call. See [Deployed labeling transport](#deployed-labeling-transport-node-native-mlflow-rest)
+below for how it maps to the same three responsibilities.
+
+### Deployed labeling transport (Node-native MLflow REST)
+
+The REST transport speaks three **grounded** Databricks-managed MLflow endpoints (the
+exact endpoints/bodies were captured live from the MLflow 3 Python SDK and confirmed
+end-to-end, not guessed):
+
+- **list judges** — `GET /api/2.0/managed-evals/scheduled-scorers/{experiment_id}` (what
+  `mlflow.genai.scorers.list_scorers` resolves to on a Databricks backend, so the
+  registered-judge set matches the engine's). This is both the labeling **dimensions**
+  and the **name-match set** the write validates against.
+- **scan traces** — `POST /api/4.0/mlflow/traces/search-long-running` then poll
+  `GET /api/4.0/mlflow/traces/search/operations/{id}`; the operation response carries the
+  recent `trace_infos[]` with their `assessments` inline (the read side's progress +
+  worklist).
+- **write label** — `POST /api/4.0/mlflow/traces/{location}/{trace_id}/assessments` with
+  `{ assessment_name, trace_id, source:{source_type:"HUMAN", source_id}, feedback:{value},
+  rationale }` — the wire-equivalent of `record_label`'s `mlflow.log_feedback`. The
+  response's `assessment_id` is the **only** proof of a real write.
+
+All v4 endpoints take the app's `DATABRICKS_WAREHOUSE_ID` as the SQL warehouse. Auth is
+the app's ambient service principal via the `@databricks/sdk-experimental`
+`WorkspaceClient` (the same client the approvals bridge builds). The SP needs the same
+experiment read + assessment write access the labeling engine needs; the `sql-warehouse`
+resource grant already covers the warehouse.
+
+**Fail-closed on the deployed transport (same guarantee, enforced in TS + tested):** a
+label is `labeled` **only** when the write returns an `assessment_id`. A missing warehouse,
+an unresolvable trace location, a scorer-list failure, an unknown judge name, a write
+error, or a write with no returned id all yield an honest `refused`/`error` — never a
+fabricated `labeled` — and when a dependency can't be confirmed the message points the
+user to the MLflow Traces UI. The written assessment's name equals the judge name and its
+source is `HUMAN` with the **authenticated** labeler (`x-forwarded-*`, never the body) as
+`source_id`. The label **floor** is not hardcoded in TS: it is relayed from the Python
+engine via `AIL_LABEL_FLOOR` (unset → the client renders a neutral `—`, never a fabricated
+number). These are guarded in `server/plugins/labeling/bridge.test.ts`.
 
 ## Fail-closed / no fabrication
 
