@@ -21,6 +21,7 @@ callable. Covers the hard constraints the reviewer hammers:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import pytest
 
@@ -476,3 +477,135 @@ def test_layered_cycle_emits_both_a_and_b_proposals() -> None:
     b_props = [p for p in pc.result.proposals if p.trigger.kind is TriggerKind.AGENT_PLANNER]
     assert [p.action_kind for p in b_props] == [ActionKind.GEPA_PROMPT]
     assert b_props[0].risk_class is RiskClass.AGENT_CHANGE
+
+
+# ==========================================================================
+# Default LLM seam: Databricks Claude temperature-parameter fallback
+# ==========================================================================
+#
+# Databricks Claude serving endpoints (e.g. ``databricks-claude-opus-4-7``, backed
+# by ``us.anthropic.claude-opus-4-7``) reject the ``temperature`` sampling parameter
+# with ``400 BAD_REQUEST: ... does not support the temperature parameter``. The
+# default planner LLM must retry the same request without ``temperature`` on that
+# specific 400 (so Lane B works against Databricks Claude) while leaving
+# temperature-accepting endpoints untouched — and must NOT swallow any other failure
+# into a fabricated decision (the fail-closed contract). These tests inject a fake
+# deploy client via ``get_deploy_client``, so no live model call is made.
+
+
+_GEPA_PLAN = {
+    "plan": [
+        {
+            "action_kind": "gepa_prompt",
+            "rationale": "modularity looks low across traces",
+            "confidence": 0.9,
+            "judge_name": "modularity",
+        }
+    ]
+}
+
+
+def _chat_response(payload: object) -> dict[str, object]:
+    """Shape a deploy-client chat completion whose content is ``payload`` as JSON."""
+    return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+
+
+class _RecordingDeployClient:
+    """A fake MLflow deploy client: records each ``predict`` input and delegates the
+    response (or exception) to an injected behavior. No live model call is made."""
+
+    def __init__(self, behavior: Callable[[dict[str, object]], object]) -> None:
+        self.calls: list[dict[str, object]] = []
+        self._behavior = behavior
+
+    def predict(self, *, endpoint: str, inputs: dict[str, object]) -> object:
+        self.calls.append(inputs)
+        return self._behavior(inputs)
+
+
+def test_default_planner_retries_without_temperature_on_databricks_claude_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Databricks Claude 400 rejecting `temperature` must trigger a transparent
+    # retry of the SAME request without it, which then succeeds -> Lane B produces
+    # decisions instead of failing every run.
+    response = _chat_response(_GEPA_PLAN)
+
+    def _reject_temperature(inputs: dict[str, object]) -> object:
+        if "temperature" in inputs:
+            raise RuntimeError(
+                "400 BAD_REQUEST: Model us.anthropic.claude-opus-4-7 "
+                "does not support the temperature parameter"
+            )
+        return response
+
+    client = _RecordingDeployClient(_reject_temperature)
+    import mlflow.deployments
+
+    monkeypatch.setattr(mlflow.deployments, "get_deploy_client", lambda target: client)
+
+    decisions = agent_planner(
+        FeedbackBundle(), _goal(), _agent(), model="databricks:/databricks-claude-opus-4-7"
+    )
+
+    assert [d.action_kind for d in decisions] == [ActionKind.GEPA_PROMPT]
+    assert decisions[0].trigger.kind is TriggerKind.AGENT_PLANNER
+    # First call sent temperature (got the 400); retry dropped it and succeeded.
+    assert len(client.calls) == 2
+    assert client.calls[0].get("temperature") == 0
+    assert "temperature" not in client.calls[1]
+
+
+def test_default_planner_keeps_temperature_when_endpoint_accepts_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An endpoint that accepts `temperature` is unaffected: exactly one call with
+    # temperature intact, no retry. The fallback is scoped to the temperature 400.
+    response = _chat_response(_GEPA_PLAN)
+    client = _RecordingDeployClient(lambda inputs: response)
+    import mlflow.deployments
+
+    monkeypatch.setattr(mlflow.deployments, "get_deploy_client", lambda target: client)
+
+    decisions = agent_planner(
+        FeedbackBundle(), _goal(), _agent(), model="databricks:/some-temperature-ok-endpoint"
+    )
+
+    assert [d.action_kind for d in decisions] == [ActionKind.GEPA_PROMPT]
+    assert len(client.calls) == 1
+    assert client.calls[0]["temperature"] == 0
+
+
+def test_default_planner_non_temperature_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A genuine LLM failure that is NOT the temperature 400 (network / auth / 5xx)
+    # must NOT be retried-without-temperature and must NOT be swallowed into a
+    # fabricated decision: it propagates, `combined_decisions` records it, Lane B
+    # contributes ZERO decisions, and Lane A survives unchanged (fail-closed).
+    def _boom(inputs: dict[str, object]) -> object:
+        raise RuntimeError("500 INTERNAL_ERROR: serving endpoint unreachable")
+
+    client = _RecordingDeployClient(_boom)
+    import mlflow.deployments
+
+    monkeypatch.setattr(mlflow.deployments, "get_deploy_client", lambda target: client)
+
+    feedback = _feedback_metric_view()
+    combined = combined_decisions(
+        feedback,
+        _goal(),
+        _agent(),
+        planner=lambda f, g, a: agent_planner(
+            f, g, a, model="databricks:/databricks-claude-opus-4-7"
+        ),
+    )
+
+    assert combined.n_from_b == 0
+    assert combined.planner_error is not None
+    assert "serving endpoint unreachable" in combined.planner_error
+    # No retry on a non-temperature error: the endpoint saw exactly one call.
+    assert len(client.calls) == 1
+    # Lane A is unaffected: its metric_view decision survived, provenance intact.
+    assert [d.action_kind for d in combined.decisions] == [ActionKind.METRIC_VIEW]
+    assert combined.decisions[0].trigger.kind is TriggerKind.RLM_RECOMMENDED_ASSET
