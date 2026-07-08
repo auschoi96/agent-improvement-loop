@@ -505,6 +505,40 @@ def test_gepa_builder_ignores_non_gepa_decision(tmp_path: Path) -> None:
     assert build(_skill_decision(), goal=_quality_goal(), agent=_agent()) is None
 
 
+# -- BLOCKING 3 — the proof must be BOUND to the resolved seed/target -------
+
+
+def test_gepa_builder_fails_closed_on_target_key_mismatch(tmp_path: Path) -> None:
+    # The resolver returns a seed for a DIFFERENT target than this decision routes to
+    # (decision -> metric:total_tokens, seed.target_key -> judge:modularity). A proof for
+    # an unrelated artifact must not ride onto the proposal — fail closed BEFORE the run
+    # (no artifact written).
+    build = gepa_candidate_builder(
+        gepa_run=_gepa_run(_result(evolved_pct=50.0, seed_pct=30.0)),
+        seed_resolver=_seed_resolver(_SEED),  # target_key="judge:modularity"
+        artifacts_root=tmp_path,
+    )
+    assert build(_token_gepa_decision(), goal=_token_goal(), agent=_agent()) is None
+    assert not list(tmp_path.iterdir())
+
+
+def test_gepa_builder_fails_closed_on_seed_body_mismatch(tmp_path: Path) -> None:
+    # The GEPA run evolved a DIFFERENT seed body ("seed body") than the resolver resolved
+    # ("a different champion body"): the held-out proof does not correspond to the champion
+    # this decision targets. Fail closed (no artifact), even though target_key matches and
+    # the run is token-improving.
+    mismatched_seed = GepaSeed(
+        target_key="metric:total_tokens", seed_body="a different champion body"
+    )
+    build = gepa_candidate_builder(
+        gepa_run=_gepa_run(_result(evolved_pct=50.0, seed_pct=30.0)),  # seed_skill_body="seed body"
+        seed_resolver=_seed_resolver(mismatched_seed),
+        artifacts_root=tmp_path,
+    )
+    assert build(_token_gepa_decision(), goal=_token_goal(), agent=_agent()) is None
+    assert not list(tmp_path.iterdir())
+
+
 # ==========================================================================
 # Piece 4 — cost-aware routing (GEPA is the exception, not fired on trivia)
 # ==========================================================================

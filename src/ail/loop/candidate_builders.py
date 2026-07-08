@@ -633,6 +633,12 @@ def gepa_candidate_builder(
         seed = seed_resolver(decision, goal=goal, agent=agent)
         if seed is None or not seed.seed_body.strip():
             return None
+        # BLOCKING: bind the proof to the RESOLVED target BEFORE spending on a run. The
+        # resolver must have resolved the SAME target this decision routes to — otherwise
+        # a proof for an unrelated artifact could ride onto the proposal. Fail closed on a
+        # mismatch (cheap check, so it also skips the expensive GEPA run).
+        if seed.target_key != gepa_target_key(decision, goal=goal):
+            return None
         # The expensive, self-proving run. None => GEPA could not run locally
         # (no frozen suite / no local Claude) => fail-closed, no candidate.
         result = gepa_run(seed, decision=decision, goal=goal, agent=agent)
@@ -640,6 +646,11 @@ def gepa_candidate_builder(
             return None
         # A no-op evolution proves nothing to ship.
         if not result.changed:
+            return None
+        # BLOCKING: the run must have actually evolved the RESOLVED seed body, not some
+        # other seed — else the held-out proof does not correspond to the champion this
+        # decision targets. Fail closed on a mismatch.
+        if result.seed_skill_body != seed.seed_body:
             return None
         # The honest anti-overfit gate the apply path re-runs: the evolved body must
         # have beaten the seed on the held-out split GEPA never trained on.
