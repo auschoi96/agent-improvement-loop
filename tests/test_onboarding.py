@@ -12,6 +12,9 @@ registry write failure never reports a registered agent.
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pytest
 from databricks.sdk.service.sql import StatementState
 
@@ -34,10 +37,14 @@ from ail.onboarding.service import (
     ErrorResult,
     OnboardingOutcome,
     RegisterResult,
+    RequirementsConfirmResult,
+    RequirementsPreviewResult,
     load_registered_agents,
     register_agent,
     run_action,
+    run_confirm_requirements,
     run_create,
+    run_preview_requirements,
     run_register,
     run_requirements,
     run_validate,
@@ -541,3 +548,209 @@ def test_python_owns_the_gate_descriptions_with_real_floors() -> None:
 
     # No goals selected => no fabricated summary.
     assert build_requirements(None).summary == ""
+
+
+# ---------------------------------------------------------------------------
+# preview_requirements / confirm_requirements — the free-form intake actions.
+# All offline: the LLM is a canned mock (the compile_goal seam), and judge
+# authoring / goal persistence are injected spies — no live model / MLflow /
+# warehouse call. The headline invariants: a PREVIEW authors + persists NOTHING,
+# and a CONFIRM needs an explicit human target and only then authors + persists.
+# ---------------------------------------------------------------------------
+
+
+def _mock_llm(payload: Any):  # type: ignore[no-untyped-def]
+    """A canned extractor LLM (the ail.goals.compiler.GoalProposerLLM seam)."""
+    text = json.dumps(payload)
+
+    def _llm(*, system: str, user: str) -> str:
+        return text
+
+    return _llm
+
+
+# priority 1 = a quality dimension (judge, maximize); priority 3 = a deterministic
+# L0 metric (latency, no judge). Deterministic given the same text (temp-0 LLM).
+_THREE_DIMS = [
+    {
+        "name": "no hallucinated tool calls",
+        "description": "never invent tool calls the user did not enable",
+        "user_priority": 1,
+        "metric": None,
+    },
+    {
+        "name": "response conciseness",
+        "description": "answers should be brief",
+        "user_priority": 2,
+        "metric": None,
+    },
+    {
+        "name": "latency",
+        "description": "responses should be fast",
+        "user_priority": 3,
+        "metric": "duration_seconds",
+    },
+]
+
+
+def _spy_author(log: list[tuple[str, str]]):  # type: ignore[no-untyped-def]
+    def _author(name: str, description: str, *, experiment_id: str) -> Any:
+        log.append(("author", name))
+        return object()
+
+    return _author
+
+
+def test_preview_returns_structured_plan_and_authors_persists_nothing(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # execute_plan is the ONLY author/persist path; a preview must never reach it.
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("preview must not author or persist (execute_plan called)")
+
+    monkeypatch.setattr("ail.onboarding.service.execute_plan", _boom)
+
+    result = run_preview_requirements(
+        "correctness matters most; never hallucinate a tool call; keep latency low",
+        cohort="claude_code",
+        actor="dev@databricks.com",
+        llm=_mock_llm(_THREE_DIMS),
+    )
+    assert isinstance(result, RequirementsPreviewResult)
+    assert result.outcome is OnboardingOutcome.REQUIREMENTS_PREVIEW
+
+    # Machine fields per dimension — routing owned by Python, surfaced structurally.
+    by_name = {d.name: d for d in result.dimensions}
+    assert set(by_name) == {"no hallucinated tool calls", "response conciseness", "latency"}
+    obj = by_name["no hallucinated tool calls"]
+    assert obj.role == "objective" and obj.kind == "memalign_judge"
+    assert obj.judge_name == "no_hallucinated_tool_calls" and obj.direction == "maximize"
+    lat = by_name["latency"]
+    assert lat.role == "guardrail" and lat.kind == "deterministic_l0"
+    assert lat.metric == "duration_seconds" and lat.direction == "minimize"
+
+    # The objective + the routed split are surfaced; and the target is a SUGGESTION.
+    assert result.objective_metric == "no_hallucinated_tool_calls"
+    assert sorted(result.judges_to_author) == [
+        "no_hallucinated_tool_calls",
+        "response_conciseness",
+    ]
+    assert result.deterministic_metrics == ["duration_seconds"]
+    assert result.suggested_target is not None
+    assert result.suggested_target.is_suggestion is True
+    assert result.suggested_target.value == 0.10  # maximize default, from the composer
+    assert "confirmed=False" in result.describe  # a proposal, not confirmed
+
+
+def test_preview_failclosed_on_garbage_never_fabricates() -> None:
+    # An LLM that ignores the JSON-array contract fails closed as an honest error.
+    result = run_preview_requirements(
+        "make it good", cohort="claude_code", actor="dev@databricks.com", llm=_mock_llm("nope")
+    )
+    assert isinstance(result, ErrorResult)
+    assert result.action == "preview_requirements"
+
+
+def test_confirm_requires_explicit_target_and_touches_nothing() -> None:
+    log: list[tuple[str, str]] = []
+    persisted: list[Any] = []
+    result = run_confirm_requirements(
+        "never hallucinate a tool call",
+        objective_target=None,  # the human has not set/acknowledged a target
+        experiment_id="exp-1",
+        agent_name="claude_code",
+        actor="dev@databricks.com",
+        llm=_mock_llm(_THREE_DIMS),
+        author=_spy_author(log),
+        persist=lambda g: persisted.append(g),
+    )
+    assert isinstance(result, RequirementsConfirmResult)
+    assert result.outcome is OnboardingOutcome.REFUSED
+    assert "target" in (result.refused_reason or "")
+    assert log == [] and persisted == []  # nothing authored / persisted
+
+
+def test_confirm_refuses_anonymous_actor() -> None:
+    result = run_confirm_requirements(
+        "never hallucinate a tool call",
+        objective_target=0.25,
+        experiment_id="exp-1",
+        agent_name="claude_code",
+        actor="   ",
+        llm=_mock_llm(_THREE_DIMS),
+    )
+    assert result.outcome is OnboardingOutcome.REFUSED
+    assert "anonymous" in (result.refused_reason or "")
+
+
+def test_confirm_authors_then_persists_with_human_target() -> None:
+    order: list[str] = []
+    log: list[tuple[str, str]] = []
+
+    def _persist(goal: Any) -> None:
+        order.append("persist")
+
+    def _author(name: str, description: str, *, experiment_id: str) -> Any:
+        assert experiment_id == "exp-1"
+        order.append("author")
+        log.append(("author", name))
+        return object()
+
+    result = run_confirm_requirements(
+        "correctness matters most; never hallucinate a tool call; keep latency low",
+        objective_target=0.25,  # a maximize objective => positive relative target
+        experiment_id="exp-1",
+        agent_name="claude_code",
+        actor="dev@databricks.com",
+        llm=_mock_llm(_THREE_DIMS),
+        author=_author,
+        persist=_persist,
+    )
+    assert result.outcome is OnboardingOutcome.REQUIREMENTS_CONFIRMED
+    assert result.objective_metric == "no_hallucinated_tool_calls"
+    assert result.objective_target == 0.25
+    # both quality dimensions authored (in plan order), then the goal persisted.
+    assert result.authored_judges == ["no_hallucinated_tool_calls", "response_conciseness"]
+    assert result.persisted is True
+    assert order == ["author", "author", "persist"]
+
+
+def test_confirm_wrong_sign_target_fails_closed_as_error() -> None:
+    # The objective is an authored judge (maximize); a negative relative target
+    # contradicts the derived direction and must be an honest error, not a bad goal.
+    log: list[tuple[str, str]] = []
+    persisted: list[Any] = []
+    result = run_confirm_requirements(
+        "never hallucinate a tool call",
+        objective_target=-0.5,
+        experiment_id="exp-1",
+        agent_name="claude_code",
+        actor="dev@databricks.com",
+        llm=_mock_llm(_THREE_DIMS),
+        author=_spy_author(log),
+        persist=lambda g: persisted.append(g),
+    )
+    assert result.outcome is OnboardingOutcome.ERROR
+    assert result.error  # the engine's own contract message
+    assert log == [] and persisted == []
+
+
+def test_run_action_dispatches_preview_and_confirm() -> None:
+    # preview_requirements dispatches (an unconfigured LLM endpoint => honest error,
+    # never a crash or a fabricated plan).
+    preview = run_action(
+        {"action": "preview_requirements", "requirements_text": "be fast", "actor": "a@b.com"}
+    )
+    assert preview.outcome in (
+        OnboardingOutcome.REQUIREMENTS_PREVIEW,
+        OnboardingOutcome.ERROR,
+    )
+    # confirm_requirements with no target => refused before any live seam is touched.
+    confirm = run_action(
+        {
+            "action": "confirm_requirements",
+            "requirements_text": "be fast",
+            "agent_name": "claude_code",
+            "experiment_id": "exp-1",
+            "actor": "a@b.com",
+        }
+    )
+    assert confirm.outcome is OnboardingOutcome.REFUSED
