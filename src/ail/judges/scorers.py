@@ -81,6 +81,16 @@ class ScorerSpec:
     ``float``/``bool`` (``["mean"]``); a bounded ``Literal[...]`` scale gets none
     by default, so a graded spec restores meaningful aggregations explicitly.
     ``None`` keeps MLflow's default.
+
+    ``auto_alignable`` marks whether the scheduled MemAlign auto-align cadence
+    (:func:`ail.judges.auto_align.auto_align_scorers`) may align this judge from
+    human trace labels. Almost every judge is (the default ``True``): it grades a
+    real run and a human can label that run. The exception is a **computed-inputs**
+    judge whose rubric is fed derived signals (not the raw trace) and needs
+    ``{{ expectations }}`` that the trace-label align path cannot supply — aligning
+    it is a category error. Setting this ``False`` (see ``token_efficiency``) is the
+    generic, name-free opt-out the auto-align cadence honours so it skips such a
+    judge cleanly instead of failing on it every run.
     """
 
     name: str
@@ -88,6 +98,7 @@ class ScorerSpec:
     feedback_value_type: Any
     description: str
     aggregations: tuple[str, ...] | None = None
+    auto_alignable: bool = True
 
 
 # --- default rubrics -------------------------------------------------------
@@ -177,6 +188,12 @@ TOKEN_EFFICIENCY = ScorerSpec(
     # As with modularity, a bounded Literal loses make_judge's default mean
     # aggregation; restore aggregations meaningful for a graded metric.
     aggregations=("mean", "median", "p90"),
+    # NOT auto-alignable: this is a deliberate COMPUTED-INPUTS test judge — it is fed
+    # the already-computed L0 signals via build_token_efficiency_inputs (never the raw
+    # {{ trace }}) and its rubric needs {{ expectations }} / success criteria that the
+    # human-trace-label MemAlign path does not supply. Auto-aligning it is a category
+    # error (it made the nightly ail-auto-align report failed=1), so the cadence skips it.
+    auto_alignable=False,
     instructions=(
         "You are rating the TOKEN EFFICIENCY of an agent run on a 1-to-5 scale.\n\n"
         "Task / request, with the run's L0 deterministic measurements:\n"

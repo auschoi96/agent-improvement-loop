@@ -753,12 +753,18 @@ def auto_align_scorers(
 ) -> AutoAlignReport:
     """Run one auto-align cadence over several judged dimensions.
 
-    Calls :func:`auto_align_judge` for each spec, isolating failures per judge (a
-    judge whose cadence raises is recorded as :attr:`AutoAlignStatus.FAILED` and
-    reported, never swallowed as success — and never aborts the others). A judge
-    with fewer than ``config.label_floor`` labels simply skips, so running over the
-    full built-in scorer set is harmless: only dimensions humans are labelling get
-    aligned.
+    Calls :func:`auto_align_judge` for each **auto-alignable** spec, isolating
+    failures per judge (a judge whose cadence raises is recorded as
+    :attr:`AutoAlignStatus.FAILED` and reported, never swallowed as success — and
+    never aborts the others). A judge with fewer than ``config.label_floor`` labels
+    simply skips, so running over the full built-in scorer set is harmless: only
+    dimensions humans are labelling get aligned.
+
+    A spec whose :attr:`~ail.judges.scorers.ScorerSpec.auto_alignable` is ``False``
+    (a computed-inputs test judge such as ``token_efficiency``) is **excluded
+    entirely** — not attempted and not reported — because aligning it from human
+    trace labels is a category error. This is the generic, name-free opt-out: it
+    skips such a judge cleanly instead of recording a spurious ``failed`` every run.
 
     When ``source`` / ``store`` are not supplied they default to a live
     :class:`~ail.ingest.mlflow_source.MLflowTraceSource` and an
@@ -774,8 +780,9 @@ def auto_align_scorers(
         else ExperimentTagWatermarkStore(experiment_id=experiment_id, profile=profile)
     )
 
+    alignable = [spec for spec in scorers.values() if spec.auto_alignable]
     results: list[JudgeAutoAlignResult] = []
-    for spec in scorers.values():
+    for spec in alignable:
         try:
             result = auto_align_judge(
                 spec,
