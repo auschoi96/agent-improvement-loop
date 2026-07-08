@@ -491,19 +491,62 @@ def parse_plan(
 # ---------------------------------------------------------------------------
 
 
+def _is_bad_request(exc: BaseException, message: str) -> bool:
+    """Best-effort detection that ``exc`` is an HTTP 400 / BAD_REQUEST.
+
+    Robust across the shapes the Databricks deploy client raises, checked in order:
+    a ``requests.HTTPError`` (``response.status_code``); an ``MlflowException`` /
+    ``RestException`` (``get_http_status_code()`` — note its ``str()`` does *not*
+    include the status — or ``error_code == "BAD_REQUEST"``); a generic
+    ``http_status_code`` attribute; and, only when no structured status is exposed, a
+    ``400`` / ``bad request`` token in the (already-lowercased) message. An
+    authoritative non-400 status (e.g. a 500) returns ``False`` without consulting the
+    message, so a 500 whose text merely mentions "400" is not misread as a 400.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status == 400
+
+    getter = getattr(exc, "get_http_status_code", None)
+    if callable(getter):
+        try:
+            code = getter()
+        except Exception:
+            code = None
+        if isinstance(code, int):
+            return code == 400
+
+    http_status = getattr(exc, "http_status_code", None)
+    if isinstance(http_status, int):
+        return http_status == 400
+
+    error_code = getattr(exc, "error_code", None)
+    if isinstance(error_code, str) and error_code.upper() == "BAD_REQUEST":
+        return True
+
+    return "400" in message or "bad request" in message or "bad_request" in message
+
+
 def _is_unsupported_temperature_error(exc: BaseException) -> bool:
-    """True when ``exc`` is a serving 400 that rejects the ``temperature`` parameter.
+    """True when ``exc`` is a **400 / BAD_REQUEST** that rejects ``temperature``.
 
     Databricks Claude serving endpoints (e.g. ``databricks-claude-opus-4-7``, backed
     by ``us.anthropic.claude-opus-4-7``) reject ``temperature`` with a
-    ``400 BAD_REQUEST: ... does not support the temperature parameter``. We match on
-    the message rather than an exception type because the Databricks deploy client
-    surfaces this as a generic ``MlflowException`` / ``HTTPError`` whose text carries
-    the signal. Kept deliberately narrow — it must fire only for the temperature
-    rejection so that every other failure re-raises and Lane B still fails closed.
+    ``400 BAD_REQUEST: ... does not support the temperature parameter``. **Both**
+    conditions must hold — the error is a 400 (:func:`_is_bad_request`) **and** its
+    message names ``temperature`` as unsupported. Requiring the 400 is what keeps
+    Lane B fail-closed: a non-400 failure (500 / auth / proxy) whose text merely
+    happens to mention temperature re-raises instead of taking the retry path, so
+    Lane B never emits decisions for an error that was not the temperature 400. We
+    inspect the message text (not an exception type) because the deploy client
+    surfaces the rejection as a generic ``MlflowException`` / ``HTTPError``.
     """
     message = str(exc).lower()
-    return "temperature" in message and ("not support" in message or "unsupported" in message)
+    names_temperature = "temperature" in message and (
+        "not support" in message or "unsupported" in message
+    )
+    return names_temperature and _is_bad_request(exc, message)
 
 
 def _predict_with_temperature_fallback(

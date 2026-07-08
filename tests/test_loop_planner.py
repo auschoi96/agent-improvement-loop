@@ -609,3 +609,73 @@ def test_default_planner_non_temperature_failure_fails_closed(
     # Lane A is unaffected: its metric_view decision survived, provenance intact.
     assert [d.action_kind for d in combined.decisions] == [ActionKind.METRIC_VIEW]
     assert combined.decisions[0].trigger.kind is TriggerKind.RLM_RECOMMENDED_ASSET
+
+
+def test_default_planner_retries_on_mlflow_bad_request_without_status_in_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The real production shape: the deploy client raises an MlflowException whose
+    # str() carries the message but NOT the HTTP status. The retry must still fire —
+    # driven by the structured 400 (get_http_status_code), not by "400" in the text —
+    # proving the fallback keys on status, not on a coincidental substring.
+    from mlflow.exceptions import MlflowException
+    from mlflow.protos.databricks_pb2 import BAD_REQUEST
+
+    response = _chat_response(_GEPA_PLAN)
+
+    def _reject_temperature(inputs: dict[str, object]) -> object:
+        if "temperature" in inputs:
+            raise MlflowException(
+                "Model us.anthropic.claude-opus-4-7 does not support the temperature parameter",
+                error_code=BAD_REQUEST,
+            )
+        return response
+
+    client = _RecordingDeployClient(_reject_temperature)
+    import mlflow.deployments
+
+    monkeypatch.setattr(mlflow.deployments, "get_deploy_client", lambda target: client)
+
+    decisions = agent_planner(
+        FeedbackBundle(), _goal(), _agent(), model="databricks:/databricks-claude-opus-4-7"
+    )
+
+    assert [d.action_kind for d in decisions] == [ActionKind.GEPA_PROMPT]
+    assert len(client.calls) == 2
+    assert client.calls[0].get("temperature") == 0
+    assert "temperature" not in client.calls[1]
+
+
+def test_default_planner_non_400_mentioning_temperature_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Guard against matching on message text alone: a NON-400 failure (proxy / auth /
+    # 5xx) whose text merely happens to mention 'temperature ... unsupported' must NOT
+    # take the retry-without-temperature path. It must propagate so Lane B stays
+    # fail-closed (zero decisions, Lane A intact) — never emitting decisions for an
+    # error that was not the specific unsupported-temperature 400.
+    def _boom(inputs: dict[str, object]) -> object:
+        raise RuntimeError("502 Bad Gateway from proxy: upstream said temperature is unsupported")
+
+    client = _RecordingDeployClient(_boom)
+    import mlflow.deployments
+
+    monkeypatch.setattr(mlflow.deployments, "get_deploy_client", lambda target: client)
+
+    feedback = _feedback_metric_view()
+    combined = combined_decisions(
+        feedback,
+        _goal(),
+        _agent(),
+        planner=lambda f, g, a: agent_planner(
+            f, g, a, model="databricks:/databricks-claude-opus-4-7"
+        ),
+    )
+
+    assert combined.n_from_b == 0
+    assert combined.planner_error is not None
+    assert "502" in combined.planner_error  # the ORIGINAL non-400 error propagated
+    # No retry: the fallback keyed on status, not the word 'temperature' — one call.
+    assert len(client.calls) == 1
+    assert [d.action_kind for d in combined.decisions] == [ActionKind.METRIC_VIEW]
+    assert combined.decisions[0].trigger.kind is TriggerKind.RLM_RECOMMENDED_ASSET
