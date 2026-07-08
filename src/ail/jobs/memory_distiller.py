@@ -8,7 +8,11 @@ thin launcher, matching the other ``ail.jobs.*`` entrypoints.
 
 from __future__ import annotations
 
+import sys
+
 from ail.memory.distiller import main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    rc = main()
+    if rc != 0:
+        sys.exit(rc)
