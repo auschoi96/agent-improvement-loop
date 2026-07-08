@@ -6,7 +6,14 @@ decide (Lane A + Lane B) → build-a-candidate pipeline, but it **decouples prov
 from proposing**. Where :func:`~ail.loop.controller.run_cycle` hardwires a frozen-suite
 ``prover(candidate)`` into the emit condition — a proposal only exists after it
 *proved* an improvement — this cycle emits a PENDING proposal on **evidence + gate
-alone**, carrying no :class:`~ail.loop.proposals.ProofSummary`.
+alone**, calling **no prover** and (for every ordinary builder) carrying no
+:class:`~ail.loop.proposals.ProofSummary`. The lone exception is a builder that is
+*itself* a frozen-suite verification — the GEPA candidate builder, whose
+:func:`ail.optimize.gepa_runner.run_gepa_optimization` already held-out-validated the
+evolved body; it hands that proof through on the :class:`~ail.loop.controller.Candidate`
+(``candidate.proof``) so the GEPA_PROMPT proposal it produces is applyable at all (the
+apply engine refuses a proof-less GEPA_PROMPT). The cycle still runs no prover — it
+merely records the proof the builder computed.
 
 Why this is the product's default path (not a weakening):
 
@@ -62,6 +69,7 @@ from ail.loop.controller import (
 from ail.loop.decision_rules import DecisionThresholds
 from ail.loop.planner import CombinedDecisions, Planner, agent_planner, combined_decisions
 from ail.loop.proposals import (
+    ActionKind,
     GateStatus,
     ProposalStatus,
     ProposedAction,
@@ -73,6 +81,19 @@ __all__ = [
     "EvidenceCycleResult",
     "run_evidence_cycle",
 ]
+
+#: Action kinds whose apply RE-VERIFIES a frozen-suite proof and so are **absent** from
+#: the apply engine's ``ail.loop.apply._EVIDENCE_ONLY_APPLYABLE_KINDS`` allowlist: they
+#: cannot be applied on evidence + gate alone. This evidence-first cycle calls **no**
+#: prover, so such a kind can only legitimately reach PENDING carrying a *pre-computed*
+#: genuine :class:`~ail.loop.proposals.ProofSummary` from a builder that is itself a
+#: frozen-suite verification (the GEPA candidate builder). The cycle therefore refuses to
+#: **emit** one without a genuine proof — the invariant "a proof-required proposal cannot
+#: reach PENDING without a real proof" is enforced here at the emit boundary, not merely
+#: relied upon as a downstream apply refusal. Kept narrow to the kind this cycle's
+#: builders can produce (``GEPA_PROMPT``); ``REVERT`` / ``AGENT_TASK`` are never emitted
+#: by the companion's builders and the apply engine remains the backstop for them.
+_PROOF_REQUIRED_ACTION_KINDS: frozenset[ActionKind] = frozenset({ActionKind.GEPA_PROMPT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +208,71 @@ def run_evidence_cycle(
                 skipped.append(SkippedDecision(ak, tk, "not gated: " + "; ".join(gate_reasons)))
                 continue
 
+            # Emit-boundary proof invariant (fail-closed): a proof-REQUIRED action kind
+            # (GEPA_PROMPT — its apply re-verifies a held-out proof) must carry a GENUINE
+            # ProofSummary or it is NOT emitted. "Genuine" is all four of: present, both
+            # flags true (proved_improvement + correctness_held), objective matches the
+            # goal, AND held-out provenance from a real run (n_promote >= 1 + a frozen-suite
+            # identity) — the last blocks a hand-built flags-only proof that merely sets the
+            # booleans. This guards the EMIT boundary itself, so a builder that hands back a
+            # proof-required candidate with proof=None, a fake/unrelated proof, or a
+            # provenance-less flags-only proof cannot create a broken PENDING row the apply
+            # engine would later have to refuse. "Cannot reach PENDING without a real proof"
+            # is an invariant of THIS cycle, not merely a downstream apply refusal.
+            if decision.action_kind in _PROOF_REQUIRED_ACTION_KINDS:
+                proof = candidate.proof
+                if proof is None or not (proof.proved_improvement and proof.correctness_held):
+                    skipped.append(
+                        SkippedDecision(
+                            ak,
+                            tk,
+                            "proof-required action kind carries no genuine frozen-suite proof "
+                            "(missing, or does not prove an improvement with correctness held) "
+                            "— fail-closed, cannot reach PENDING",
+                        )
+                    )
+                    continue
+                # The proof must speak to the objective this proposal claims to optimize;
+                # an unrelated-objective proof (e.g. a token-savings proof on a quality
+                # goal) is mislabeled and rejected. (The GEPA builder already binds to the
+                # routed target; this is the independent emit-boundary backstop.)
+                if proof.objective_metric != goal.objective_metric:
+                    skipped.append(
+                        SkippedDecision(
+                            ak,
+                            tk,
+                            f"proof objective {proof.objective_metric!r} does not match the goal "
+                            f"objective {goal.objective_metric!r} — mislabeled/unrelated proof, "
+                            "fail-closed",
+                        )
+                    )
+                    continue
+                # Genuine held-out PROVENANCE (fail-closed): the boolean flags + objective
+                # are hand-settable, so a matching-objective proof with both flags True is
+                # NOT enough — a proof-required kind must additionally carry the provenance a
+                # REAL held-out run populates. A genuine proof is built by
+                # ``ProofSummary.from_phase2_artifact`` from a Phase2Artifact
+                # ``run_gepa_optimization``/``run_phase2_comparison`` produced: it PROMOTEd at
+                # least one held-out task (``n_promote >= 1`` — ``proved_improvement`` is
+                # literally ``artifact.n_promote > 0``) and records the frozen suite it
+                # validated against (a non-empty ``suite_content_hash`` — always a sha256 for
+                # a frozen suite). A hand-constructed flags-only / provenance-less proof
+                # (``n_promote == 0``, empty suite identity) evidences NO real run, so it is
+                # REJECTED here: it cannot reach PENDING for a kind whose apply re-verifies a
+                # held-out proof.
+                if proof.n_promote < 1 or not proof.suite_content_hash.strip():
+                    skipped.append(
+                        SkippedDecision(
+                            ak,
+                            tk,
+                            "proof-required action kind carries a flags-only / provenance-less "
+                            f"proof (no genuine held-out run: n_promote={proof.n_promote}, "
+                            f"suite_content_hash={proof.suite_content_hash!r}) — fail-closed, "
+                            "cannot reach PENDING",
+                        )
+                    )
+                    continue
+
             proposal = ProposedAction(
                 proposal_id=derive_proposal_id(
                     agent_name=agent.agent_name,
@@ -201,7 +287,16 @@ def run_evidence_cycle(
                 goal_cohort=goal.cohort_name,
                 trigger=decision.trigger,
                 change=candidate.change,
-                proof=None,  # evidence-first: no frozen-suite proof (opt-in Tier-2)
+                # Evidence-first: this cycle runs NO prover, so ordinary builders carry
+                # no frozen-suite proof (``candidate.proof is None`` -> ``proof=None``,
+                # opt-in Tier-2). The one exception is a builder that is *itself* a
+                # frozen-suite verification — the GEPA candidate builder, whose
+                # run_gepa_optimization already held-out-validated the evolved body
+                # (a real run_phase2_comparison). It hands that ProofSummary through on
+                # the Candidate so the resulting GEPA_PROMPT proposal carries a proof
+                # (the apply engine refuses a proof-less GEPA_PROMPT — its apply
+                # re-verifies the held-out check). No prover is called here either way.
+                proof=candidate.proof,
                 gate_status=gate_status,
                 created_at=stamp,
             )
