@@ -308,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # Registry mode: align every agent in agent_registry, each on its own experiment.
-    warehouse = args.warehouse_id or os.environ.get(TRACING_WAREHOUSE_ENV)
+    warehouse: str = args.warehouse_id or os.environ.get(TRACING_WAREHOUSE_ENV) or ""
     missing = missing_registry_target(warehouse, args.catalog, args.schema)
     if missing:
         print(
