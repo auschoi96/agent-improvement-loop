@@ -19,6 +19,7 @@ import pytest
 from databricks.sdk.service.sql import StatementState
 
 from ail.onboarding.experiment import (
+    ExperimentAccessError,
     ExperimentCreation,
     ExperimentInfo,
     ExperimentPermissionError,
@@ -56,12 +57,22 @@ from ail.onboarding.service import (
 # ---------------------------------------------------------------------------
 
 
+# A fixed workspace home the fake returns so tests exercise the bare-name → absolute
+# path build without a live SDK call (the live impl resolves it via WorkspaceClient).
+_FAKE_HOME = "/Users/dev@example.com"
+# An arbitrary host a TS/Python constant could not plausibly be (proves the URL is
+# resolved LIVE and relayed, not fabricated).
+_FAKE_HOST = "https://arbitrary-workspace-9f3.cloud.databricks.example"
+
+
 class _FakeExperimentClient:
     """A canned :class:`~ail.onboarding.experiment.ExperimentClient`.
 
     ``by_id`` / ``by_name`` are the visible experiments; ``traces`` maps an
-    experiment id to its trace count; ``created`` records create calls. Any method
-    can be told to ``raise`` to exercise the fail-closed error paths.
+    experiment id to its trace count; ``created`` records create calls. ``home`` is
+    the workspace home the bare-name path build uses (``None`` exercises the
+    fail-closed path); ``host`` feeds the convenience URL (``""`` exercises the
+    fail-soft path). Any method can be told to ``raise`` to exercise fail-closed.
     """
 
     def __init__(
@@ -71,11 +82,15 @@ class _FakeExperimentClient:
         by_name: dict[str, ExperimentInfo] | None = None,
         traces: dict[str, int] | None = None,
         create_returns: str | None = "exp-new",
+        home: str | None = _FAKE_HOME,
+        host: str = _FAKE_HOST,
     ) -> None:
         self.by_id = by_id or {}
         self.by_name = by_name or {}
         self.traces = traces or {}
         self.create_returns = create_returns
+        self.home = home
+        self.host = host
         self.created: list[str] = []
 
     def get_experiment(self, experiment_id):  # type: ignore[no-untyped-def]
@@ -90,6 +105,12 @@ class _FakeExperimentClient:
 
     def count_traces(self, experiment_id, *, limit):  # type: ignore[no-untyped-def]
         return min(self.traces.get(experiment_id, 0), limit)
+
+    def workspace_home(self):  # type: ignore[no-untyped-def]
+        return self.home
+
+    def workspace_host(self):  # type: ignore[no-untyped-def]
+        return self.host
 
 
 class _RecordingStmtExec:
@@ -306,16 +327,42 @@ def test_missing_experiment_is_not_fresh() -> None:
     assert v.fresh is False
 
 
-def test_create_experiment_returns_id() -> None:
+def test_create_experiment_bare_name_builds_absolute_path() -> None:
+    # (a) A BARE name is placed under the caller's resolved workspace home — the
+    # created experiment carries the ABSOLUTE path, and that is what MLflow was asked
+    # to create (Databricks-backed MLflow rejects a bare name).
     client = _FakeExperimentClient(create_returns="exp-42")
-    creation = create_experiment("Fresh agent", client=client)
+    creation = create_experiment("my-agent-exp", client=client)
     assert isinstance(creation, ExperimentCreation)
     assert creation.experiment_id == "exp-42"
-    assert client.created == ["Fresh agent"]
+    assert creation.name == f"{_FAKE_HOME}/my-agent-exp"
+    assert client.created == [f"{_FAKE_HOME}/my-agent-exp"]
+
+
+def test_create_experiment_absolute_name_used_as_is() -> None:
+    # (b) An already-absolute name is used verbatim (back-compat: the wizard may pass
+    # one) — the home is NOT consulted, nothing is prefixed.
+    client = _FakeExperimentClient(create_returns="exp-7", home=None)
+    creation = create_experiment("/Users/someone/explicit-path", client=client)
+    assert creation.experiment_id == "exp-7"
+    assert creation.name == "/Users/someone/explicit-path"
+    assert client.created == ["/Users/someone/explicit-path"]
+
+
+def test_create_experiment_bare_name_failclosed_when_home_unresolvable() -> None:
+    # (c) A BARE name whose workspace home cannot be resolved is fail-closed: an honest
+    # ExperimentAccessError, and NOTHING is created at a guessed path.
+    client = _FakeExperimentClient(create_returns="exp-x", home=None)
+    with pytest.raises(ExperimentAccessError):
+        create_experiment("my-agent-exp", client=client)
+    assert client.created == []  # never attempted
 
 
 def test_create_experiment_refuses_existing_name() -> None:
-    client = _FakeExperimentClient(by_name={"Taken": ExperimentInfo("exp-9", "Taken")})
+    # (f) The 'already exists' refusal is preserved, now against the FINAL absolute
+    # name — never silently reuse another agent's experiment.
+    target = f"{_FAKE_HOME}/Taken"
+    client = _FakeExperimentClient(by_name={target: ExperimentInfo("exp-9", target)})
     with pytest.raises(ValueError):
         create_experiment("Taken", client=client)
     assert client.created == []  # never attempted
@@ -325,7 +372,7 @@ def test_create_experiment_failclosed_on_empty_id() -> None:
     # A client that returns no id must never be reported as a creation.
     client = _FakeExperimentClient(create_returns="")
     with pytest.raises(ExperimentPermissionError):
-        create_experiment("Fresh agent", client=client)
+        create_experiment("my-agent-exp", client=client)
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +578,30 @@ def test_run_register_errors_without_warehouse(monkeypatch) -> None:  # type: ig
 def test_run_create_refuses_anonymous() -> None:
     result = run_create("Fresh", actor="")
     assert result.outcome is OnboardingOutcome.REFUSED
+
+
+def test_run_create_populates_url_and_tracing_hint_on_created() -> None:
+    # (d) A real creation hands the experiment back ready to use: the deep-link URL
+    # (host resolved LIVE via the seam) and a copy-paste tracing snippet built from id.
+    client = _FakeExperimentClient(create_returns="exp-42")
+    result = run_create("my-agent-exp", actor="dev@databricks.com", experiment_client=client)
+    assert result.outcome is OnboardingOutcome.CREATED
+    assert result.experiment_id == "exp-42"
+    assert result.name == f"{_FAKE_HOME}/my-agent-exp"
+    assert result.experiment_url == f"{_FAKE_HOST}/ml/experiments/exp-42"
+    assert "exp-42" in result.tracing_hint
+    assert "set_experiment" in result.tracing_hint
+
+
+def test_run_create_still_created_when_url_host_unresolvable() -> None:
+    # (e) The URL is a convenience: an unresolvable host is fail-soft (url='') — the
+    # creation still SUCCEEDS (never fail a real create just because the URL can't build).
+    client = _FakeExperimentClient(create_returns="exp-42", host="")
+    result = run_create("my-agent-exp", actor="dev@databricks.com", experiment_client=client)
+    assert result.outcome is OnboardingOutcome.CREATED
+    assert result.experiment_id == "exp-42"
+    assert result.experiment_url == ""
+    assert "exp-42" in result.tracing_hint  # the hint needs no host, still present
 
 
 # ---------------------------------------------------------------------------

@@ -154,11 +154,20 @@ class ValidationResult(_Contract):
 
 
 class CreationResult(_Contract):
-    """The experiment-creation result (page 1). ``prerequisite`` names the deploy grant."""
+    """The experiment-creation result (page 1). ``prerequisite`` names the deploy grant.
+
+    On the CREATED path we hand the experiment back **ready to use**:
+    ``experiment_url`` is the workspace deep-link (``{host}/ml/experiments/{id}``,
+    host resolved LIVE from the active profile — ``""`` when it can't be resolved,
+    fail-soft), and ``tracing_hint`` is a copy-paste snippet pointing an agent's
+    MLflow tracing at the new experiment. Both are empty on any non-CREATED outcome.
+    """
 
     outcome: OnboardingOutcome
     experiment_id: str = ""
     name: str = ""
+    experiment_url: str = ""
+    tracing_hint: str = ""
     actor: str = ""
     error: str | None = None
     prerequisite: str | None = None
@@ -853,11 +862,39 @@ def run_create(
         return CreationResult(
             outcome=OnboardingOutcome.ERROR, name=clean, actor=actor, error=str(exc)
         )
+    # The create SUCCEEDED — hand it back ready to use. The URL is a convenience:
+    # fail-soft to '' if the host can't be resolved (never fail a real creation for it).
     return CreationResult(
         outcome=OnboardingOutcome.CREATED,
         experiment_id=creation.experiment_id,
         name=creation.name,
+        experiment_url=_experiment_url(client, creation.experiment_id),
+        tracing_hint=_tracing_hint(creation.experiment_id),
         actor=actor,
+    )
+
+
+def _experiment_url(client: ExperimentClient, experiment_id: str) -> str:
+    """Compose ``{host}/ml/experiments/{id}`` (host resolved LIVE; ``""`` if unresolvable).
+
+    Reuses the ``WorkspaceClient(profile).config.host`` pattern (behind the injectable
+    :meth:`~ail.onboarding.experiment.ExperimentClient.workspace_host` seam so it stays
+    offline-testable). Fail-soft: any resolution failure yields ``""`` — the URL is a
+    convenience surfaced to the user, never a reason to fail a creation that succeeded.
+    """
+    try:
+        host = client.workspace_host()
+    except Exception:  # noqa: BLE001 - the URL is a convenience; never crash the create
+        return ""
+    host = (host or "").rstrip("/")
+    return f"{host}/ml/experiments/{experiment_id}" if host else ""
+
+
+def _tracing_hint(experiment_id: str) -> str:
+    """A copy-paste snippet pointing an agent's MLflow tracing at ``experiment_id``."""
+    return (
+        f"mlflow.set_experiment(experiment_id='{experiment_id}')  "
+        "# then enable autolog (e.g. mlflow.langchain.autolog()) to route traces here"
     )
 
 
