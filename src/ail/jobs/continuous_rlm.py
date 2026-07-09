@@ -8,9 +8,12 @@ pass — sampling, idempotency, and the fail-closed failed-review marker all liv
 Registry-driven multi-agent: with no ``--experiment`` it runs REGISTRY MODE — it
 reads every agent from the UC ``agent_registry`` (via :mod:`ail.jobs.multi_agent`)
 and reviews each agent's OWN experiment against that agent's OWN ``goal_config``
-(falling back to the bundle's global goal vars when an agent has none), with
-per-agent isolation. Passing an explicit ``--experiment`` is the single-agent
-override for local/manual runs (review only that experiment with the args' goal).
+ONLY. There is NO fallback to the global CLI/bundle goal vars in registry mode: an
+agent with no (or partial) ``goal_config`` uses the neutral default (empty objective
+=> the default rubric, no goal steering), so an agent is NEVER steered toward another
+agent's / the operator's global objective (a cross-agent leak). Passing an explicit
+``--experiment`` is the single-agent override for local/manual runs — there the args
+ARE the legitimate goal source.
 
 Two things this wrapper owns:
 
@@ -48,40 +51,64 @@ from ail.registry import Agent
 DEFAULT_JUDGE_MODEL = "databricks-gpt-5-5-pro"
 
 
-def _resolve_goal_knobs(
-    args: argparse.Namespace, *, goal_config: dict[str, Any] | None, cohort: str
-) -> dict[str, Any]:
-    """The goal knobs for one review: from the agent's ``goal_config``, else the args.
+# Neutral goal defaults for REGISTRY mode. Used for a goal_config key an agent left
+# unset — these are framework defaults, NOT the global CLI/bundle goal args, so a
+# registry agent is NEVER steered toward the operator's global objective (that would
+# be a cross-agent leak on a per-agent source of truth). An empty objective_metric
+# yields DEFAULT_RUBRIC (no goal steering, no guardrails).
+_NEUTRAL_OBJECTIVE_METRIC = ""
+_NEUTRAL_GOAL_DIRECTION = "minimize"
+_NEUTRAL_GOAL_TARGET = -0.30
+_NEUTRAL_GOAL_TARGET_KIND = "relative"
 
-    Single-agent runs pass ``goal_config=None`` and get the args' goal knobs (the
-    current behavior). A registry agent passes its OWN ``goal_config`` (the free-form
-    mapping carried on :class:`ail.registry.Agent`); each present key overrides the
-    corresponding arg default, and an absent/empty key falls back to the arg — so a
-    partially-configured agent still steers on what it set and defaults the rest.
 
-    ``guardrail_judge`` is normalized to a list of ``'name:threshold'`` specs whether
-    the registry stored a single string or a list.
+def _normalize_guardrail_specs(guard: Any) -> list[str]:
+    """A goal_config ``guardrail_judge`` value as a list of ``'name:threshold'`` specs."""
+    if guard is None or guard == "":
+        return []
+    if isinstance(guard, str):
+        return [guard]
+    return [str(s) for s in guard if str(s).strip()]  # a list/tuple of specs
+
+
+def _knobs_from_args(args: argparse.Namespace, *, cohort: str) -> dict[str, Any]:
+    """Goal knobs for the SINGLE-AGENT path: the CLI/bundle args ARE the goal source.
+
+    This is the legitimate manual/local override — the operator asked for exactly this
+    goal on exactly this experiment, so the args are authoritative here.
+    """
+    return {
+        "objective_metric": str(args.objective_metric),
+        "goal_direction": str(args.goal_direction),
+        "goal_target": float(args.goal_target),
+        "goal_target_kind": str(args.goal_target_kind),
+        "guardrail_specs": [s for s in (args.guardrail_judge or []) if s.strip()],
+        "cohort": cohort,
+    }
+
+
+def _knobs_from_goal_config(goal_config: dict[str, Any] | None, *, cohort: str) -> dict[str, Any]:
+    """Goal knobs for a REGISTRY agent: the agent's OWN ``goal_config`` is the SOLE source.
+
+    No fallback to the global CLI/bundle args — an unset key uses the NEUTRAL framework
+    default (empty ``objective_metric`` => :data:`~ail.l3.rubric.DEFAULT_RUBRIC`, i.e. no
+    goal steering / no guardrails). So an agent with ``goal_config=None`` (or a partial
+    one) is reviewed against ITS objective or none, NEVER against another agent's / the
+    operator's leftover global objective. ``guardrail_judge`` is normalized whether the
+    registry stored a single string or a list.
     """
     gc = goal_config or {}
 
-    def _val(key: str, fallback: Any) -> Any:
+    def _val(key: str, neutral: Any) -> Any:
         v = gc.get(key)
-        return fallback if v is None or v == "" else v
-
-    guard = gc.get("guardrail_judge")
-    if guard is None or guard == "":
-        guardrail_specs = [s for s in (args.guardrail_judge or []) if s.strip()]
-    elif isinstance(guard, str):
-        guardrail_specs = [guard]
-    else:  # a list/tuple of specs
-        guardrail_specs = [str(s) for s in guard if str(s).strip()]
+        return neutral if v is None or v == "" else v
 
     return {
-        "objective_metric": str(_val("objective_metric", args.objective_metric)),
-        "goal_direction": str(_val("goal_direction", args.goal_direction)),
-        "goal_target": float(_val("goal_target", args.goal_target)),
-        "goal_target_kind": str(_val("goal_target_kind", args.goal_target_kind)),
-        "guardrail_specs": guardrail_specs,
+        "objective_metric": str(_val("objective_metric", _NEUTRAL_OBJECTIVE_METRIC)),
+        "goal_direction": str(_val("goal_direction", _NEUTRAL_GOAL_DIRECTION)),
+        "goal_target": float(_val("goal_target", _NEUTRAL_GOAL_TARGET)),
+        "goal_target_kind": str(_val("goal_target_kind", _NEUTRAL_GOAL_TARGET_KIND)),
+        "guardrail_specs": _normalize_guardrail_specs(gc.get("guardrail_judge")),
         "cohort": cohort,
     }
 
@@ -209,24 +236,24 @@ def _run_rlm_for(
     *,
     experiment: str,
     reviewer_experiment: str | None,
-    goal_config: dict[str, Any] | None,
-    cohort: str,
+    knobs: dict[str, Any],
 ) -> int:
     """Run one bounded RLM pass over ``experiment`` — the reused single-agent body.
 
-    Goal-steering resolves from ``goal_config`` (the agent's own knobs) with the args
-    as the fallback, so each agent is reviewed against ITS objective. Idempotency /
-    sampling / the failed-review marker all live in :func:`run_continuous_rlm`
-    unchanged and are per-experiment, so one agent's pass never touches another's.
+    ``knobs`` are the already-resolved goal knobs for this review: from the args in the
+    single-agent path (:func:`_knobs_from_args`) or from the agent's OWN ``goal_config``
+    in registry mode (:func:`_knobs_from_goal_config`) — never a merge, so a registry
+    agent cannot inherit the global goal. Idempotency / sampling / the failed-review
+    marker all live in :func:`run_continuous_rlm` unchanged and are per-experiment, so
+    one agent's pass never touches another's.
     """
-    knobs = _resolve_goal_knobs(args, goal_config=goal_config, cohort=cohort)
     rubric = _build_rubric(knobs)
     # Normalize the effort input HERE (the CLI/job boundary): empty / 'none' / 'auto'
     # mean "no override, auto-resolve" and must become None rather than a literal effort
     # injected into HALO. build_engine_config re-applies this defensively.
     reasoning_effort = normalize_reasoning_effort(args.reasoning_effort)
     print(
-        f"[ail.jobs.continuous_rlm] experiment={experiment} cohort={cohort} "
+        f"[ail.jobs.continuous_rlm] experiment={experiment} cohort={knobs['cohort']} "
         f"judge_model={args.judge_model} reasoning_effort={reasoning_effort or 'auto'} "
         f"rubric={rubric.rubric_id} sample_rate={args.sample_rate} "
         f"max_reviews={args.max_reviews}"
@@ -265,13 +292,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.experiment:
         # Single-agent override: review JUST this experiment with the args' goal knobs
-        # (goal_config=None => the args are the goal source, as before).
+        # (the args are the legitimate, operator-chosen goal source here).
         return _run_rlm_for(
             args,
             experiment=args.experiment,
             reviewer_experiment=args.reviewer_experiment or None,
-            goal_config=None,
-            cohort=args.agent,
+            knobs=_knobs_from_args(args, cohort=args.agent),
         )
 
     # Registry mode: review every agent in agent_registry, each with its own goal.
@@ -290,12 +316,14 @@ def main(argv: list[str] | None = None) -> int:
         return _run_rlm_for(
             args,
             experiment=agent.experiment_id,
-            # The reviewer's own traces land in (and are skipped from) the agent's
-            # experiment — preserving the old single-agent binding (reviewer=experiment)
-            # per agent. An explicit --reviewer-experiment still overrides.
-            reviewer_experiment=args.reviewer_experiment or agent.experiment_id,
-            goal_config=agent.goal_config,
-            cohort=agent.agent_name,
+            # The reviewer's own traces land in (and are skipped from) the agent's OWN
+            # experiment. In registry mode the global --reviewer-experiment is ignored
+            # (defense-in-depth: never let a global binding leak across agents; the yml
+            # already drops it).
+            reviewer_experiment=agent.experiment_id,
+            # The agent's OWN goal_config is the SOLE goal source — no fallback to the
+            # global args, so no cross-agent objective leak.
+            knobs=_knobs_from_goal_config(agent.goal_config, cohort=agent.agent_name),
         )
 
     result = run_for_each_registered_agent(agents, per_agent, job_name="ail.jobs.continuous_rlm")

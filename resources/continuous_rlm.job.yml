@@ -68,15 +68,13 @@ resources:
               sample-rate: ${var.rlm_sample_rate}
               min-tokens: ${var.rlm_min_tokens}
               max-turns: ${var.rlm_max_turns}
-              # Goal-steering GLOBAL FALLBACK: each agent's per-agent goal_config in the
-              # registry takes precedence; these bundle vars apply only to an agent with
-              # NO goal_config configured. Empty objective-metric => the default
-              # five-guideline rubric (no goal).
-              objective-metric: ${var.objective_metric}
-              goal-direction: ${var.goal_direction}
-              goal-target: ${var.goal_target}
-              goal-target-kind: ${var.goal_target_kind}
-              guardrail-judge: ${var.guardrail_judge}
+              # NO global goal-steering vars here. Registry mode steers each agent ONLY
+              # by its OWN goal_config in agent_registry (an agent with none uses the
+              # neutral default rubric — no goal). Passing a global objective-metric
+              # here would leak the operator's objective onto every un-configured agent
+              # (a cross-agent mis-attribution), so it is intentionally NOT bound. The
+              # single-agent override (--experiment ... --objective-metric ...) is the
+              # only place the global goal args apply, and the schedule never uses it.
               # Empty by default -> the entrypoint mints a short-lived bearer from the
               # run-as identity. Set both to read a stored token from a secret scope
               # (production-hardened service-principal path).

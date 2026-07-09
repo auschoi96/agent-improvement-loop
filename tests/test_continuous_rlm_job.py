@@ -199,7 +199,7 @@ def test_registry_mode_threads_each_agents_experiment_and_goal(
         "load_registered_agents",
         lambda **kw: [
             _agent("a1", "EXP_A", goal_config={"objective_metric": "total_tokens"}),
-            _agent("a2", "EXP_B"),  # no goal_config -> falls back to args/default rubric
+            _agent("a2", "EXP_B"),  # no goal_config -> NEUTRAL default rubric (no leak)
         ],
     )
 
@@ -210,11 +210,101 @@ def test_registry_mode_threads_each_agents_experiment_and_goal(
     assert [c["experiment_id"] for c in calls] == ["EXP_A", "EXP_B"]
     # Agent a1 was reviewed against ITS objective (total_tokens), not a shared global.
     assert calls[0]["rubric"].rubric_id == "ail.l3.goal/total_tokens-minimize/v1"
-    # Agent a2 has no goal_config and no --objective-metric => the default rubric.
+    # Agent a2 has no goal_config => the neutral default rubric.
     assert calls[1]["rubric"] is DEFAULT_RUBRIC
     # The reviewer's own traces land in each agent's own experiment (per-agent skip).
     assert calls[0]["reviewer_experiment_id"] == "EXP_A"
     assert calls[1]["reviewer_experiment_id"] == "EXP_B"
+
+
+def test_registry_mode_does_not_leak_global_goal_args_onto_agents(
+    registry_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # BLOCKER-1 REGRESSION: even when a GLOBAL goal is passed on the CLI (as the
+    # deployed bundle does via ${var.objective_metric} etc.), a registry agent with
+    # NO goal_config must get the NEUTRAL default rubric — NOT a rubric built from the
+    # leftover global objective. An agent WITH its own goal_config gets its own.
+    monkeypatch.setattr(
+        job,
+        "load_registered_agents",
+        lambda **kw: [
+            _agent("a1", "EXP_A"),  # no goal_config
+            _agent("a2", "EXP_B", goal_config={"objective_metric": "total_tokens"}),
+        ],
+    )
+
+    rc = job.main(
+        [
+            "--warehouse-id=wh",
+            "--catalog=cat",
+            "--schema=sch",
+            # A global goal that MUST NOT leak onto un-configured registry agents.
+            "--objective-metric=total_tokens",
+            "--goal-direction=minimize",
+            "--goal-target=-0.30",
+            "--guardrail-judge=correctness:4",
+            "--reviewer-experiment=GLOBAL_REVIEWER",
+        ]
+    )
+    assert rc == 0
+
+    calls = registry_capture["calls"]
+    # a1 has no goal_config -> NEUTRAL default rubric, NOT the global total_tokens goal.
+    assert calls[0]["rubric"] is DEFAULT_RUBRIC
+    # a2 keeps its own goal.
+    assert calls[1]["rubric"].rubric_id == "ail.l3.goal/total_tokens-minimize/v1"
+    # Defense-in-depth: the global --reviewer-experiment is ignored in registry mode;
+    # each agent's reviewer traces go to its OWN experiment.
+    assert calls[0]["reviewer_experiment_id"] == "EXP_A"
+    assert calls[1]["reviewer_experiment_id"] == "EXP_B"
+
+
+def test_registry_partial_goal_config_uses_neutral_defaults_not_global(
+    registry_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A partial goal_config (objective set, direction/target unset) uses NEUTRAL
+    # framework defaults for the unset knobs — never the global CLI args.
+    monkeypatch.setattr(
+        job,
+        "load_registered_agents",
+        lambda **kw: [_agent("a1", "EXP_A", goal_config={"objective_metric": "total_tokens"})],
+    )
+    rc = job.main(
+        [
+            "--warehouse-id=wh",
+            "--catalog=cat",
+            "--schema=sch",
+            # Global direction=maximize must NOT override the agent's unset direction.
+            "--objective-metric=total_cost",
+            "--goal-direction=maximize",
+        ]
+    )
+    assert rc == 0
+    # neutral direction is 'minimize' (framework default), NOT the global 'maximize'.
+    assert (
+        registry_capture["calls"][0]["rubric"].rubric_id == "ail.l3.goal/total_tokens-minimize/v1"
+    )
+
+
+def test_single_agent_mode_still_honors_global_goal_args(
+    registry_capture: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The single-agent override path: the args ARE the legitimate goal source.
+    monkeypatch.setattr(
+        job, "load_registered_agents", lambda **kw: pytest.fail("must not read registry")
+    )
+    rc = job.main(
+        [
+            "--experiment=EXP_SOLO",
+            "--warehouse-id=wh",
+            "--objective-metric=total_tokens",
+            "--goal-direction=minimize",
+        ]
+    )
+    assert rc == 0
+    calls = registry_capture["calls"]
+    assert calls[0]["experiment_id"] == "EXP_SOLO"
+    assert calls[0]["rubric"].rubric_id == "ail.l3.goal/total_tokens-minimize/v1"
 
 
 def test_registry_mode_isolation_one_agent_failure_continues(
