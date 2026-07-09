@@ -901,13 +901,54 @@ def _json_or_none(value: Any) -> Any:
     return json.loads(text)
 
 
+#: How long to poll a PENDING/RUNNING registry read before failing closed. A stuck
+#: or unavailable warehouse must never hang the caller indefinitely; on exceeding
+#: this budget the read raises a hard :class:`RuntimeError` (never
+#: :class:`_RegistryTableMissing`, so it is never swallowed to an empty registry).
+#: :func:`ail.publish._execute` polls without a deadline; this read tier adds one
+#: because a job or the local companion may call it interactively.
+_QUERY_TIMEOUT_SECONDS = 120.0
+#: Delay between ``get_statement`` polls while the statement is PENDING/RUNNING.
+_QUERY_POLL_INTERVAL_SECONDS = 1.0
+
+
+def _is_registry_table_missing(detail: str) -> bool:
+    """True only when ``detail`` unambiguously says the target ``agent_registry`` table is absent.
+
+    Fail-closed classifier: the caller swallows :class:`_RegistryTableMissing` to an
+    empty registry, so this must NOT match a warehouse / catalog / schema /
+    permission failure — e.g. "warehouse ... cannot be found" or "catalog X does not
+    exist" must propagate as a hard error, not read as "no agents registered".
+
+    So we require BOTH the specific Databricks error condition
+    ``TABLE_OR_VIEW_NOT_FOUND`` (whether bracketed as ``[TABLE_OR_VIEW_NOT_FOUND]``
+    or not) AND the target table name in the message — the loose "does not exist" /
+    "cannot be found" substrings are deliberately NOT used. (The SDK's structured
+    ``error_code`` is only the coarse ``NOT_FOUND``, which cannot distinguish a
+    missing table from a missing warehouse/catalog, so the error condition in the
+    message is the reliable signal.)
+    """
+    if "TABLE_OR_VIEW_NOT_FOUND" not in detail.upper():
+        return False
+    return REGISTRY_TABLE.lower() in detail.lower()
+
+
 def _query_registry_rows(client: Any, warehouse_id: str, statement: str) -> list[dict[str, Any]]:
     """Run a SELECT and return rows as ``{column: value}`` dicts.
 
     Mirrors the statement-execution wait loop used across the framework
-    (:func:`ail.publish._execute`), but reads the result set. A "table/view not
-    found" failure is raised as :class:`_RegistryTableMissing` (a fresh workspace,
-    not a real error); any other non-success is a hard :class:`RuntimeError`.
+    (:func:`ail.publish._execute`), but reads the result set — and adds two
+    fail-closed guards so a real infra failure is never mistaken for an empty
+    registry:
+
+    * A genuine **agent_registry table not found** (:func:`_is_registry_table_missing`)
+      raises :class:`_RegistryTableMissing` — the ONE condition the caller may treat
+      as an empty registry (a fresh workspace before the first publish).
+    * A **stuck / unavailable warehouse** (still PENDING/RUNNING past
+      :data:`_QUERY_TIMEOUT_SECONDS`) raises a hard :class:`RuntimeError` — it never
+      hangs indefinitely and never returns ``[]``.
+    * Any **other** non-success (permission, warehouse/catalog/schema missing, ...)
+      raises a hard :class:`RuntimeError` — never swallowed.
     """
     import time
 
@@ -918,21 +959,32 @@ def _query_registry_rows(client: Any, warehouse_id: str, statement: str) -> list
     )
     statement_id = resp.statement_id
     state = resp.status.state if resp.status else None
+    deadline = time.monotonic() + _QUERY_TIMEOUT_SECONDS
     while state in (StatementState.PENDING, StatementState.RUNNING):
-        time.sleep(1.0)
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"registry read did not complete within {_QUERY_TIMEOUT_SECONDS:.0f}s "
+                f"(last state={state}); a stuck/unavailable warehouse fails closed rather "
+                f"than returning an empty registry. SQL head: {statement[:200]}"
+            )
+        time.sleep(_QUERY_POLL_INTERVAL_SECONDS)
         resp = client.statement_execution.get_statement(statement_id)
         state = resp.status.state if resp.status else None
     if state != StatementState.SUCCEEDED:
         detail = ""
         if resp.status and resp.status.error:
             detail = resp.status.error.message or ""
-        low = detail.lower()
-        if "table_or_view_not_found" in low or "does not exist" in low or "cannot be found" in low:
+        if _is_registry_table_missing(detail):
             raise _RegistryTableMissing(detail)
         raise RuntimeError(f"statement {state}: {detail}\nSQL head: {statement[:200]}")
 
     manifest = resp.manifest
     columns = [c.name for c in manifest.schema.columns] if manifest and manifest.schema else []
+    # First result chunk only. The registry is a handful of tiny rows (one per
+    # registered agent), far under the inline result-size limit, so the whole result
+    # arrives in a single chunk — there is no next-chunk link to follow. (Same
+    # assumption as ail.onboarding.service._query_rows and
+    # ail.jobs.bootstrap_tables._read_rows, which read agent-scale tables.)
     data = resp.result.data_array if resp.result and resp.result.data_array else []
     return [dict(zip(columns, row, strict=False)) for row in data]
 
