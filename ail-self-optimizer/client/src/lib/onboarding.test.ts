@@ -15,6 +15,7 @@ import {
   confirmRequirementsBody,
   freshnessMessage,
   creationMessage,
+  creationDetails,
   registerMessage,
   requirementsPlanView,
   previewRequirementsMessage,
@@ -173,6 +174,32 @@ describe('creationMessage — honest, surfaces the prerequisite', () => {
     });
     expect(msg.tone).toBe('error');
     expect(msg.text).toMatch(/experiment-create authority/);
+  });
+});
+
+describe('creationDetails — url+hint relayed VERBATIM from Python (no workspace value in TS)', () => {
+  it('passes the Python-provided url and hint through unchanged on a real creation', () => {
+    // An arbitrary workspace host a TS constant could not plausibly be — it must come
+    // from Python, proving the UI renders (not fabricates) the deep-link + snippet.
+    const url = 'https://arbitrary-workspace-9f3.cloud.databricks.example/ml/experiments/exp-42';
+    const hint = "mlflow.set_experiment(experiment_id='exp-42')  # then enable autolog";
+    const details = creationDetails({
+      outcome: 'created',
+      experiment_id: 'exp-42',
+      experiment_url: url,
+      tracing_hint: hint,
+    });
+    expect(details).toEqual({ url, hint });
+  });
+
+  it('is null unless the creation succeeded — never fabricates a link', () => {
+    expect(creationDetails({ outcome: 'error', error: 'denied' })).toBeNull();
+    expect(creationDetails({ outcome: 'refused', refused_reason: 'anonymous' })).toBeNull();
+  });
+
+  it('tolerates an absent url/hint (host unresolvable server-side) with empty strings', () => {
+    // Still no TS-authored value: an unresolvable host reads back as '' from Python.
+    expect(creationDetails({ outcome: 'created', experiment_id: 'exp-9' })).toEqual({ url: '', hint: '' });
   });
 });
 

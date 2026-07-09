@@ -86,6 +86,12 @@ export interface CreationResponse {
   outcome: 'created' | 'error' | 'refused';
   experiment_id?: string;
   name?: string;
+  // Python-composed, rendered VERBATIM (two-tier). The full workspace deep-link of
+  // the created experiment ('' when the host could not be resolved) and a copy-paste
+  // tracing snippet. The client builds NEITHER — no host, path, or snippet is
+  // constructed in TS (a workspace value in TS would break reusability).
+  experiment_url?: string;
+  tracing_hint?: string;
   error?: string | null;
   prerequisite?: string | null;
   refused_reason?: string | null;
@@ -435,6 +441,21 @@ export function resolvedFromCreation(resp: CreationResponse): ResolvedExperiment
     return { experiment_id: resp.experiment_id, name: resp.name ?? '', fresh: true };
   }
   return null;
+}
+
+// The ready-to-use details of a freshly CREATED experiment, relayed VERBATIM from
+// Python (two-tier): the workspace deep-link and the tracing snippet. Null unless the
+// creation actually succeeded — never a fabricated link. The client authors NEITHER
+// string: no host, path, or snippet is constructed in TS. An absent url/hint (e.g. the
+// host was unresolvable server-side) reads back as '' — still no TS-authored value.
+export interface CreationDetails {
+  url: string;
+  hint: string;
+}
+
+export function creationDetails(resp: CreationResponse): CreationDetails | null {
+  if (resp.outcome !== 'created') return null;
+  return { url: resp.experiment_url ?? '', hint: resp.tracing_hint ?? '' };
 }
 
 // ---------------------------------------------------------------------------
