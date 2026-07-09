@@ -526,6 +526,9 @@ REGISTRY_COLUMNS: list[str] = [
     "description",
     "judge_config_json",
     "tag_filter_json",
+    "goal_config_json",
+    "annotations_table",
+    "target_workspace",
     "generated_at",
 ]
 
@@ -598,6 +601,9 @@ def _registry_row(agent: Agent, *, generated_at: str | None) -> list[Any]:
         agent.description,
         json.dumps(agent.judge_config) if agent.judge_config is not None else None,
         json.dumps(agent.tag_filter) if agent.tag_filter is not None else None,
+        json.dumps(agent.goal_config) if agent.goal_config is not None else None,
+        agent.annotations_table,
+        agent.target_workspace,
         generated_at,
     ]
 
@@ -685,12 +691,24 @@ def _ddl(catalog: str, schema: str) -> list[str]:
     return [
         f"CREATE SCHEMA IF NOT EXISTS {fqn} "
         "COMMENT 'Agent self-optimization loop: L0 deterministic metrics (Tier A).'",
+        # MIGRATION NOTE (existing deployments): this is CREATE TABLE IF NOT EXISTS, so
+        # the goal_config_json / annotations_table / target_workspace columns are NOT
+        # added to a pre-existing agent_registry by this CREATE. The bootstrap's additive
+        # reconcile (ail.jobs.bootstrap_tables.reconcile_app_table_columns) diffs this
+        # declared schema against the live table and emits the ALTER ... ADD COLUMNS
+        # before anything reads them:
+        #     ALTER TABLE <catalog>.<schema>.agent_registry
+        #         ADD COLUMNS (goal_config_json STRING, annotations_table STRING,
+        #                      target_workspace STRING);
         f"""CREATE TABLE IF NOT EXISTS {fqn}.{REGISTRY_TABLE} (
             agent_name STRING,
             experiment_id STRING,
             description STRING,
             judge_config_json STRING,
             tag_filter_json STRING,
+            goal_config_json STRING,
+            annotations_table STRING,
+            target_workspace STRING,
             generated_at STRING
         ) USING DELTA
         COMMENT 'Agent registry: agent_name -> dedicated MLflow experiment (+ optional config).'""",
@@ -793,6 +811,182 @@ def publish_registry(
             f"agent_name = {_lit(agent.agent_name)}",
         )
     return len(registry.agents)
+
+
+# ---------------------------------------------------------------------------
+# Registry read-back — the SINGLE source of truth, as fully-typed Agent objects
+# ---------------------------------------------------------------------------
+
+
+class _RegistryTableMissing(RuntimeError):
+    """The ``agent_registry`` table does not exist yet (fresh workspace)."""
+
+
+def load_registered_agents_full(
+    *,
+    client: Any,
+    warehouse_id: str,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+) -> list[Agent]:
+    """Read every registered agent back from ``agent_registry`` as a typed :class:`Agent`.
+
+    The symmetric read of :func:`publish_registry`: it ``SELECT *``s the registry
+    table and reconstructs fully-typed :class:`~ail.registry.Agent` objects carrying
+    every field a per-agent job or the local companion needs — the goal config, the
+    annotations table, the target workspace, the judge config, and the tag filter.
+    Both the job entrypoints and the companion read the single source of truth
+    through this one helper (it lives here, not in the heavier onboarding service, so
+    either side can import it without the wizard's dependency chain).
+
+    Robust to a real, evolving deployment, and it never fabricates a value:
+
+    * A **not-yet-created** table (fresh workspace, no publish yet) is an empty
+      registry (``[]``), not an error. Any *other* read failure (permission,
+      warehouse down) propagates so a caller fails closed rather than treating
+      "cannot read" as "no agents".
+    * An **old row** written before the ``goal_config_json`` / ``annotations_table``
+      / ``target_workspace`` columns existed — or a migrated table whose old rows
+      carry ``NULL`` there — reconstructs cleanly: the absent value is ``None`` on
+      the ``Agent``, never a guessed default. ``SELECT *`` returns only the columns
+      that physically exist, so a pre-migration table simply yields no such keys and
+      ``dict.get`` returns ``None``.
+    * A row missing the primary ``agent_name`` / ``experiment_id`` cannot form a
+      valid ``Agent`` and is skipped rather than fabricated.
+    """
+    fqn = f"`{catalog}`.`{schema}`.{REGISTRY_TABLE}"
+    try:
+        rows = _query_registry_rows(client, warehouse_id, f"SELECT * FROM {fqn}")
+    except _RegistryTableMissing:
+        return []
+    agents: list[Agent] = []
+    for row in rows:
+        name = row.get("agent_name")
+        exp = row.get("experiment_id")
+        if not name or not exp:
+            continue  # unreconstructable row — never fabricate a primary key
+        description = row.get("description")
+        agents.append(
+            Agent(
+                agent_name=str(name),
+                experiment_id=str(exp),
+                description="" if description is None else str(description),
+                judge_config=_json_or_none(row.get("judge_config_json")),
+                goal_config=_json_or_none(row.get("goal_config_json")),
+                annotations_table=_str_or_none(row.get("annotations_table")),
+                tag_filter=_json_or_none(row.get("tag_filter_json")),
+                target_workspace=_str_or_none(row.get("target_workspace")),
+            )
+        )
+    return agents
+
+
+def _str_or_none(value: Any) -> str | None:
+    """A live cell as a plain string, or ``None`` when absent — never fabricated."""
+    return None if value is None else str(value)
+
+
+def _json_or_none(value: Any) -> Any:
+    """Parse a JSON string cell back to its structure; ``None``/empty stays ``None``.
+
+    The symmetric inverse of the ``json.dumps(...)`` write in :func:`_registry_row`.
+    A ``NULL`` / absent / empty cell is "not configured" (``None``); a genuinely
+    malformed non-empty JSON value raises loud rather than fabricating a structure.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return json.loads(text)
+
+
+#: How long to poll a PENDING/RUNNING registry read before failing closed. A stuck
+#: or unavailable warehouse must never hang the caller indefinitely; on exceeding
+#: this budget the read raises a hard :class:`RuntimeError` (never
+#: :class:`_RegistryTableMissing`, so it is never swallowed to an empty registry).
+#: :func:`ail.publish._execute` polls without a deadline; this read tier adds one
+#: because a job or the local companion may call it interactively.
+_QUERY_TIMEOUT_SECONDS = 120.0
+#: Delay between ``get_statement`` polls while the statement is PENDING/RUNNING.
+_QUERY_POLL_INTERVAL_SECONDS = 1.0
+
+
+def _is_registry_table_missing(detail: str) -> bool:
+    """True only when ``detail`` unambiguously says the target ``agent_registry`` table is absent.
+
+    Fail-closed classifier: the caller swallows :class:`_RegistryTableMissing` to an
+    empty registry, so this must NOT match a warehouse / catalog / schema /
+    permission failure — e.g. "warehouse ... cannot be found" or "catalog X does not
+    exist" must propagate as a hard error, not read as "no agents registered".
+
+    So we require BOTH the specific Databricks error condition
+    ``TABLE_OR_VIEW_NOT_FOUND`` (whether bracketed as ``[TABLE_OR_VIEW_NOT_FOUND]``
+    or not) AND the target table name in the message — the loose "does not exist" /
+    "cannot be found" substrings are deliberately NOT used. (The SDK's structured
+    ``error_code`` is only the coarse ``NOT_FOUND``, which cannot distinguish a
+    missing table from a missing warehouse/catalog, so the error condition in the
+    message is the reliable signal.)
+    """
+    if "TABLE_OR_VIEW_NOT_FOUND" not in detail.upper():
+        return False
+    return REGISTRY_TABLE.lower() in detail.lower()
+
+
+def _query_registry_rows(client: Any, warehouse_id: str, statement: str) -> list[dict[str, Any]]:
+    """Run a SELECT and return rows as ``{column: value}`` dicts.
+
+    Mirrors the statement-execution wait loop used across the framework
+    (:func:`ail.publish._execute`), but reads the result set — and adds two
+    fail-closed guards so a real infra failure is never mistaken for an empty
+    registry:
+
+    * A genuine **agent_registry table not found** (:func:`_is_registry_table_missing`)
+      raises :class:`_RegistryTableMissing` — the ONE condition the caller may treat
+      as an empty registry (a fresh workspace before the first publish).
+    * A **stuck / unavailable warehouse** (still PENDING/RUNNING past
+      :data:`_QUERY_TIMEOUT_SECONDS`) raises a hard :class:`RuntimeError` — it never
+      hangs indefinitely and never returns ``[]``.
+    * Any **other** non-success (permission, warehouse/catalog/schema missing, ...)
+      raises a hard :class:`RuntimeError` — never swallowed.
+    """
+    import time
+
+    from databricks.sdk.service.sql import StatementState
+
+    resp = client.statement_execution.execute_statement(
+        warehouse_id=warehouse_id, statement=statement, wait_timeout="50s"
+    )
+    statement_id = resp.statement_id
+    state = resp.status.state if resp.status else None
+    deadline = time.monotonic() + _QUERY_TIMEOUT_SECONDS
+    while state in (StatementState.PENDING, StatementState.RUNNING):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"registry read did not complete within {_QUERY_TIMEOUT_SECONDS:.0f}s "
+                f"(last state={state}); a stuck/unavailable warehouse fails closed rather "
+                f"than returning an empty registry. SQL head: {statement[:200]}"
+            )
+        time.sleep(_QUERY_POLL_INTERVAL_SECONDS)
+        resp = client.statement_execution.get_statement(statement_id)
+        state = resp.status.state if resp.status else None
+    if state != StatementState.SUCCEEDED:
+        detail = ""
+        if resp.status and resp.status.error:
+            detail = resp.status.error.message or ""
+        if _is_registry_table_missing(detail):
+            raise _RegistryTableMissing(detail)
+        raise RuntimeError(f"statement {state}: {detail}\nSQL head: {statement[:200]}")
+
+    manifest = resp.manifest
+    columns = [c.name for c in manifest.schema.columns] if manifest and manifest.schema else []
+    # First result chunk only. The registry is a handful of tiny rows (one per
+    # registered agent), far under the inline result-size limit, so the whole result
+    # arrives in a single chunk — there is no next-chunk link to follow. (Same
+    # assumption as ail.onboarding.service._query_rows and
+    # ail.jobs.bootstrap_tables._read_rows, which read agent-scale tables.)
+    data = resp.result.data_array if resp.result and resp.result.data_array else []
+    return [dict(zip(columns, row, strict=False)) for row in data]
 
 
 def publish_version_bundle(
