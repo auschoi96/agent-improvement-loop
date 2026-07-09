@@ -23,6 +23,13 @@ export interface OnboardingAction {
   requirements_text?: string;
   objective_target?: number;
   cohort?: string;
+  // Extended registry fields for register_agent (Slice 4). The engine sets them on
+  // the persisted Agent and validates their types fail-closed. `goal_config` is the
+  // requirements-confirmed goal (opaque here — relayed verbatim); the two others are
+  // the executor's target workspace and the memory job's annotations table.
+  goal_config?: Record<string, unknown>;
+  annotations_table?: string;
+  target_workspace?: string;
 }
 
 // The JSON ail.onboarding.service prints — a typed onboarding result. Kept open

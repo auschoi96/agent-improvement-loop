@@ -88,6 +88,51 @@ describe('request builders — trim, correct shape, no actor', () => {
     expect(body).toEqual({ agent_name: 'my_agent', experiment_id: 'exp-1', goals: ['accuracy', 'cost'] });
     expect('actor' in body).toBe(false);
   });
+
+  it('threads the executor workspace + memory table (trimmed), never an actor', () => {
+    const body = registerBody('my_agent', 'exp-1', ['cost'], {
+      targetWorkspace: '  /Workspace/Repos/me/my_agent ',
+      annotationsTable: ' catalog.schema.otel_annotations ',
+    });
+    expect(body).toEqual({
+      agent_name: 'my_agent',
+      experiment_id: 'exp-1',
+      goals: ['cost'],
+      target_workspace: '/Workspace/Repos/me/my_agent',
+      annotations_table: 'catalog.schema.otel_annotations',
+    });
+    expect('actor' in body).toBe(false);
+  });
+
+  it('threads a requirements-confirmed goal_config verbatim when present', () => {
+    const goalConfig = {
+      objective_metric: 'no_hallucinated_tool_calls',
+      goal_direction: 'maximize',
+      goal_target: 0.25,
+      goal_target_kind: 'relative',
+      guardrail_judge: ['no_hallucinated_tool_calls:4.0'],
+    };
+    const body = registerBody('my_agent', 'exp-1', ['cost'], { goalConfig });
+    expect(body.goal_config).toEqual(goalConfig);
+  });
+
+  it('omits blank/absent extended fields so Python persists them as None (back-compat)', () => {
+    const blank = registerBody('my_agent', 'exp-1', ['cost'], {
+      targetWorkspace: '   ',
+      annotationsTable: '',
+      goalConfig: null,
+    });
+    expect(blank).toEqual({ agent_name: 'my_agent', experiment_id: 'exp-1', goals: ['cost'] });
+    expect('target_workspace' in blank).toBe(false);
+    expect('annotations_table' in blank).toBe(false);
+    expect('goal_config' in blank).toBe(false);
+    // No extras at all is byte-for-byte the pre-Slice-4 shape.
+    expect(registerBody('my_agent', 'exp-1', ['cost'])).toEqual({
+      agent_name: 'my_agent',
+      experiment_id: 'exp-1',
+      goals: ['cost'],
+    });
+  });
 });
 
 describe('freshnessMessage — honest verdict', () => {

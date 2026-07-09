@@ -151,6 +151,11 @@ export interface RequirementsConfirmResponse {
   objective_target?: number | null;
   authored_judges?: string[];
   persisted?: boolean;
+  // The confirmed goal, serialized by Python to the registry `goal_config` shape (the
+  // keys the continuous-RLM lane reads). The wizard threads this onto the register
+  // payload so a requirements-confirmed goal steers the loop; null on non-success.
+  // Opaque here (two-tier: Python owns the goal knobs) — relayed verbatim, never built.
+  goal_config?: Record<string, unknown> | null;
   refused_reason?: string | null;
   error?: string | null;
 }
@@ -210,6 +215,16 @@ export interface WizardState {
   goals: string[];
   accepted: boolean;
   agentName: string;
+  // The repo/path the open-ended executor edits — REQUIRED for the executor to run
+  // this agent (an AGENT_TASK against an agent with no target_workspace fails closed).
+  targetWorkspace: string;
+  // The fully-qualified OTEL annotations table the memory-distiller job reads —
+  // REQUIRED for the memory job (it skips an agent with no annotations_table).
+  annotationsTable: string;
+  // The confirmed requirements goal in the registry goal_config shape, when the
+  // requirements path was used (else null → the catalog path, RLM neutral). Opaque:
+  // set verbatim from the confirm response, threaded onto register — never built here.
+  goalConfig: Record<string, unknown> | null;
 }
 
 export const initialWizardState: WizardState = {
@@ -221,6 +236,9 @@ export const initialWizardState: WizardState = {
   goals: [],
   accepted: false,
   agentName: '',
+  targetWorkspace: '',
+  annotationsTable: '',
+  goalConfig: null,
 };
 
 export function toggleGoal(goals: readonly string[], key: string): string[] {
@@ -278,15 +296,46 @@ export const validateExperimentBody = (experimentId: string): { experiment_id: s
 
 export const createExperimentBody = (name: string): { name: string } => ({ name: name.trim() });
 
+// The extended registry fields the wizard CAPTURES and threads onto the register
+// payload — never fabricated. `target_workspace` (executor) + `annotations_table`
+// (memory job) are what make the agent fully functional; `goal_config` is the
+// requirements-confirmed goal (opaque — relayed verbatim from Python, never built in
+// TS). All optional; the actor is NEVER sent (the server resolves it authenticated).
+export interface RegisterExtras {
+  targetWorkspace?: string;
+  annotationsTable?: string;
+  goalConfig?: Record<string, unknown> | null;
+}
+
+export interface RegisterBody {
+  agent_name: string;
+  experiment_id: string;
+  goals: string[];
+  target_workspace?: string;
+  annotations_table?: string;
+  goal_config?: Record<string, unknown>;
+}
+
 export const registerBody = (
   agentName: string,
   experimentId: string,
-  goals: readonly string[]
-): { agent_name: string; experiment_id: string; goals: string[] } => ({
-  agent_name: agentName.trim(),
-  experiment_id: experimentId.trim(),
-  goals: [...goals],
-});
+  goals: readonly string[],
+  extras: RegisterExtras = {}
+): RegisterBody => {
+  const body: RegisterBody = {
+    agent_name: agentName.trim(),
+    experiment_id: experimentId.trim(),
+    goals: [...goals],
+  };
+  // Omit a blank/absent field so Python persists it as None (a
+  // registered-but-not-fully-functional agent) rather than an empty-string table/path.
+  const targetWorkspace = extras.targetWorkspace?.trim();
+  if (targetWorkspace) body.target_workspace = targetWorkspace;
+  const annotationsTable = extras.annotationsTable?.trim();
+  if (annotationsTable) body.annotations_table = annotationsTable;
+  if (extras.goalConfig) body.goal_config = extras.goalConfig;
+  return body;
+};
 
 export const previewRequirementsBody = (
   requirementsText: string,
