@@ -2,6 +2,15 @@
 
 ``python -m ail.companion`` — one local entrypoint for the companion roles.
 
+**Registry-driven (UC ``agent_registry``).** The companion resolves everything it needs
+about ``--agent`` from the UC ``agent_registry`` — the SAME table the app writes and the
+scheduled jobs read: the planner takes the agent's ``experiment_id`` from UC, and the
+executor takes its ``target_workspace`` from UC. So a UI-onboarded agent is driven by
+just ``--agent`` + the UC connection (``--warehouse-id`` / ``--catalog`` / ``--schema``).
+``--experiment`` (planner) and ``--registry`` YAML (executor) are optional LOCAL overrides
+for a checkout/manual run; each subcommand fails closed when neither the registry nor an
+override yields what it needs.
+
 This module is intentionally a thin CLI/orchestration layer. The work is delegated to
 the existing deployer-run modules:
 
@@ -168,7 +177,13 @@ def _poll_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--agent", default="claude_code")
-    parser.add_argument("--registry", default="config/agents.yaml")
+    parser.add_argument(
+        "--registry",
+        default=None,
+        help="LOCAL-DEV OVERRIDE only. By default the agent (incl. target_workspace) and the "
+        "planner experiment are resolved from the UC agent_registry. Pass a path to an EXISTING "
+        "registry YAML to resolve the executor's agent from that file instead.",
+    )
     parser.add_argument("--volume-root", default=os.environ.get("AIL_SNAPSHOT_VOLUME"))
     parser.add_argument("--host", default=os.environ.get("DATABRICKS_HOST"))
     parser.add_argument("--warehouse-id", default=os.environ.get("AIL_WAREHOUSE_ID"))
@@ -188,7 +203,12 @@ def _poll_parser() -> argparse.ArgumentParser:
         metavar="ITERATIONS",
         help="Run planner every N poll iterations; 0 disables planning in the loop.",
     )
-    parser.add_argument("--experiment", default=None, help="Planner experiment id.")
+    parser.add_argument(
+        "--experiment",
+        default=None,
+        help="Planner experiment id (optional local override). When omitted, the planner "
+        "resolves the experiment from the UC agent_registry by --agent; when given, it overrides.",
+    )
     # In-app opt-in Tier-2 "verify on my suite" (L9): each enabled tick, pick up the
     # proposals a reviewer flagged for a frozen-suite proof and run the EXISTING prover
     # (run_phase2_comparison) on them, writing the result back to UC keyed to the
@@ -240,8 +260,6 @@ def _executor_argv(args: argparse.Namespace) -> list[str]:
     argv: list[str] = [
         "--agent",
         args.agent,
-        "--registry",
-        args.registry,
         "--catalog",
         args.catalog,
         "--schema",
@@ -249,6 +267,9 @@ def _executor_argv(args: argparse.Namespace) -> list[str]:
         "--operator",
         args.operator,
     ]
+    # --registry is a LOCAL-DEV OVERRIDE: forward it only when the operator set one, so the
+    # executor's default (resolve from the UC agent_registry) is what runs otherwise.
+    _add_optional(argv, "--registry", args.registry)
     _add_optional(argv, "--volume-root", args.volume_root)
     _add_optional(argv, "--host", args.host)
     _add_optional(argv, "--warehouse-id", args.warehouse_id)
@@ -264,13 +285,13 @@ def _executor_argv(args: argparse.Namespace) -> list[str]:
 
 
 def _planner_argv(args: argparse.Namespace) -> list[str]:
-    if not args.experiment:
-        raise SystemExit("--experiment is required when --plan-every is enabled")
+    # Registry-driven: --experiment is OPTIONAL. When omitted, the planner resolves the
+    # experiment from the UC agent_registry by --agent (warehouse/catalog/schema are
+    # threaded below so it can); when given, it overrides. The planner itself fails closed
+    # if NEITHER an explicit experiment NOR a registry match yields one.
     argv: list[str] = [
         "--agent",
         args.agent,
-        "--experiment",
-        args.experiment,
         "--catalog",
         args.catalog,
         "--schema",
@@ -288,6 +309,7 @@ def _planner_argv(args: argparse.Namespace) -> list[str]:
         "--goal-confirmed",
         args.goal_confirmed,
     ]
+    _add_optional(argv, "--experiment", args.experiment)
     _add_optional(argv, "--host", args.host)
     _add_optional(argv, "--warehouse-id", args.warehouse_id)
     _add_optional(argv, "--planner-model", args.planner_model)

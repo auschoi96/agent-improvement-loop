@@ -25,6 +25,7 @@ from ail.readiness.contract import (
     ReadinessStatus,
     ReadinessTier,
 )
+from ail.registry import Agent
 
 
 def _args(argv_extra: list[str] | None = None):  # type: ignore[no-untyped-def]
@@ -41,6 +42,26 @@ def _args(argv_extra: list[str] | None = None):  # type: ignore[no-untyped-def]
         "true",
     ]
     return cp._parse_args(base + (argv_extra or []))
+
+
+def _args_no_experiment(argv_extra: list[str] | None = None):  # type: ignore[no-untyped-def]
+    """Args WITHOUT --experiment — the registry-driven default path."""
+    base = [
+        "--agent",
+        "claude_code",
+        "--warehouse-id",
+        "wh1",
+        "--host",
+        "https://example.databricks.com",
+        "--goal-confirmed",
+        "true",
+    ]
+    return cp._parse_args(base + (argv_extra or []))
+
+
+def _stub_ws_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neuter the workspace-client build so the UC-resolution path stays offline."""
+    monkeypatch.setattr("ail.publish._build_workspace_client", lambda *a, **k: object())
 
 
 def _ready() -> ReadinessStatus:
@@ -183,3 +204,116 @@ def test_run_real_publishes_the_pending_proposals(
     assert p.proof is None  # evidence-first: published with no frozen-suite proof
     out = capsys.readouterr().out
     assert "PUBLISHED 1 row(s)" in out
+
+
+# -- registry-driven experiment resolution ---------------------------------
+
+
+def _wire_ok_capture(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, object], list[object]]:
+    """Like ``_wire_ok`` but records the ``args.experiment`` the cycle actually ran against."""
+    seen: dict[str, object] = {}
+
+    def _fb(agent, args):  # type: ignore[no-untyped-def]
+        seen["experiment"] = args.experiment
+        return _redundant_bundle
+
+    monkeypatch.setattr(oc, "_default_feedback_source", _fb)
+    monkeypatch.setattr(oc, "_default_gate", lambda args: lambda *, goal, agent: _ready())
+    published: list[object] = []
+
+    def _sink(proposals, *, agent, args):  # type: ignore[no-untyped-def]
+        published.append(list(proposals))
+        return len(proposals)
+
+    monkeypatch.setattr(cp, "_publish", _sink)
+    return seen, published
+
+
+def test_run_resolves_experiment_from_uc_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # No --experiment: a UI-onboarded agent present ONLY in UC is plannable — its
+    # experiment comes from the UC agent_registry, and the cycle runs against it.
+    _stub_ws_client(monkeypatch)
+    calls: list[tuple[str, str, str, str]] = []
+
+    def _resolver(name, *, warehouse_id, catalog, schema, client=None):  # type: ignore[no-untyped-def]
+        calls.append((name, warehouse_id, catalog, schema))
+        return Agent(
+            agent_name=name,
+            experiment_id="exp-uc",
+            goal_config={"objective_metric": "answer_quality"},
+        )
+
+    monkeypatch.setattr(cp, "resolve_registered_agent", _resolver)
+    seen, published = _wire_ok_capture(monkeypatch)
+
+    code = cp.run(_args_no_experiment())
+    assert code == 0
+    # resolved from UC with the run's own connection args (no baked-in workspace)...
+    assert calls == [("claude_code", "wh1", cp.DEFAULT_CATALOG, cp.DEFAULT_SCHEMA)]
+    # ...and the cycle ran against the UC experiment, not a guessed/None value.
+    assert seen["experiment"] == "exp-uc"
+    assert len(published) == 1
+    out = capsys.readouterr().out
+    assert "experiment=exp-uc" in out
+    assert "experiment_source=uc-registry" in out
+
+
+def test_run_explicit_experiment_overrides_registry_no_uc_read(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # --experiment WINS and is a pure local override: the registry is never read.
+    def _must_not_read(*a, **k):  # type: ignore[no-untyped-def]
+        raise AssertionError("registry was read despite an explicit --experiment override")
+
+    monkeypatch.setattr(cp, "resolve_registered_agent", _must_not_read)
+    seen, published = _wire_ok_capture(monkeypatch)
+
+    code = cp.run(_args())  # _args() carries --experiment 660599403165942
+    assert code == 0
+    assert seen["experiment"] == "660599403165942"  # the explicit arg, unchanged
+    assert len(published) == 1
+    assert "experiment_source=explicit-arg" in capsys.readouterr().out
+
+
+def test_run_fails_closed_when_not_in_registry_and_no_experiment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # No --experiment AND the agent is not in the registry -> fail-closed, no publish,
+    # never plan against a guessed experiment.
+    _stub_ws_client(monkeypatch)
+
+    def _absent(name, **k):  # type: ignore[no-untyped-def]
+        raise KeyError(f"no agent named {name!r} in the UC agent_registry")
+
+    monkeypatch.setattr(cp, "resolve_registered_agent", _absent)
+    # neither the evidence nor the publish path may be reached
+    monkeypatch.setattr(
+        oc,
+        "_default_feedback_source",
+        lambda agent, args: (_ for _ in ()).throw(AssertionError("evidence read reached")),
+    )
+    published: list[object] = []
+    monkeypatch.setattr(cp, "_publish", lambda proposals, **k: published.append(proposals))
+
+    code = cp.run(_args_no_experiment())
+    assert code == 2
+    assert published == []
+    out = capsys.readouterr().out
+    assert "fail-closed" in out and "no guessed experiment" in out
+
+
+def test_run_registry_infra_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A real registry-read infra error is NOT swallowed to fail-closed — it propagates.
+    _stub_ws_client(monkeypatch)
+
+    def _boom(name, **k):  # type: ignore[no-untyped-def]
+        raise RuntimeError("warehouse unreachable")
+
+    monkeypatch.setattr(cp, "resolve_registered_agent", _boom)
+    with pytest.raises(RuntimeError, match="warehouse unreachable"):
+        cp.run(_args_no_experiment())

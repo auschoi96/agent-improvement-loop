@@ -36,6 +36,7 @@ __all__ = [
     "MultiAgentResult",
     "load_registered_agents",
     "missing_registry_target",
+    "resolve_registered_agent",
     "run_for_each_registered_agent",
 ]
 
@@ -162,6 +163,51 @@ def load_registered_agents(
     c = client if client is not None else _build_workspace_client(None)
     return load_registered_agents_full(
         client=c, warehouse_id=warehouse_id, catalog=catalog, schema=schema
+    )
+
+
+def resolve_registered_agent(
+    agent_name: str,
+    *,
+    warehouse_id: str,
+    catalog: str,
+    schema: str,
+    client: Any | None = None,
+) -> Agent:
+    """Resolve ONE registered agent by name from the UC ``agent_registry`` — the single
+    source of truth the app writes and the scheduled jobs read.
+
+    The read side the local companion (planner + executor) shares with the scheduled
+    multi-agent jobs, so a UI-onboarded agent — present ONLY in UC, never in any YAML —
+    is resolvable by name, carrying its ``experiment_id``, ``target_workspace``,
+    ``goal_config`` and the rest straight from UC (no local YAML, no CLI-arg guess).
+
+    Reuses the fail-closed :func:`load_registered_agents` unchanged, so the two
+    boundaries it inherits are preserved (see the module docstring):
+
+    * a real infra / permission / warehouse error PROPAGATES (never swallowed into
+      "no such agent"); and
+    * a genuinely **not-yet-created** registry table reads back as an empty registry.
+
+    FAIL-CLOSED on absence: if ``agent_name`` is not among the registered agents this
+    raises :class:`KeyError` — it NEVER fabricates a bare :class:`Agent` with a guessed
+    experiment / target_workspace. An empty registry (table absent) and "agent not in a
+    present table" are distinct states, and the error message names which one occurred,
+    but both fail closed here: there is nothing to resolve, so the caller must not plan
+    or execute against a guessed identity.
+    """
+    agents = load_registered_agents(
+        warehouse_id=warehouse_id, catalog=catalog, schema=schema, client=client
+    )
+    for agent in agents:
+        if agent.agent_name == agent_name:
+            return agent
+    fqn = f"{catalog}.{schema}.agent_registry"
+    have = ", ".join(a.agent_name for a in agents) or "<none — registry table absent or empty>"
+    raise KeyError(
+        f"no agent named {agent_name!r} in the UC agent_registry ({fqn}); registered: {have}. "
+        "Onboard it in the app (or publish the registry) before the companion can resolve it — "
+        "fail-closed: never a guessed experiment / target_workspace."
     )
 
 

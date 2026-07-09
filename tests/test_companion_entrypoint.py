@@ -140,6 +140,67 @@ def test_prove_returns_nonzero_for_blocked_or_errored(
     assert code == 2
 
 
+def _poll_args(extra: list[str]) -> argparse.Namespace:
+    return companion._poll_parser().parse_args(
+        ["--warehouse-id", "wh", "--volume-root", "/Volumes/c/s/v"] + extra
+    )
+
+
+def test_executor_argv_registry_is_optional() -> None:
+    # Default: no --registry forwarded -> the executor resolves from the UC agent_registry.
+    argv_default = companion._executor_argv(_poll_args([]))
+    assert "--registry" not in argv_default
+    # Explicit local-dev override is forwarded through.
+    argv_set = companion._executor_argv(_poll_args(["--registry", "config/agents.yaml"]))
+    assert argv_set[argv_set.index("--registry") + 1] == "config/agents.yaml"
+
+
+def test_planner_argv_experiment_is_optional_and_threads_uc_connection() -> None:
+    # Default: no --experiment forwarded -> the planner resolves it from the UC registry,
+    # and the UC connection args ARE threaded so it can read the registry.
+    argv_default = companion._planner_argv(_poll_args([]))
+    assert "--experiment" not in argv_default
+    assert argv_default[argv_default.index("--warehouse-id") + 1] == "wh"
+    assert "--catalog" in argv_default and "--schema" in argv_default
+    # Explicit experiment override is forwarded through.
+    argv_set = companion._planner_argv(_poll_args(["--experiment", "exp-1"]))
+    assert argv_set[argv_set.index("--experiment") + 1] == "exp-1"
+
+
+def test_poll_plan_every_without_experiment_defers_to_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Previously --plan-every without --experiment raised at argv construction; now it
+    # defers to the planner (registry-driven), which resolves or fails closed at runtime.
+    _auth_ok(monkeypatch)
+    monkeypatch.setattr(companion.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(companion.agent_executor, "run", lambda args: 0)
+    planner_calls: list[argparse.Namespace] = []
+    monkeypatch.setattr(
+        companion.companion_planner, "run", lambda args: planner_calls.append(args) or 0
+    )
+
+    code = companion.main(
+        [
+            "poll",
+            "--warehouse-id",
+            "wh",
+            "--volume-root",
+            "/Volumes/c/s/v",
+            "--max-iterations",
+            "1",
+            "--interval-seconds",
+            "0",
+            "--plan-every",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    assert len(planner_calls) == 1
+    assert planner_calls[0].experiment is None  # no explicit experiment -> registry-driven
+
+
 def test_poll_bounded_loop_runs_executor_and_planner_cadence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

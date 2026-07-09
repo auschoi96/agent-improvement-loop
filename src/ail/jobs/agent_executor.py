@@ -26,6 +26,14 @@ mid-run and cannot persist from a background process. It reuses the companion's
 pinned to ``DATABRICKS_HOST``, dropping any ambient ``DATABRICKS_CONFIG_PROFILE``,
 refusing to run without one.
 
+**Registry-driven (UC ``agent_registry``).** The agent — and with it the
+``target_workspace`` the executor edits — is resolved by name from the UC
+``agent_registry`` (the SAME table the app writes and the scheduled jobs read) via the
+shared :func:`ail.jobs.multi_agent.resolve_registered_agent`, so a UI-onboarded agent
+is visible to the companion. A ``--registry`` YAML is an explicit LOCAL-DEV override
+for a checkout with no UC registry yet; either way the executor fails closed against an
+agent with no ``target_workspace``.
+
 **Reuse, not reinvention.** The proposal read side is the *same* flat-row → proposal
 mapping lane 3b uses (:func:`ail.loop.apply_service._row_to_proposal` /
 ``_query_rows`` — the "apply_service reader"); the SQL primitives are
@@ -53,6 +61,7 @@ from ail.executor import (
     revert_committed_change,
 )
 from ail.jobs.companion_planner import resolve_static_auth
+from ail.jobs.multi_agent import resolve_registered_agent
 from ail.loop.apply_service import DECISIONS_TABLE, _query_rows, _row_to_proposal
 from ail.loop.proposals import ActionKind, ProposalStatus, ProposedAction
 from ail.loop.publish_proposals import PROPOSALS_TABLE
@@ -388,9 +397,36 @@ def _json_list(value: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_agent(agent_name: str, registry_path: str | None) -> Agent:
-    path = registry_path if registry_path and os.path.exists(registry_path) else None
-    return load_registry(path).get(agent_name)
+def _resolve_agent(
+    agent_name: str,
+    registry_path: str | None,
+    *,
+    warehouse_id: str,
+    catalog: str,
+    schema: str,
+    client: Any | None = None,
+) -> Agent:
+    """Resolve the :class:`~ail.registry.Agent`, registry-driven with a local-dev override.
+
+    **Registry-driven (the default).** Resolve the agent from the UC ``agent_registry``
+    — the SAME table the app writes and the scheduled jobs read — via the shared
+    :func:`ail.jobs.multi_agent.resolve_registered_agent`. So a UI-onboarded agent is
+    visible to the executor, and its ``target_workspace`` comes from UC.
+
+    **Local-dev override.** If ``--registry`` points at an **existing** YAML file,
+    resolve from that file instead (the pre-registry single-agent path, unchanged) — for
+    a checkout with no UC registry yet.
+
+    Fail-closed either way: an agent absent from the resolved source raises
+    :class:`KeyError`, and the executor's own ``target_workspace`` guard
+    (:func:`ail.executor.executor._resolve_workspace`) still refuses to run against an
+    agent with no ``target_workspace`` — now that value comes from UC.
+    """
+    if registry_path and os.path.exists(registry_path):
+        return load_registry(registry_path).get(agent_name)
+    return resolve_registered_agent(
+        agent_name, warehouse_id=warehouse_id, catalog=catalog, schema=schema, client=client
+    )
 
 
 def _build_volume_client(profile: str | None) -> Any:
@@ -416,20 +452,36 @@ def run(args: argparse.Namespace) -> int:
     ``2`` fail-closed when the proposal table cannot be read (nothing is done — never a
     fabricated preview, never a commit on an unknown state).
     """
+    # Build the client FIRST (cheap; no live call) so the registry-driven resolve can
+    # read the UC agent_registry through the same static-auth-pinned client the rest of
+    # the run uses. A real registry-read infra error PROPAGATES (fail loud); only a
+    # not-found agent is the KeyError fail-closed path below.
+    client = _build_workspace_client(None)  # static env token (resolve_static_auth pinned it)
+
+    registry_source = (
+        f"local-yaml:{args.registry}"
+        if args.registry and os.path.exists(args.registry)
+        else f"uc-registry:{args.catalog}.{args.schema}.agent_registry"
+    )
     try:
-        agent = _resolve_agent(args.agent, args.registry)
+        agent = _resolve_agent(
+            args.agent,
+            args.registry,
+            warehouse_id=args.warehouse_id,
+            catalog=args.catalog,
+            schema=args.schema,
+            client=client,
+        )
     except KeyError as exc:
         print(f"{_TAG} ERROR: {exc}; nothing to do (fail-closed).")
         return 2
 
     print(
         f"{_TAG} agent={agent.agent_name} workspace={agent.target_workspace!r} "
-        f"host={os.environ.get('DATABRICKS_HOST')} "
+        f"resolved_from={registry_source} host={os.environ.get('DATABRICKS_HOST')} "
         f"table={args.catalog}.{args.schema}.{PROPOSALS_TABLE} volume_root={args.volume_root!r} "
         f"dry_run={args.dry_run}"
     )
-
-    client = _build_workspace_client(None)  # static env token (resolve_static_auth pinned it)
 
     if args.revert:
         return _run_revert(agent, client, args)
@@ -695,9 +747,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--agent", default="claude_code", help="Agent name (proposal scope).")
     parser.add_argument(
         "--registry",
-        default="config/agents.yaml",
-        help="Agent registry YAML (must set target_workspace for --agent). Falls back to the "
-        "in-code seed if absent (which has no target_workspace → the executor fails closed).",
+        default=None,
+        help="LOCAL-DEV OVERRIDE only. By default the agent (incl. target_workspace) is resolved "
+        "from the UC agent_registry — the same table the app writes and the scheduled jobs read. "
+        "Pass a path to an EXISTING registry YAML to resolve from that file instead (a checkout "
+        "with no UC registry yet); it must set target_workspace for --agent or the executor fails "
+        "closed.",
     )
     parser.add_argument(
         "--volume-root",
