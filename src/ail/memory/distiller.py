@@ -30,10 +30,22 @@ without a live model or workspace.
 Registry-driven multi-agent: :func:`main` with no ``--experiment-id`` runs REGISTRY
 MODE — it reads every agent from the UC ``agent_registry`` (via
 :mod:`ail.jobs.multi_agent`) and distils each agent's OWN experiment from that
-agent's OWN ``annotations_table`` (falling back to the ``--annotations-table`` arg
-when the registry left it unset), with per-agent isolation. The per-``(experiment,
+agent's OWN ``annotations_table``, with per-agent isolation. The per-``(experiment,
 cohort)`` watermark keeps each agent's window independent. Passing an explicit
 ``--experiment-id`` is the single-agent override for local/manual runs.
+
+Memory-isolation invariant (registry mode is FAIL-CLOSED on the per-agent table):
+the OTEL annotations table carries no ``experiment_id`` — verified against the live
+schema, it is absent from the annotation columns, the annotation ``metadata``, and
+the subject span's ``attributes``/``resource``; the experiment→trace mapping lives
+only in MLflow's server-side ``search_traces`` API, not in these UC tables. A single
+annotations table is therefore a SHARED trace store that cannot be experiment-scoped
+in SQL, so reading a shared table would pool feedback ACROSS agents. To keep each
+agent's memory isolated, registry mode requires each agent to carry its OWN
+``annotations_table`` (its own trace store) and does NOT fall back to a global one;
+an agent without one is skipped with a loud error (its failure is isolated — the
+other agents still run). The single-agent override still accepts an explicit
+``--annotations-table`` (a deliberate, operator-chosen table for a manual run).
 """
 
 from __future__ import annotations
@@ -404,8 +416,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--annotations-table",
         default=os.environ.get("AIL_MEMORY_ANNOTATIONS_TABLE", ""),
         help="Fully-qualified OTEL annotations table, e.g. "
-        "austin_choi_omni_agent_catalog.mlflow_traces.cc_otel_annotations. In registry mode "
-        "this is the FALLBACK for an agent whose registry annotations_table is unset.",
+        "austin_choi_omni_agent_catalog.mlflow_traces.cc_otel_annotations. Used ONLY by the "
+        "single-agent --experiment-id override. Registry mode ignores it and requires each "
+        "agent's OWN annotations_table in the registry (no global fallback — memory isolation).",
     )
     parser.add_argument("--cohort", default=DEFAULT_COHORT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -527,24 +540,34 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     def per_agent(agent: Agent) -> int:
-        # Each agent's OWN annotations_table; fall back to the --annotations-table arg
-        # (the bundle's global default) when the registry did not configure one.
-        annotations_table = agent.annotations_table or args.annotations_table
-        if not annotations_table:
+        # FAIL-CLOSED per-agent isolation: each agent MUST have its OWN annotations_table
+        # in the registry. There is deliberately NO fallback to the global
+        # --annotations-table here: the OTEL annotations table carries no experiment_id
+        # (and none is derivable from spans/resource), so a SHARED table cannot be
+        # experiment-scoped in SQL — reading a shared table would pool feedback ACROSS
+        # agents (agent B's memory would ingest agent A's traces). Requiring a per-agent
+        # table makes each agent read ONLY its own trace store. An agent with no own
+        # table raises here -> the fan-out logs it, records the failure (worst_rc
+        # non-zero), and CONTINUES to the next agent (this one alone is skipped).
+        if not agent.annotations_table:
             raise RuntimeError(
-                f"agent {agent.agent_name!r} has no annotations_table in agent_registry and "
-                "no --annotations-table fallback was provided; the distiller cannot read its "
-                "feedback (fail-closed)."
+                f"agent {agent.agent_name!r} has no annotations_table in agent_registry; "
+                "registry mode requires a per-agent annotations table to keep memory "
+                "isolated (the shared OTEL table cannot be experiment-scoped in SQL). "
+                "Configure this agent's annotations_table in the registry, or run it via "
+                "the single-agent --experiment-id override with an explicit "
+                "--annotations-table."
             )
         config = _config_from_args(
             args,
             experiment_id=agent.experiment_id,
-            annotations_table=annotations_table,
+            annotations_table=agent.annotations_table,
             cohort=agent.agent_name,
         )
         print(
             f"[ail.memory.distiller] agent={agent.agent_name} -> "
-            f"{config.catalog}.{config.schema}.{MEMORY_TABLE} (annotations={annotations_table})"
+            f"{config.catalog}.{config.schema}.{MEMORY_TABLE} "
+            f"(annotations={agent.annotations_table})"
         )
         run_memory_distiller(config, deps=DistillerDeps(client=client))
         return 0

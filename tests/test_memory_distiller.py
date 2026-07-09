@@ -290,14 +290,56 @@ def main_registry_stub(monkeypatch):
     return {"mod": distiller_mod, "configs": configs}
 
 
-def test_registry_mode_threads_experiment_and_annotations(main_registry_stub, monkeypatch):
+def test_registry_mode_threads_each_agents_own_experiment_and_table(
+    main_registry_stub, monkeypatch
+):
+    # Each agent distils ITS OWN experiment from ITS OWN annotations table (its own
+    # trace store) — no cross-agent pooling. cohort=agent_name scopes the watermark.
     mod = main_registry_stub["mod"]
     monkeypatch.setattr(
         mod,
         "load_registered_agents",
         lambda **kw: [
             _agent("a1", "EXP_A", annotations_table="cat.sch.a1_ann"),
-            _agent("a2", "EXP_B"),  # no annotations_table -> falls back to --annotations-table
+            _agent("a2", "EXP_B", annotations_table="cat.sch.a2_ann"),
+        ],
+    )
+
+    rc = mod.main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+    assert rc == 0
+
+    configs = main_registry_stub["configs"]
+    assert (configs[0].experiment_id, configs[0].annotations_table, configs[0].cohort) == (
+        "EXP_A",
+        "cat.sch.a1_ann",
+        "a1",
+    )
+    assert (configs[1].experiment_id, configs[1].annotations_table, configs[1].cohort) == (
+        "EXP_B",
+        "cat.sch.a2_ann",
+        "a2",
+    )
+
+
+def test_registry_mode_ignores_global_annotations_fallback(main_registry_stub, monkeypatch):
+    # BLOCKER-2 REGRESSION: registry mode must NOT read a shared/global annotations
+    # table (the OTEL table has no experiment_id, so a shared table pools feedback
+    # across agents). An agent with no OWN annotations_table is SKIPPED (isolated
+    # failure) EVEN WHEN a global --annotations-table is passed — proving the pooling
+    # vector is closed. The configured agent reads ONLY its own table, never the global.
+    mod = main_registry_stub["mod"]
+    ran: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod,
+        "run_memory_distiller",
+        lambda config, **kw: ran.append((config.cohort, config.annotations_table)),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_registered_agents",
+        lambda **kw: [
+            _agent("a1", "EXP_A"),  # NO own annotations_table
+            _agent("a2", "EXP_B", annotations_table="cat.sch.a2_ann"),
         ],
     )
 
@@ -306,24 +348,14 @@ def test_registry_mode_threads_experiment_and_annotations(main_registry_stub, mo
             "--warehouse-id=wh",
             "--catalog=cat",
             "--schema=sch",
-            "--annotations-table=cat.sch.fallback_ann",
+            # A global fallback that MUST be ignored in registry mode.
+            "--annotations-table=cat.sch.SHARED_ann",
         ]
     )
-    assert rc == 0
-
-    configs = main_registry_stub["configs"]
-    # Agent a1 got ITS OWN experiment + annotations_table; cohort is a1 (watermark scope).
-    assert (configs[0].experiment_id, configs[0].annotations_table, configs[0].cohort) == (
-        "EXP_A",
-        "cat.sch.a1_ann",
-        "a1",
-    )
-    # Agent a2 has no registry annotations_table -> the --annotations-table fallback.
-    assert (configs[1].experiment_id, configs[1].annotations_table, configs[1].cohort) == (
-        "EXP_B",
-        "cat.sch.fallback_ann",
-        "a2",
-    )
+    # a1 skipped (no own table; the shared fallback is NOT used); a2 ran on ITS OWN table.
+    assert ran == [("a2", "cat.sch.a2_ann")]
+    assert "cat.sch.SHARED_ann" not in [t for _, t in ran]  # shared table never read
+    assert rc == 1  # a1's skip is a recorded, isolated failure
 
 
 def test_registry_mode_isolation_one_agent_failure_continues(main_registry_stub, monkeypatch):
