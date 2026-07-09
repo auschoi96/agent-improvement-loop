@@ -156,6 +156,25 @@ class _ReadClient:
         self.statement_execution = _ReadStmtExec(resp)
 
 
+class _PendingStmtExec:
+    """A statement execution that never leaves PENDING (a stuck/unavailable warehouse)."""
+
+    def __init__(self) -> None:
+        self.poll_count = 0
+
+    def execute_statement(self, *, warehouse_id, statement, wait_timeout=None):  # type: ignore[no-untyped-def]
+        return _ReadResp(StatementState.PENDING)
+
+    def get_statement(self, statement_id):  # type: ignore[no-untyped-def]
+        self.poll_count += 1
+        return _ReadResp(StatementState.PENDING)
+
+
+class _PendingClient:
+    def __init__(self) -> None:
+        self.statement_execution = _PendingStmtExec()
+
+
 # -- aggregation reproduces the real 35.4% headline ------------------------
 
 
@@ -528,3 +547,60 @@ def test_load_full_fails_closed_on_other_error() -> None:
         load_registered_agents_full(
             client=_ReadClient(resp), warehouse_id="wh", catalog="cat", schema="sch"
         )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Warehouse abc-123 cannot be found",
+        "[SCHEMA_NOT_FOUND] The schema `cat`.`sch` cannot be found.",
+        "catalog 'foo' does not exist",
+        # a table-not-found, but for a DIFFERENT table than agent_registry.
+        "[TABLE_OR_VIEW_NOT_FOUND] The table or view `cat`.`sch`.some_other_table cannot be found.",
+    ],
+)
+def test_load_full_propagates_infra_not_found_never_swallows(message: str) -> None:
+    # An infra failure whose message contains the loose 'cannot be found' / 'does not
+    # exist' substrings — but is NOT the agent_registry table missing — must PROPAGATE
+    # as a hard error, never be swallowed to [] (that would read a real permission /
+    # warehouse / catalog failure as "no agents registered").
+    resp = _ReadResp(StatementState.FAILED, err=_Err(message))
+    with pytest.raises(RuntimeError) as excinfo:
+        load_registered_agents_full(
+            client=_ReadClient(resp), warehouse_id="wh", catalog="cat", schema="sch"
+        )
+    # a hard RuntimeError, specifically NOT the table-missing sentinel (subclass).
+    assert not isinstance(excinfo.value, pv._RegistryTableMissing)
+
+
+def test_load_full_swallows_only_genuine_bracketed_table_not_found() -> None:
+    # The realistic Databricks message: the bracketed condition AND the fqn naming
+    # agent_registry -> _RegistryTableMissing -> [] (a fresh workspace, no publish yet).
+    resp = _ReadResp(
+        StatementState.FAILED,
+        err=_Err(
+            "[TABLE_OR_VIEW_NOT_FOUND] The table or view `cat`.`sch`.agent_registry "
+            "cannot be found. Verify the spelling and correctness of the schema and catalog."
+        ),
+    )
+    got = load_registered_agents_full(
+        client=_ReadClient(resp), warehouse_id="wh", catalog="cat", schema="sch"
+    )
+    assert got == []
+
+
+def test_load_full_fails_closed_when_warehouse_stuck_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A stuck / unavailable warehouse (endless PENDING) must never hang and must never
+    # return [] — it fails closed with a hard RuntimeError once the poll deadline is
+    # exceeded. Shrink the deadline + poll interval so the guard fires fast.
+    monkeypatch.setattr(pv, "_QUERY_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(pv, "_QUERY_POLL_INTERVAL_SECONDS", 0.01)
+    client = _PendingClient()
+    with pytest.raises(RuntimeError) as excinfo:
+        load_registered_agents_full(client=client, warehouse_id="wh", catalog="cat", schema="sch")
+    # a hard RuntimeError (not the table-missing sentinel), and it actually polled.
+    assert not isinstance(excinfo.value, pv._RegistryTableMissing)
+    assert "did not complete" in str(excinfo.value)
+    assert client.statement_execution.poll_count >= 1
