@@ -8,6 +8,13 @@ agreement floor, and rolls back a regression — turning "a human adds labels" i
 L2 pieces (see :mod:`ail.judges.auto_align`); the entrypoint only resolves the
 Job's runtime concerns and prints what happened.
 
+Registry-driven multi-agent: with no ``--experiment`` it runs REGISTRY MODE — it
+reads every agent from the UC ``agent_registry`` (via :mod:`ail.jobs.multi_agent`)
+and runs the cadence for each agent's OWN experiment, with per-agent isolation
+(one agent's alignment failure is logged and the loop continues; the per-judge
+watermark is scoped per experiment, so agents never disturb each other). Passing an
+explicit ``--experiment`` is the single-agent override for local/manual runs.
+
 Two runtime concerns it owns (both mirrored from :mod:`ail.jobs.publish_job` and
 the optimization-cycle job):
 
@@ -38,6 +45,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
+from ail.jobs.multi_agent import (
+    load_registered_agents,
+    missing_registry_target,
+    run_for_each_registered_agent,
+)
 from ail.jobs.publish_job import resolve_job_auth
 from ail.judges.agreement import DEFAULT_FLOOR, DEFAULT_MIN_SAMPLES, AgreementConfig
 from ail.judges.alignment import MemAlignConfig, build_memalign_optimizer
@@ -50,7 +62,7 @@ from ail.judges.auto_align import (
 from ail.judges.labeling import DEFAULT_ANCHOR_FRACTION
 from ail.judges.registration import DEFAULT_SAMPLING_RATE
 from ail.judges.scorers import DEFAULT_SCORERS, ScorerSpec
-from ail.publish import REFERENCE_EXPERIMENT
+from ail.registry import Agent
 
 if TYPE_CHECKING:
     from mlflow.genai.judges.base import AlignmentOptimizer
@@ -67,14 +79,25 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--experiment",
-        default=REFERENCE_EXPERIMENT,
-        help="MLflow experiment holding the labeled traces (default: reference exp).",
+        default="",
+        help="Explicit experiment id => single-agent override (align only that one). "
+        "Empty (the default) => registry mode: align every agent in agent_registry.",
     )
     parser.add_argument(
         "--warehouse-id",
         default=os.environ.get("AIL_WAREHOUSE_ID"),
         help="SQL warehouse id for the v4 trace-store read (exported as "
         f"{TRACING_WAREHOUSE_ENV}). Required unless already set in the environment.",
+    )
+    parser.add_argument(
+        "--catalog",
+        default=os.environ.get("AIL_CATALOG", ""),
+        help="UC catalog holding agent_registry (registry mode). Defaults to AIL_CATALOG.",
+    )
+    parser.add_argument(
+        "--schema",
+        default=os.environ.get("AIL_SCHEMA", ""),
+        help="UC schema holding agent_registry (registry mode). Defaults to AIL_SCHEMA.",
     )
     parser.add_argument(
         "--judges",
@@ -218,6 +241,38 @@ def _resolve_scorers(names: str) -> dict[str, ScorerSpec]:
     return {n: DEFAULT_SCORERS[n] for n in wanted}
 
 
+def _align_for(
+    args: argparse.Namespace,
+    *,
+    scorers: dict[str, ScorerSpec],
+    optimizer: AlignmentOptimizer | None,
+    config: AutoAlignConfig,
+    experiment: str,
+) -> int:
+    """Run the auto-align cadence for one experiment — the reused single-agent body.
+
+    ``auto_align_scorers`` is reused unchanged. Its per-judge experiment-tag watermark
+    is scoped to ``experiment``, so each agent's cadence advances independently — one
+    agent's labels/alignment never disturb another's. Returns non-zero only when a
+    judge's cadence *failed*; a correct hold / rollback / skip is a successful run.
+
+    ``profile`` is intentionally not forwarded: :func:`resolve_job_auth` already set
+    an explicit ``DATABRICKS_HOST``/``TOKEN`` bearer and dropped the ambient profile,
+    so downstream MLflow config must NOT re-add a profile (which would re-open the
+    v4-store per-request OAuth fallback — see :mod:`ail.jobs.publish_job`).
+    """
+    report = auto_align_scorers(
+        experiment,
+        scorers=scorers,
+        config=config,
+        optimizer=optimizer,
+        model=args.model or None,
+        register=not args.no_register,
+    )
+    _print_report(report)
+    return 1 if report.n_failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
@@ -241,27 +296,41 @@ def main(argv: list[str] | None = None) -> int:
         os.environ[TRACING_WAREHOUSE_ENV] = args.warehouse_id
     print(
         f"[ail.jobs.auto_align_job] auth={auth_path} host={os.environ.get('DATABRICKS_HOST')} "
-        f"experiment={args.experiment} judges={sorted(scorers)} "
-        f"label_floor={config.label_floor} agreement_floor={config.agreement.floor} "
-        f"register={not args.no_register}"
+        f"judges={sorted(scorers)} label_floor={config.label_floor} "
+        f"agreement_floor={config.agreement.floor} register={not args.no_register}"
     )
 
-    # profile is intentionally not forwarded: resolve_job_auth already set an
-    # explicit DATABRICKS_HOST/TOKEN bearer and dropped the ambient profile, so
-    # downstream MLflow config must NOT re-add a profile (which would re-open the
-    # v4-store per-request OAuth fallback — see ail.jobs.publish_job).
-    report = auto_align_scorers(
-        args.experiment,
-        scorers=scorers,
-        config=config,
-        optimizer=optimizer,
-        model=args.model or None,
-        register=not args.no_register,
+    if args.experiment:
+        # Single-agent override: align JUST this experiment, exactly as before.
+        print(f"[ail.jobs.auto_align_job] single-agent experiment={args.experiment}")
+        return _align_for(
+            args, scorers=scorers, optimizer=optimizer, config=config, experiment=args.experiment
+        )
+
+    # Registry mode: align every agent in agent_registry, each on its own experiment.
+    warehouse = args.warehouse_id or os.environ.get(TRACING_WAREHOUSE_ENV)
+    missing = missing_registry_target(warehouse, args.catalog, args.schema)
+    if missing:
+        print(
+            f"[ail.jobs.auto_align_job] registry mode requires {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 2
+    agents = load_registered_agents(
+        warehouse_id=warehouse, catalog=args.catalog, schema=args.schema
     )
-    _print_report(report)
-    # Non-zero only when a judge's cadence *failed*; a correct hold / rollback /
-    # skip is a successful run.
-    return 1 if report.n_failed else 0
+
+    def per_agent(agent: Agent) -> int:
+        return _align_for(
+            args,
+            scorers=scorers,
+            optimizer=optimizer,
+            config=config,
+            experiment=agent.experiment_id,
+        )
+
+    result = run_for_each_registered_agent(agents, per_agent, job_name="ail.jobs.auto_align_job")
+    return result.worst_rc
 
 
 def _print_report(report: AutoAlignReport) -> None:

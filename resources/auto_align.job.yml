@@ -49,7 +49,13 @@ resources:
             package_name: ail
             entry_point: ail-auto-align
             named_parameters:
-              experiment: ${var.experiment_id}
+              # Registry mode: NO per-agent `experiment` binding. The entrypoint reads
+              # every agent from catalog.schema.agent_registry and aligns each one's own
+              # experiment (per-judge watermark scoped per experiment => per-agent
+              # isolation). catalog/schema locate the registry table. (Pass an explicit
+              # experiment only for a local/manual single-agent override.)
+              catalog: ${var.catalog}
+              schema: ${var.schema}
               # The v4 trace store serves reads through a SQL warehouse; the
               # entrypoint exports this as MLFLOW_TRACING_SQL_WAREHOUSE_ID.
               warehouse-id: ${var.warehouse_id}
