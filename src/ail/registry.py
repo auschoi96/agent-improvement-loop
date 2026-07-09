@@ -79,6 +79,17 @@ class Agent(_Config):
             Kept as a free-form mapping here (Phase A only needs to *carry* it);
             the judges lane interprets it. ``None`` means "no per-agent judges
             configured yet".
+        goal_config: Opaque, optional per-agent optimization-goal configuration —
+            the continuous-RLM job's goal knobs (``objective_metric``,
+            ``goal_direction``, ``goal_target``, ``goal_target_kind``,
+            ``guardrail_judge``). Kept as a free-form mapping here, symmetric with
+            :attr:`judge_config` (this lane only needs to *carry* it; the
+            continuous-RLM lane interprets it). ``None`` means "no goal configured
+            yet".
+        annotations_table: Optional fully-qualified UC table the memory-distiller job
+            reads/writes this agent's annotations from. User-provided and optional at
+            the model level (``None`` = "not configured yet"); the distiller lane
+            requires it. This lane only *carries* the value.
         tag_filter: Optional within-experiment sub-selection as ``{tag_key:
             tag_value}`` equality clauses (AND'd). ``None`` means the whole
             experiment is the agent's cohort. Built into a :class:`ail.cohorts.Cohort`
@@ -96,6 +107,8 @@ class Agent(_Config):
     experiment_id: str = Field(min_length=1)
     description: str = ""
     judge_config: dict[str, Any] | None = None
+    goal_config: dict[str, Any] | None = None
+    annotations_table: str | None = None
     tag_filter: dict[str, str] | None = None
     target_workspace: str | None = None
 
