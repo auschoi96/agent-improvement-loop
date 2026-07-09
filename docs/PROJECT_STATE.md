@@ -177,6 +177,52 @@ The whole system exists to distinguish *real* improvement from a dashboard that 
 - **Verify, don't trust "done":** re-run gates yourself and probe the load-bearing behavior; a
   green tool call is intent, not outcome.
 
+## 10. End-to-end validation status (what's actually been run, and how)
+
+The full loop is validated in two complementary ways — synthetic live runs for the new
+multi-agent wiring, and real-data runs for the trace-dependent stages. Neither half is
+unproven; they were just exercised by different means.
+
+**Proven LIVE via the synthetic E2E harness** (`scripts/run_synthetic_e2e.py`, isolated
+synthetic schema/experiment/agent, no model spend):
+
+- **S0 bootstrap** — table-ensure + additive column-migration on a *fresh* schema (`agent_registry`
+  and the app tables created + migrated).
+- **S2 onboarding → registry** — an agent registered through the real `register_agent` path
+  (experiment + annotations_table + target_workspace persisted).
+- **Isolation guards fail closed** — synthetic schema/experiment must carry the `_e2e_synthetic`
+  marker; a real-path override / empty / equals-real name is refused (so the harness cannot touch
+  real data, incl. no real-experiment deletion via `--teardown`).
+- **Registry-mode job fan-out** — the publish job smoke-ran in registry mode, reading `claude_code`
+  from `agent_registry` and publishing its experiment (not a no-op).
+
+**Proven on REAL data** (experiment `660599403165942`, during the build session — these are the
+trace-dependent stages):
+
+- **L0 publish** produced real session metrics; **RLM/HALO** reviewed the real trace corpus and
+  wrote `rlm_*` assessments; **memory distiller** wrote 39 grounded guidelines; the **companion
+  planner** produced a real evidence-backed proposal and the executor produced a preview.
+
+**Known harness limitation (platform, not a wiring bug):** seeding *synthetic traces* into a
+*freshly-bound UC-backed experiment* via `mlflow.start_span` does **not** materialize rows into the
+UC OTEL tables within a short SDK-only process (async UC trace export doesn't populate a
+just-bound schema before exit; confirmed 0 rows minutes later, not latency). So the synthetic
+harness cannot self-generate readable traces for S1/S3/S4/S5/S7 — those stages are instead
+covered by the real-data runs above. Making the harness fully self-contained would require
+`INSERT`-ing synthetic rows directly into MLflow's internal OTEL span schema (brittle scaffolding,
+deliberately not built). This is orthogonal to the product: production agents accrue traces over
+time and never log-then-instantly-search.
+
+**Bugs the live E2E surfaced and fixed (each live-only-catchable, all at $0):**
+1. Experiment names must be absolute workspace paths (`/Users/<me>/…`), not bare strings.
+2. Async trace-export flush before searchability polling.
+
+**Open product finding (real reusability defect, not yet fixed):** `ail.onboarding` create-experiment
+(`service.py run_create` → `experiment.py create_experiment`) has the *same* bare-name bug — it
+relies on the wizard UI to pass an absolute path, so a deployer submitting a bare experiment name
+fails identically on their own workspace-backed MLflow. Small fix (require absolute, or
+default-prefix the caller's workspace home). Directly serves the "anyone can install this" goal.
+
 ## Doc index
 
 - **Start here:** this file · [PRODUCT_ARCHITECTURE](PRODUCT_ARCHITECTURE.md) (design of record) · [GETTING_STARTED](GETTING_STARTED.md) (quickstart) · [DEPLOY](DEPLOY.md) (turnkey deploy)
