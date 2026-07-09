@@ -3,10 +3,13 @@ resources:
     l0_publish:
       name: ail-l0-publish-scheduled
       description: >-
-        Tier A — recompute the L0 deterministic metrics from MLflow experiment
-        ${var.experiment_id} and (atomically, idempotently) refresh the UC Delta
-        tables that back the L0 leaderboard app. Runs on a schedule so the
-        dashboard stays a LIVING view of the corpus instead of a one-time
+        Tier A — recompute the L0 deterministic metrics and (atomically,
+        idempotently) refresh the UC Delta tables that back the L0 leaderboard app.
+        REGISTRY-DRIVEN MULTI-AGENT: one run reads every agent from the UC
+        agent_registry (catalog.schema.agent_registry) and publishes each agent's OWN
+        experiment as its own per-experiment L0 slice, with per-agent isolation (one
+        agent's publish failure is logged and the run continues). Runs on a schedule
+        so the dashboard stays a LIVING view of the corpus instead of a one-time
         snapshot. Reuses ail.metrics via ail.publish — no metric logic here.
       tags:
         project: agent-improvement-loop
@@ -40,7 +43,11 @@ resources:
             package_name: ail
             entry_point: ail-publish-job
             named_parameters:
-              experiment: ${var.experiment_id}
+              # Registry mode: NO per-agent `experiment` binding. The entrypoint reads
+              # every agent from catalog.schema.agent_registry and publishes each one's
+              # own experiment. (Pass an explicit experiment only for a local/manual
+              # single-agent override; the schedule never does.) catalog/schema locate
+              # the registry table AND are where each agent's L0 slice is written.
               warehouse-id: ${var.warehouse_id}
               catalog: ${var.catalog}
               schema: ${var.schema}

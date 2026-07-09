@@ -153,3 +153,94 @@ def test_main_requires_warehouse_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AIL_WAREHOUSE_ID", raising=False)
     with pytest.raises(SystemExit):
         main(["--experiment=EXP1"])
+
+
+# -- registry (multi-agent) mode -------------------------------------------
+
+
+def _agent(name: str, exp: str) -> object:
+    from ail.registry import Agent
+
+    return Agent(agent_name=name, experiment_id=exp)
+
+
+def test_registry_mode_publishes_each_agents_own_experiment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published: list[str] = []
+
+    monkeypatch.setattr(publish_job, "resolve_job_auth", lambda **kw: "minted")
+    monkeypatch.setattr(
+        publish_job,
+        "load_registered_agents",
+        lambda **kw: [_agent("a1", "EXP_A"), _agent("a2", "EXP_B")],
+    )
+    monkeypatch.setattr(
+        publish_job, "publish", lambda **kw: published.append(kw["experiment_id"])
+    )
+
+    # No --experiment => registry mode over all agents.
+    rc = main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+
+    assert rc == 0
+    # Each agent's OWN experiment was published (not a single shared/global one).
+    assert published == ["EXP_A", "EXP_B"]
+
+
+def test_registry_mode_isolation_one_agent_failure_does_not_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published: list[str] = []
+
+    def fake_publish(**kw: object) -> None:
+        exp = kw["experiment_id"]
+        if exp == "EXP_B":
+            raise RuntimeError("publish blew up for B")
+        published.append(str(exp))
+
+    monkeypatch.setattr(publish_job, "resolve_job_auth", lambda **kw: "minted")
+    monkeypatch.setattr(
+        publish_job,
+        "load_registered_agents",
+        lambda **kw: [_agent("a1", "EXP_A"), _agent("a2", "EXP_B"), _agent("a3", "EXP_C")],
+    )
+    monkeypatch.setattr(publish_job, "publish", fake_publish)
+
+    rc = main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+
+    # B failed, but A and C STILL published; worst_rc is non-zero.
+    assert published == ["EXP_A", "EXP_C"]
+    assert rc == 1
+
+
+def test_registry_mode_empty_registry_is_clean_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(publish_job, "resolve_job_auth", lambda **kw: "minted")
+    monkeypatch.setattr(publish_job, "load_registered_agents", lambda **kw: [])
+    monkeypatch.setattr(
+        publish_job, "publish", lambda **kw: pytest.fail("must not publish with no agents")
+    )
+
+    rc = main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+    assert rc == 0  # empty registry => clean no-op, not an error
+
+
+def test_registry_read_error_propagates_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(**kw: object) -> object:
+        raise RuntimeError("warehouse cannot be found")
+
+    monkeypatch.setattr(publish_job, "resolve_job_auth", lambda **kw: "minted")
+    monkeypatch.setattr(publish_job, "load_registered_agents", boom)
+
+    # A real registry-read failure must FAIL LOUD, never read as "zero agents".
+    with pytest.raises(RuntimeError, match="warehouse cannot be found"):
+        main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+
+
+def test_registry_mode_requires_catalog_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(publish_job, "resolve_job_auth", lambda **kw: "minted")
+    monkeypatch.setattr(
+        publish_job, "load_registered_agents", lambda **kw: pytest.fail("should not read")
+    )
+    # warehouse present but catalog/schema empty (bundle-unset) => fail closed (rc 2).
+    rc = main(["--warehouse-id=wh", "--catalog=", "--schema="])
+    assert rc == 2
