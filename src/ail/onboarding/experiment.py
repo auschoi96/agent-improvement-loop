@@ -96,6 +96,25 @@ class ExperimentClient(Protocol):
         """Count up to ``limit`` traces in the experiment. Raises on read failure."""
         ...
 
+    def workspace_home(self) -> str | None:
+        """The caller's workspace home (``/Users/<current_user>``), or ``None``.
+
+        Used to turn a BARE experiment name into a valid ABSOLUTE workspace path
+        (Databricks-backed MLflow requires absolute names). ``None`` means the home
+        could not be resolved LIVE from the active profile — the caller fails
+        closed rather than guessing a path, so nothing is created at a fabricated
+        location. The live impl resolves it via the SDK; a fake returns a fixed home.
+        """
+        ...
+
+    def workspace_host(self) -> str:
+        """The workspace host URL (``https://…``), or ``""`` if it cannot be resolved.
+
+        Used only to compose the convenience experiment URL. Fail-soft: ``""`` never
+        blocks a creation (the URL is a nicety, not the created experiment).
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class ExperimentValidation:
@@ -194,28 +213,66 @@ def validate_experiment(
 def create_experiment(name: str, *, client: ExperimentClient) -> ExperimentCreation:
     """Create a fresh experiment named ``name`` (fail-closed, honest on denial).
 
-    Refuses to create when an experiment of that name already exists (it may be
-    another agent's — never silently reuse it). A creation denied by the workspace
-    is surfaced as :class:`ExperimentPermissionError` with the documented
-    prerequisite; only a genuinely-created experiment returns a result.
+    Databricks-backed MLflow requires experiment names to be **absolute workspace
+    paths**, so a bare name (``my-agent-exp``) is first resolved to
+    ``/Users/<current_user>/<name>`` via :meth:`ExperimentClient.workspace_home`
+    (an already-absolute name is used as-is — back-compat). Refuses to create when
+    an experiment of that **final, absolute** name already exists (it may be another
+    agent's — never silently reuse it). A creation denied by the workspace is
+    surfaced as :class:`ExperimentPermissionError` with the documented prerequisite;
+    a bare name whose workspace home cannot be resolved is an honest
+    :class:`ExperimentAccessError` (fail-closed — never created at a guessed path).
+    Only a genuinely-created experiment returns a result.
     """
     clean = name.strip()
     if not clean:
         raise ValueError("an experiment name is required to create one")
-    existing = client.get_experiment_by_name(clean)
+    target = _absolute_experiment_path(clean, client=client)
+    existing = client.get_experiment_by_name(target)
     if existing is not None:
         raise ValueError(
-            f"an experiment named {clean!r} already exists (id {existing.experiment_id}); "
+            f"an experiment named {target!r} already exists (id {existing.experiment_id}); "
             "choose a different name or validate that experiment instead of creating it"
         )
-    experiment_id = client.create_experiment(clean)
+    experiment_id = client.create_experiment(target)
     if not experiment_id:
         # Fail-closed: the client returned no id — do NOT report a creation.
         raise ExperimentPermissionError(
-            f"MLflow returned no experiment id when creating {clean!r} — refusing to "
+            f"MLflow returned no experiment id when creating {target!r} — refusing to "
             "report a created experiment that did not get created"
         )
-    return ExperimentCreation(experiment_id=str(experiment_id), name=clean)
+    return ExperimentCreation(experiment_id=str(experiment_id), name=target)
+
+
+def _absolute_experiment_path(name: str, *, client: ExperimentClient) -> str:
+    """Resolve ``name`` to a valid ABSOLUTE workspace experiment path (fail-closed).
+
+    An already-absolute name (leading ``/``) is returned unchanged — back-compat, the
+    wizard may already pass one — provided it has a real, non-empty leaf segment; a
+    slashes-only name (``/``, ``//``) has none and is fail-closed rather than created
+    at an invalid workspace path. A BARE name is placed under the caller's workspace
+    home (resolved LIVE via :meth:`ExperimentClient.workspace_home`); surrounding
+    slashes are trimmed so it becomes a clean path segment. If the home cannot be
+    resolved, we raise :class:`ExperimentAccessError` with an actionable message
+    rather than create at a guessed/fabricated path.
+    """
+    if name.startswith("/"):
+        if not name.strip("/"):
+            raise ExperimentAccessError(
+                f"invalid experiment name {name!r}: a workspace experiment path needs a "
+                "name after '/' — e.g. '/Users/you/my-agent'. No experiment was created."
+            )
+        return name
+    home = client.workspace_home()
+    if not home:
+        raise ExperimentAccessError(
+            f"cannot create experiment {name!r}: a bare name must be placed under your "
+            "workspace home (/Users/<you>/…), but the current user could not be resolved "
+            "from the active profile. Pass an absolute workspace path (e.g. "
+            "'/Users/you/my-agent'), or check the profile/credentials. No experiment was created."
+        )
+    segment = name.strip("/")
+    return f"{home.rstrip('/')}/{segment}"
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +372,41 @@ class MlflowExperimentClient:
         except Exception as exc:  # noqa: BLE001 - a read failure is an honest access error
             raise ExperimentAccessError(_access_hint(experiment_id, self._profile, exc)) from exc
         return len(traces)
+
+    def workspace_home(self) -> str | None:
+        """Resolve ``/Users/<current_user>`` LIVE via the SDK (``None`` if unresolvable).
+
+        Lazy-imports the SDK (never at module import time — mirrors :meth:`_ensure`)
+        and reads the calling identity from the active profile. Any failure (SDK
+        missing, unusable profile, auth) returns ``None`` so the caller fails closed
+        rather than fabricating a path.
+        """
+        try:
+            from databricks.sdk import WorkspaceClient
+        except ImportError:  # pragma: no cover - import guard
+            return None
+        try:
+            user_name = WorkspaceClient(profile=self._profile).current_user.me().user_name
+        except Exception:  # noqa: BLE001 - unusable profile / auth: caller fails closed on None
+            return None
+        return f"/Users/{user_name}" if user_name else None
+
+    def workspace_host(self) -> str:
+        """Resolve the workspace host LIVE via the SDK (``""`` if unresolvable).
+
+        Same lazy-import + profile discipline as :meth:`workspace_home`. Fail-soft:
+        the host only feeds the convenience experiment URL, so any failure yields
+        ``""`` and never blocks a creation.
+        """
+        try:
+            from databricks.sdk import WorkspaceClient
+        except ImportError:  # pragma: no cover - import guard
+            return ""
+        try:
+            host = WorkspaceClient(profile=self._profile).config.host
+        except Exception:  # noqa: BLE001 - unusable profile: the URL is a convenience, fail-soft
+            return ""
+        return host or ""
 
 
 def build_experiment_client(profile: str | None = None) -> ExperimentClient:

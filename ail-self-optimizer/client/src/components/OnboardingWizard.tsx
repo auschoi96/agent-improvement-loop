@@ -27,6 +27,7 @@ import {
   confirmRequirementsBody,
   confirmRequirementsMessage,
   createExperimentBody,
+  creationDetails,
   creationMessage,
   dataGateView,
   freshnessMessage,
@@ -277,6 +278,9 @@ interface StepProps {
 function ExperimentStep({ state, patch }: StepProps) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<ToneMessage | null>(null);
+  // The last creation response, kept so the success view can surface the ready-to-use
+  // deep-link + tracing snippet (both relayed VERBATIM from Python — never built here).
+  const [created, setCreated] = useState<CreationResponse | null>(null);
 
   async function validate() {
     setBusy(true);
@@ -302,6 +306,7 @@ function ExperimentStep({ state, patch }: StepProps) {
   async function create() {
     setBusy(true);
     setMessage(null);
+    setCreated(null);
     try {
       const { status, body } = await postJson<CreationResponse>(
         API.create,
@@ -312,6 +317,7 @@ function ExperimentStep({ state, patch }: StepProps) {
         return;
       }
       setMessage(creationMessage(body));
+      setCreated(body);
       patch({ resolved: resolvedFromCreation(body) });
     } catch {
       setMessage({ tone: 'error', text: 'Network error creating the experiment.' });
@@ -319,6 +325,13 @@ function ExperimentStep({ state, patch }: StepProps) {
       setBusy(false);
     }
   }
+
+  // Show the ready-to-use details only for the CURRENT creation: gate on the resolved
+  // experiment (cleared on any mode/name edit), so a stale link never lingers.
+  const details =
+    created && state.resolved?.fresh && created.experiment_id === state.resolved.experiment_id
+      ? creationDetails(created)
+      : null;
 
   return (
     <div className="space-y-4">
@@ -383,6 +396,30 @@ function ExperimentStep({ state, patch }: StepProps) {
         <Badge variant="outline" className="text-emerald-700 dark:text-emerald-300">
           Ready: experiment {state.resolved.experiment_id}
         </Badge>
+      )}
+      {details && (details.url || details.hint) && (
+        <div className="space-y-2 rounded-md border p-3 text-sm">
+          {details.url && (
+            <p>
+              <a
+                href={details.url}
+                target="_blank"
+                rel="noreferrer"
+                className="underline text-primary"
+              >
+                Open the experiment in MLflow
+              </a>
+            </p>
+          )}
+          {details.hint && (
+            <div className="space-y-1">
+              <p className="text-muted-foreground">Point your agent&apos;s tracing here:</p>
+              <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">
+                <code>{details.hint}</code>
+              </pre>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
