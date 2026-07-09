@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from databricks.sdk.service.sql import StatementState
 
 from ail.executor import CommittedChangeRecord, produce_preview
 from ail.ingest.base import AgentRunResult, AgentTask, NormalizedTrace
@@ -41,9 +42,85 @@ from ail.loop.proposals import (
     default_risk_class,
     derive_proposal_id,
 )
+from ail.publish_versions import REGISTRY_COLUMNS, _registry_row
 from ail.registry import Agent
 
 VOLUME_ROOT = "/Volumes/cat/sch/vol/ail_snapshots"
+
+
+# ---------------------------------------------------------------------------
+# A stub UC client that serves the registry read (same serialization the publish tier
+# writes), so the executor's registry-driven resolution is exercised through the REAL
+# read path with no live warehouse.
+# ---------------------------------------------------------------------------
+
+
+class _Col:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _Schema:
+    def __init__(self, cols: list[str]) -> None:
+        self.columns = [_Col(c) for c in cols]
+
+
+class _Manifest:
+    def __init__(self, cols: list[str]) -> None:
+        self.schema = _Schema(cols)
+
+
+class _Result:
+    def __init__(self, rows: list[list]) -> None:  # type: ignore[type-arg]
+        self.data_array = rows
+
+
+class _Status:
+    def __init__(self) -> None:
+        self.state = StatementState.SUCCEEDED
+        self.error = None
+
+
+class _Resp:
+    def __init__(self, cols: list[str], rows: list[list]) -> None:  # type: ignore[type-arg]
+        self.statement_id = "stmt"
+        self.status = _Status()
+        self.manifest = _Manifest(cols)
+        self.result = _Result(rows)
+
+
+class _StmtExec:
+    def __init__(self, resp: _Resp) -> None:
+        self._resp = resp
+
+    def execute_statement(self, *, warehouse_id, statement, wait_timeout=None):  # type: ignore[no-untyped-def]
+        return self._resp
+
+    def get_statement(self, statement_id):  # type: ignore[no-untyped-def]
+        return self._resp
+
+
+class _RaisingStmtExec:
+    def execute_statement(self, *, warehouse_id, statement, wait_timeout=None):  # type: ignore[no-untyped-def]
+        raise AssertionError("UC registry was read on the local-YAML override path")
+
+    def get_statement(self, statement_id):  # type: ignore[no-untyped-def]
+        raise AssertionError("UC registry was read on the local-YAML override path")
+
+
+class _RegistryStubClient:
+    """Serves the given agents as an ``agent_registry`` SELECT * (real read path)."""
+
+    def __init__(self, *agents: Agent) -> None:
+        rows = [_registry_row(a, generated_at="t") for a in agents]
+        self.statement_execution = _StmtExec(_Resp(list(REGISTRY_COLUMNS), rows))
+
+
+class _NeverReadClient:
+    """A client whose registry read would raise — proves the YAML path never touches UC."""
+
+    def __init__(self) -> None:
+        self.statement_execution = _RaisingStmtExec()
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +207,98 @@ def test_refuses_without_static_token(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit, match="STATIC Databricks token"):
         ax.resolve_static_auth(_args())
     assert "DATABRICKS_CONFIG_PROFILE" not in os.environ  # never falls back to OAuth
+
+
+# ---------------------------------------------------------------------------
+# registry-driven resolution: UC by default, YAML as an explicit local-dev override
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_agent_defaults_to_uc_registry_via_stub_client() -> None:
+    # A UI-onboarded agent present ONLY in UC (no --registry, no YAML) is resolvable by
+    # the executor: its target_workspace + experiment_id come from the UC agent_registry.
+    ui_agent = Agent(
+        agent_name="ui_onboarded",
+        experiment_id="exp-uc",
+        target_workspace="/repos/ui_onboarded",
+    )
+    client = _RegistryStubClient(Agent(agent_name="other", experiment_id="e0"), ui_agent)
+
+    got = ax._resolve_agent(
+        "ui_onboarded", None, warehouse_id="wh1", catalog="cat", schema="sch", client=client
+    )
+    assert got.experiment_id == "exp-uc"  # from UC, not a YAML / guessed value
+    assert got.target_workspace == "/repos/ui_onboarded"  # from UC — the executor's edit target
+
+
+def test_resolve_agent_yaml_override_does_not_read_uc(tmp_path: Path) -> None:
+    # An EXISTING --registry YAML is the local-dev override: resolve from the file, and
+    # never touch UC (the passed client would raise if read).
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    registry = tmp_path / "agents.yaml"
+    registry.write_text(
+        "\n".join(
+            [
+                "agents:",
+                "  - agent_name: local_dev",
+                "    experiment_id: exp-yaml",
+                f"    target_workspace: {ws}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    got = ax._resolve_agent(
+        "local_dev",
+        str(registry),
+        warehouse_id="wh1",
+        catalog="cat",
+        schema="sch",
+        client=_NeverReadClient(),
+    )
+    assert got.experiment_id == "exp-yaml"
+    assert got.target_workspace == str(ws)
+
+
+def test_run_uc_agent_without_target_workspace_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The unchanged fail-closed guarantee, now sourced from UC: a UI-onboarded agent with
+    # no target_workspace configured cannot be previewed — the executor SKIPS it loud,
+    # never runs the agent against a guessed tree.
+    unconfigured = Agent(agent_name="ui_onboarded", experiment_id="exp-uc")  # target_workspace=None
+    monkeypatch.setattr(
+        ax, "_build_workspace_client", lambda *a, **k: _RegistryStubClient(unconfigured)
+    )
+
+    pending = _proposal(plan="preview me", status=ProposalStatus.PENDING)
+
+    def _list(client, wh, *, status, catalog, schema):  # type: ignore[no-untyped-def]
+        return [pending] if status is ProposalStatus.PENDING else []
+
+    monkeypatch.setattr(ax, "list_agent_task_proposals", _list)
+    monkeypatch.setattr(ax, "_build_volume_client", lambda *a, **k: FakeVolumeClient())
+    monkeypatch.setattr(ax, "_build_agent_runner", lambda *a, **k: SpyRunner({}))
+
+    # --agent ui_onboarded, NO --registry -> resolves from the stub UC registry.
+    code = ax.run(
+        ax._parse_args(
+            [
+                "--agent",
+                "ui_onboarded",
+                "--warehouse-id",
+                "wh1",
+                "--volume-root",
+                VOLUME_ROOT,
+                "--host",
+                "https://example.databricks.com",
+            ]
+        )
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "resolved_from=uc-registry" in out  # UC was the source, not a YAML
+    assert "SKIPPED" in out and "no target_workspace" in out  # fail-closed, never a guessed tree
 
 
 # ---------------------------------------------------------------------------
