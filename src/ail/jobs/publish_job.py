@@ -7,6 +7,13 @@ job's run-as identity and then delegates to :func:`ail.publish.publish`, which i
 the single source of truth for the metric logic (via :mod:`ail.metrics`) and for
 the atomic, idempotent write.
 
+Registry-driven multi-agent: with no ``--experiment`` it runs REGISTRY MODE — it
+reads every agent from the UC ``agent_registry`` (via :mod:`ail.jobs.multi_agent`)
+and publishes each agent's own experiment, one per-experiment L0 slice, with
+per-agent isolation (one agent's publish failure is logged and the loop continues).
+Passing an explicit ``--experiment`` is the single-agent override for local/manual
+runs (publish only that experiment, exactly as before).
+
 Why a wrapper exists at all
 ---------------------------
 The L0 metrics are read from MLflow's v4 trace REST store. On the reference
@@ -38,10 +45,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from collections.abc import Callable, MutableMapping
 from typing import Any
 
-from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA, REFERENCE_EXPERIMENT, publish
+from ail.jobs.multi_agent import (
+    load_registered_agents,
+    missing_registry_target,
+    run_for_each_registered_agent,
+)
+from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA, publish
+from ail.registry import Agent
 
 
 def _default_workspace_client() -> Any:
@@ -112,9 +126,16 @@ def resolve_job_auth(
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Scheduled Tier A publish: refresh the L0 UC Delta tables from MLflow traces."
+        description="Scheduled Tier A publish: refresh the L0 UC Delta tables from MLflow traces. "
+        "With no --experiment it runs REGISTRY MODE over every agent in agent_registry; "
+        "pass --experiment to publish JUST that one experiment (single-agent override)."
     )
-    parser.add_argument("--experiment", default=REFERENCE_EXPERIMENT)
+    parser.add_argument(
+        "--experiment",
+        default="",
+        help="Explicit experiment id => single-agent override (publish only that one). "
+        "Empty (the default) => registry mode: publish every agent in agent_registry.",
+    )
     parser.add_argument(
         "--warehouse-id",
         default=os.environ.get("AIL_WAREHOUSE_ID"),
@@ -140,6 +161,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return args
 
 
+def _publish_one(args: argparse.Namespace, *, experiment_id: str) -> int:
+    """Publish one experiment's L0 slice — the reused single-agent body.
+
+    Per-experiment idempotency is preserved: :func:`ail.publish.publish` REPLACEs
+    only ``experiment_id = <this experiment>``, so publishing agent A never disturbs
+    agent B's rows in the shared L0 tables.
+    """
+    publish(
+        experiment_id=experiment_id,
+        warehouse_id=args.warehouse_id,
+        catalog=args.catalog,
+        schema=args.schema,
+        max_results=args.max_results,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     auth_path = resolve_job_auth(
@@ -148,18 +186,36 @@ def main(argv: list[str] | None = None) -> int:
         token_secret_scope=args.token_secret_scope or None,
         token_secret_key=args.token_secret_key or None,
     )
+
+    if args.experiment:
+        # Single-agent override: publish JUST this experiment, exactly as before.
+        print(
+            f"[ail.jobs.publish_job] auth={auth_path} host={os.environ.get('DATABRICKS_HOST')} "
+            f"single-agent experiment={args.experiment} -> {args.catalog}.{args.schema}"
+        )
+        return _publish_one(args, experiment_id=args.experiment)
+
+    # Registry mode: publish every agent in agent_registry, one L0 slice each.
+    missing = missing_registry_target(args.warehouse_id, args.catalog, args.schema)
+    if missing:
+        print(
+            f"[ail.jobs.publish_job] registry mode requires {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 2
     print(
         f"[ail.jobs.publish_job] auth={auth_path} host={os.environ.get('DATABRICKS_HOST')} "
-        f"experiment={args.experiment} -> {args.catalog}.{args.schema}"
+        f"registry mode -> {args.catalog}.{args.schema}"
     )
-    publish(
-        experiment_id=args.experiment,
-        warehouse_id=args.warehouse_id,
-        catalog=args.catalog,
-        schema=args.schema,
-        max_results=args.max_results,
+    agents = load_registered_agents(
+        warehouse_id=args.warehouse_id, catalog=args.catalog, schema=args.schema
     )
-    return 0
+
+    def per_agent(agent: Agent) -> int:
+        return _publish_one(args, experiment_id=agent.experiment_id)
+
+    result = run_for_each_registered_agent(agents, per_agent, job_name="ail.jobs.publish_job")
+    return result.worst_rc
 
 
 if __name__ == "__main__":

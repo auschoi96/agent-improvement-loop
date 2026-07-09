@@ -48,8 +48,15 @@ resources:
             package_name: ail
             entry_point: ail-continuous-rlm
             named_parameters:
-              experiment: ${var.experiment_id}
+              # Registry mode: NO per-agent `experiment`/`reviewer-experiment`/`agent`
+              # binding. The entrypoint reads every agent from
+              # catalog.schema.agent_registry and reviews each one's OWN experiment
+              # (the reviewer's traces land in and are skipped from that same
+              # experiment). catalog/schema locate the registry table. (Pass an
+              # explicit experiment only for a local/manual single-agent override.)
               warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
               # Most powerful VIABLE judge. Effort is auto-resolved from this alias
               # (databricks-gpt-5-5-pro => xhigh) unless continuous_rlm_reasoning_effort
               # is set to override it explicitly.
@@ -60,17 +67,14 @@ resources:
               max-reviews: ${var.rlm_max_reviews_per_run}
               sample-rate: ${var.rlm_sample_rate}
               min-tokens: ${var.rlm_min_tokens}
-              reviewer-experiment: ${var.experiment_id}
               max-turns: ${var.rlm_max_turns}
-              # Goal-steering: the review rubric is derived from the operator's goal so
-              # HALO judges and recommends toward what the user is optimizing for. Empty
-              # objective-metric => the default five-guideline rubric (no goal).
-              agent: ${var.agent_name}
-              objective-metric: ${var.objective_metric}
-              goal-direction: ${var.goal_direction}
-              goal-target: ${var.goal_target}
-              goal-target-kind: ${var.goal_target_kind}
-              guardrail-judge: ${var.guardrail_judge}
+              # NO global goal-steering vars here. Registry mode steers each agent ONLY
+              # by its OWN goal_config in agent_registry (an agent with none uses the
+              # neutral default rubric — no goal). Passing a global objective-metric
+              # here would leak the operator's objective onto every un-configured agent
+              # (a cross-agent mis-attribution), so it is intentionally NOT bound. The
+              # single-agent override (--experiment ... --objective-metric ...) is the
+              # only place the global goal args apply, and the schedule never uses it.
               # Empty by default -> the entrypoint mints a short-lived bearer from the
               # run-as identity. Set both to read a stored token from a secret scope
               # (production-hardened service-principal path).

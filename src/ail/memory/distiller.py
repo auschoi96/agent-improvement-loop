@@ -26,22 +26,49 @@ enough to risk that should be split across firings.
 Every seam the driver needs is injectable (``client``, ``reserved``, ``distill``,
 ``now``) so the whole control flow — fail-closed, watermark idempotency — is tested
 without a live model or workspace.
+
+Registry-driven multi-agent: :func:`main` with no ``--experiment-id`` runs REGISTRY
+MODE — it reads every agent from the UC ``agent_registry`` (via
+:mod:`ail.jobs.multi_agent`) and distils each agent's OWN experiment from that
+agent's OWN ``annotations_table``, with per-agent isolation. The per-``(experiment,
+cohort)`` watermark keeps each agent's window independent. Passing an explicit
+``--experiment-id`` is the single-agent override for local/manual runs.
+
+Memory-isolation invariant (registry mode is FAIL-CLOSED on the per-agent table):
+the OTEL annotations table carries no ``experiment_id`` — verified against the live
+schema, it is absent from the annotation columns, the annotation ``metadata``, and
+the subject span's ``attributes``/``resource``; the experiment→trace mapping lives
+only in MLflow's server-side ``search_traces`` API, not in these UC tables. A single
+annotations table is therefore a SHARED trace store that cannot be experiment-scoped
+in SQL, so reading a shared table would pool feedback ACROSS agents. To keep each
+agent's memory isolated, registry mode requires each agent to carry its OWN
+``annotations_table`` (its own trace store) and does NOT fall back to a global one;
+an agent without one is skipped with a loud error (its failure is isolated — the
+other agents still run). The single-agent override still accepts an explicit
+``--annotations-table`` (a deliberate, operator-chosen table for a manual run).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from ail.jobs.multi_agent import (
+    load_registered_agents,
+    missing_registry_target,
+    run_for_each_registered_agent,
+)
 from ail.memory.assessments import AssessmentRow, max_created_at, read_assessments
 from ail.memory.provenance import ReservedPools, resolve_reserved_pools
 from ail.memory.schema import MEMORY_TABLE
 from ail.memory.watermark import read_watermark, watermark_scope, write_watermark
 from ail.memory.writeback import WriteTally, create_submit_memory_tool
+from ail.registry import Agent
 
 DEFAULT_MODEL = "databricks-claude-opus-4-6"
 DEFAULT_COHORT = "claude_code"
@@ -369,11 +396,19 @@ def run_memory_distiller(
 # ---------------------------------------------------------------------------
 
 
-def _parse_args(argv: list[str] | None) -> DistillerConfig:
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Distill recent RLM + judge feedback into governed advisory-memory rows."
+        description="Distill recent RLM + judge feedback into governed advisory-memory rows. "
+        "With no --experiment-id it runs REGISTRY MODE over every agent in agent_registry "
+        "(each agent's own experiment + annotations_table); pass --experiment-id to distil "
+        "JUST that one experiment (single-agent override)."
     )
-    parser.add_argument("--experiment-id", default=os.environ.get("AIL_EXPERIMENT_ID", ""))
+    parser.add_argument(
+        "--experiment-id",
+        default=os.environ.get("AIL_EXPERIMENT_ID", ""),
+        help="Explicit experiment id => single-agent override. Empty (the default) => "
+        "registry mode: distil every agent in agent_registry.",
+    )
     parser.add_argument("--warehouse-id", default=os.environ.get("AIL_WAREHOUSE_ID", ""))
     parser.add_argument("--catalog", default=os.environ.get("AIL_CATALOG", ""))
     parser.add_argument("--schema", default=os.environ.get("AIL_SCHEMA", ""))
@@ -381,7 +416,9 @@ def _parse_args(argv: list[str] | None) -> DistillerConfig:
         "--annotations-table",
         default=os.environ.get("AIL_MEMORY_ANNOTATIONS_TABLE", ""),
         help="Fully-qualified OTEL annotations table, e.g. "
-        "austin_choi_omni_agent_catalog.mlflow_traces.cc_otel_annotations",
+        "austin_choi_omni_agent_catalog.mlflow_traces.cc_otel_annotations. Used ONLY by the "
+        "single-agent --experiment-id override. Registry mode ignores it and requires each "
+        "agent's OWN annotations_table in the registry (no global fallback — memory isolation).",
     )
     parser.add_argument("--cohort", default=DEFAULT_COHORT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -398,30 +435,47 @@ def _parse_args(argv: list[str] | None) -> DistillerConfig:
     parser.add_argument("--token-secret-key", default=os.environ.get("AIL_TOKEN_SECRET_KEY", ""))
     args = parser.parse_args(argv)
 
+    # Fail-closed on the workspace-safety vars (needed in BOTH modes: registry mode
+    # reads agent_registry from catalog.schema and writes each agent's memory there;
+    # single-agent mode writes there too). No baked-in defaults — a deploy that forgot
+    # them errors here rather than reading/writing the wrong workspace (#67/#5).
     missing = [
         name
         for name, value in (
-            ("--experiment-id", args.experiment_id),
             ("--warehouse-id", args.warehouse_id),
             ("--catalog", args.catalog),
             ("--schema", args.schema),
-            ("--annotations-table", args.annotations_table),
         )
         if not value
     ]
     if missing:
-        # Fail-closed on the workspace-safety vars: no defaults are baked in, so a
-        # deploy that forgot to set them errors here rather than reading/writing the
-        # wrong workspace (the #67/#5 pattern).
         parser.error(f"missing required arg(s): {', '.join(missing)}")
 
+    # Single-agent mode additionally requires an annotations table (as before): the
+    # distiller cannot read one experiment's feedback without it.
+    if args.experiment_id and not args.annotations_table:
+        parser.error("--annotations-table is required with --experiment-id (single-agent mode)")
+
+    return args
+
+
+def _config_from_args(
+    args: argparse.Namespace, *, experiment_id: str, annotations_table: str, cohort: str
+) -> DistillerConfig:
+    """Build a :class:`DistillerConfig` from shared args + one agent's identity.
+
+    Everything except ``experiment_id`` / ``annotations_table`` / ``cohort`` is a
+    shared knob; those three come from the specific agent (or from the args in the
+    single-agent path). Per-scope idempotency is preserved because the distiller's
+    watermark scope is ``(experiment_id, cohort)`` — distinct per agent.
+    """
     return DistillerConfig(
-        experiment_id=args.experiment_id,
+        experiment_id=experiment_id,
         warehouse_id=args.warehouse_id,
         catalog=args.catalog,
         schema=args.schema,
-        annotations_table=args.annotations_table,
-        cohort=args.cohort,
+        annotations_table=annotations_table,
+        cohort=cohort,
         model=args.model,
         max_turns=args.max_turns,
         max_assessments=args.max_assessments,
@@ -433,15 +487,93 @@ def _parse_args(argv: list[str] | None) -> DistillerConfig:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    config = _parse_args(argv)
-    print(
-        f"[ail.memory.distiller] experiment={config.experiment_id} model={config.model} "
-        f"-> {config.catalog}.{config.schema}.{MEMORY_TABLE} "
-        f"(annotations={config.annotations_table})"
+def _resolve_auth_and_client(args: argparse.Namespace) -> Any:
+    """Resolve run-as auth into the environment then build one workspace client.
+
+    Mirrors :func:`_build_client` but takes the args (registry mode has no single
+    config yet). The one client is reused for the registry read AND threaded into
+    every per-agent :func:`run_memory_distiller` (via ``DistillerDeps``), so auth is
+    minted once, not per agent.
+    """
+    from ail.jobs.publish_job import resolve_job_auth
+    from ail.publish import _build_workspace_client
+
+    auth_path = resolve_job_auth(
+        token_secret_scope=args.token_secret_scope or None,
+        token_secret_key=args.token_secret_key or None,
     )
-    run_memory_distiller(config)
-    return 0
+    print(f"[ail.memory.distiller] auth={auth_path} host={os.environ.get('DATABRICKS_HOST')}")
+    return _build_workspace_client(None)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+
+    if args.experiment_id:
+        # Single-agent override: distil JUST this experiment, exactly as before.
+        config = _config_from_args(
+            args,
+            experiment_id=args.experiment_id,
+            annotations_table=args.annotations_table,
+            cohort=args.cohort,
+        )
+        print(
+            f"[ail.memory.distiller] single-agent experiment={config.experiment_id} "
+            f"model={config.model} -> {config.catalog}.{config.schema}.{MEMORY_TABLE} "
+            f"(annotations={config.annotations_table})"
+        )
+        run_memory_distiller(config)
+        return 0
+
+    # Registry mode: distil every agent in agent_registry, each on its own experiment
+    # + annotations_table, with per-agent isolation and per-(experiment,cohort) watermarks.
+    missing = missing_registry_target(args.warehouse_id, args.catalog, args.schema)
+    if missing:
+        print(
+            f"[ail.memory.distiller] registry mode requires {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 2
+    client = _resolve_auth_and_client(args)
+    agents = load_registered_agents(
+        warehouse_id=args.warehouse_id, catalog=args.catalog, schema=args.schema, client=client
+    )
+
+    def per_agent(agent: Agent) -> int:
+        # FAIL-CLOSED per-agent isolation: each agent MUST have its OWN annotations_table
+        # in the registry. There is deliberately NO fallback to the global
+        # --annotations-table here: the OTEL annotations table carries no experiment_id
+        # (and none is derivable from spans/resource), so a SHARED table cannot be
+        # experiment-scoped in SQL — reading a shared table would pool feedback ACROSS
+        # agents (agent B's memory would ingest agent A's traces). Requiring a per-agent
+        # table makes each agent read ONLY its own trace store. An agent with no own
+        # table raises here -> the fan-out logs it, records the failure (worst_rc
+        # non-zero), and CONTINUES to the next agent (this one alone is skipped).
+        if not agent.annotations_table:
+            raise RuntimeError(
+                f"agent {agent.agent_name!r} has no annotations_table in agent_registry; "
+                "registry mode requires a per-agent annotations table to keep memory "
+                "isolated (the shared OTEL table cannot be experiment-scoped in SQL). "
+                "Configure this agent's annotations_table in the registry, or run it via "
+                "the single-agent --experiment-id override with an explicit "
+                "--annotations-table."
+            )
+        config = _config_from_args(
+            args,
+            experiment_id=agent.experiment_id,
+            annotations_table=agent.annotations_table,
+            cohort=agent.agent_name,
+        )
+        print(
+            f"[ail.memory.distiller] agent={agent.agent_name} -> "
+            f"{config.catalog}.{config.schema}.{MEMORY_TABLE} "
+            f"(annotations={agent.annotations_table})"
+        )
+        run_memory_distiller(config, deps=DistillerDeps(client=client))
+        return 0
+
+    result = run_for_each_registered_agent(agents, per_agent, job_name="ail.memory.distiller")
+    return result.worst_rc
 
 
 if __name__ == "__main__":

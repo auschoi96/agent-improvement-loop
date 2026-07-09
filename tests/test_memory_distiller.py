@@ -266,3 +266,197 @@ def test_reprocess_same_window_inserts_zero_duplicates(fake_sql_client) -> None:
     run_memory_distiller(_config(), deps=deps)  # run 2, same feedback window
 
     assert net_inserted == [1, 0]  # second reprocess adds zero duplicate rows
+
+
+# -- registry (multi-agent) mode of main() ---------------------------------
+
+
+def _agent(name: str, exp: str, **over: object):
+    from ail.registry import Agent
+
+    return Agent(agent_name=name, experiment_id=exp, **over)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def main_registry_stub(monkeypatch):
+    """Stub main()'s registry seams; capture each per-agent DistillerConfig."""
+    import ail.memory.distiller as distiller_mod
+
+    configs: list[DistillerConfig] = []
+    monkeypatch.setattr(distiller_mod, "_resolve_auth_and_client", lambda args: object())
+    monkeypatch.setattr(
+        distiller_mod, "run_memory_distiller", lambda config, **kw: configs.append(config)
+    )
+    return {"mod": distiller_mod, "configs": configs}
+
+
+def test_registry_mode_threads_each_agents_own_experiment_and_table(
+    main_registry_stub, monkeypatch
+):
+    # Each agent distils ITS OWN experiment from ITS OWN annotations table (its own
+    # trace store) — no cross-agent pooling. cohort=agent_name scopes the watermark.
+    mod = main_registry_stub["mod"]
+    monkeypatch.setattr(
+        mod,
+        "load_registered_agents",
+        lambda **kw: [
+            _agent("a1", "EXP_A", annotations_table="cat.sch.a1_ann"),
+            _agent("a2", "EXP_B", annotations_table="cat.sch.a2_ann"),
+        ],
+    )
+
+    rc = mod.main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+    assert rc == 0
+
+    configs = main_registry_stub["configs"]
+    assert (configs[0].experiment_id, configs[0].annotations_table, configs[0].cohort) == (
+        "EXP_A",
+        "cat.sch.a1_ann",
+        "a1",
+    )
+    assert (configs[1].experiment_id, configs[1].annotations_table, configs[1].cohort) == (
+        "EXP_B",
+        "cat.sch.a2_ann",
+        "a2",
+    )
+
+
+def test_registry_mode_ignores_global_annotations_fallback(main_registry_stub, monkeypatch):
+    # BLOCKER-2 REGRESSION: registry mode must NOT read a shared/global annotations
+    # table (the OTEL table has no experiment_id, so a shared table pools feedback
+    # across agents). An agent with no OWN annotations_table is SKIPPED (isolated
+    # failure) EVEN WHEN a global --annotations-table is passed — proving the pooling
+    # vector is closed. The configured agent reads ONLY its own table, never the global.
+    mod = main_registry_stub["mod"]
+    ran: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod,
+        "run_memory_distiller",
+        lambda config, **kw: ran.append((config.cohort, config.annotations_table)),
+    )
+    monkeypatch.setattr(
+        mod,
+        "load_registered_agents",
+        lambda **kw: [
+            _agent("a1", "EXP_A"),  # NO own annotations_table
+            _agent("a2", "EXP_B", annotations_table="cat.sch.a2_ann"),
+        ],
+    )
+
+    rc = mod.main(
+        [
+            "--warehouse-id=wh",
+            "--catalog=cat",
+            "--schema=sch",
+            # A global fallback that MUST be ignored in registry mode.
+            "--annotations-table=cat.sch.SHARED_ann",
+        ]
+    )
+    # a1 skipped (no own table; the shared fallback is NOT used); a2 ran on ITS OWN table.
+    assert ran == [("a2", "cat.sch.a2_ann")]
+    assert "cat.sch.SHARED_ann" not in [t for _, t in ran]  # shared table never read
+    assert rc == 1  # a1's skip is a recorded, isolated failure
+
+
+def test_registry_mode_isolation_one_agent_failure_continues(main_registry_stub, monkeypatch):
+    mod = main_registry_stub["mod"]
+    attempted: list[str] = []
+
+    def fake_run(config, **kw):
+        attempted.append(config.experiment_id)
+        if config.experiment_id == "EXP_B":
+            raise RuntimeError("distill blew up for B")
+
+    monkeypatch.setattr(mod, "run_memory_distiller", fake_run)
+    monkeypatch.setattr(
+        mod,
+        "load_registered_agents",
+        lambda **kw: [
+            _agent("a1", "EXP_A", annotations_table="t1"),
+            _agent("a2", "EXP_B", annotations_table="t2"),
+            _agent("a3", "EXP_C", annotations_table="t3"),
+        ],
+    )
+    rc = mod.main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+    assert attempted == ["EXP_A", "EXP_B", "EXP_C"]  # all three attempted
+    assert rc == 1  # worst_rc non-zero
+
+
+def test_registry_mode_agent_without_annotations_and_no_fallback_is_isolated(
+    main_registry_stub, monkeypatch
+):
+    # An agent with no annotations_table AND no --annotations-table fallback fails
+    # ONLY that agent (isolated), never the whole job.
+    mod = main_registry_stub["mod"]
+    ran: list[str] = []
+    monkeypatch.setattr(mod, "run_memory_distiller", lambda config, **kw: ran.append(config.cohort))
+    monkeypatch.setattr(
+        mod,
+        "load_registered_agents",
+        lambda **kw: [_agent("a1", "EXP_A"), _agent("a2", "EXP_B", annotations_table="t2")],
+    )
+    rc = mod.main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])  # no fallback
+    assert ran == ["a2"]  # a1 skipped (no table); a2 still ran
+    assert rc == 1
+
+
+def test_registry_mode_empty_is_clean_no_op(main_registry_stub, monkeypatch):
+    mod = main_registry_stub["mod"]
+    monkeypatch.setattr(mod, "load_registered_agents", lambda **kw: [])
+    rc = mod.main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+    assert rc == 0
+    assert main_registry_stub["configs"] == []  # no fabricated work
+
+
+def test_registry_read_error_propagates(main_registry_stub, monkeypatch):
+    mod = main_registry_stub["mod"]
+
+    def boom(**kw):
+        raise RuntimeError("catalog does not exist")
+
+    monkeypatch.setattr(mod, "load_registered_agents", boom)
+    with pytest.raises(RuntimeError, match="catalog does not exist"):
+        mod.main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])
+
+
+def test_single_agent_override_still_works(monkeypatch):
+    import ail.memory.distiller as distiller_mod
+
+    seen: list[DistillerConfig] = []
+    monkeypatch.setattr(
+        distiller_mod, "run_memory_distiller", lambda config, **kw: seen.append(config)
+    )
+    # An explicit --experiment-id runs JUST that one (single-agent path); no registry read.
+    monkeypatch.setattr(
+        distiller_mod, "load_registered_agents", lambda **kw: pytest.fail("must not read registry")
+    )
+    rc = distiller_mod.main(
+        [
+            "--experiment-id=EXP_SOLO",
+            "--warehouse-id=wh",
+            "--catalog=cat",
+            "--schema=sch",
+            "--annotations-table=cat.sch.ann",
+            "--cohort=solo",
+        ]
+    )
+    assert rc == 0
+    assert seen[0].experiment_id == "EXP_SOLO"
+    assert seen[0].cohort == "solo"
+
+
+def test_single_agent_requires_annotations_table(monkeypatch):
+    import ail.memory.distiller as distiller_mod
+
+    with pytest.raises(SystemExit):
+        distiller_mod.main(
+            ["--experiment-id=EXP", "--warehouse-id=wh", "--catalog=cat", "--schema=sch"]
+        )
+
+
+def test_registry_mode_requires_catalog_schema(main_registry_stub, monkeypatch):
+    mod = main_registry_stub["mod"]
+    monkeypatch.setattr(mod, "load_registered_agents", lambda **kw: pytest.fail("should not read"))
+    # --warehouse-id present but no catalog/schema: _parse_args fail-closes (exit 2).
+    with pytest.raises(SystemExit):
+        mod.main(["--warehouse-id=wh"])
