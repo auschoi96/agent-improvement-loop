@@ -56,12 +56,18 @@ resources:
             # root, so this is <bundle-root>/src/ail/jobs/memory_distiller.py.
             python_file: ../src/ail/jobs/memory_distiller.py
             parameters:
-              - --experiment-id=${var.experiment_id}
+              # Registry mode: NO per-agent --experiment-id / --cohort binding. The
+              # entrypoint reads every agent from catalog.schema.agent_registry and
+              # distils each one's OWN experiment from its OWN annotations_table, using
+              # its agent_name as the (experiment, cohort) watermark scope. catalog/schema
+              # locate the registry table AND are where each agent's memory is written.
+              # (Pass --experiment-id only for a local/manual single-agent override.)
               - --warehouse-id=${var.warehouse_id}
               - --catalog=${var.catalog}
               - --schema=${var.schema}
+              # GLOBAL FALLBACK annotations table: used only for an agent whose registry
+              # annotations_table is unset; each agent's own registry value takes priority.
               - --annotations-table=${var.memory_annotations_table}
-              - --cohort=${var.agent_name}
               - --model=${var.memory_distiller_model}
               - --max-turns=${var.memory_max_turns}
               - --max-assessments=${var.memory_max_assessments}
