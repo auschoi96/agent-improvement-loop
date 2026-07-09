@@ -175,9 +175,7 @@ def test_registry_mode_publishes_each_agents_own_experiment(
         "load_registered_agents",
         lambda **kw: [_agent("a1", "EXP_A"), _agent("a2", "EXP_B")],
     )
-    monkeypatch.setattr(
-        publish_job, "publish", lambda **kw: published.append(kw["experiment_id"])
-    )
+    monkeypatch.setattr(publish_job, "publish", lambda **kw: published.append(kw["experiment_id"]))
 
     # No --experiment => registry mode over all agents.
     rc = main(["--warehouse-id=wh", "--catalog=cat", "--schema=sch"])

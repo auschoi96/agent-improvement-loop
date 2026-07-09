@@ -61,9 +61,7 @@ def test_empty_registry_is_a_clean_no_op() -> None:
 
 
 def test_none_return_is_treated_as_success() -> None:
-    result = run_for_each_registered_agent(
-        [_agent("a1", "e1")], lambda a: None, job_name="test"
-    )
+    result = run_for_each_registered_agent([_agent("a1", "e1")], lambda a: None, job_name="test")
     assert result.worst_rc == 0
     assert result.n_failed == 0
 

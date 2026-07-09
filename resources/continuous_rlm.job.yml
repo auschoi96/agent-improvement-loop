@@ -48,8 +48,15 @@ resources:
             package_name: ail
             entry_point: ail-continuous-rlm
             named_parameters:
-              experiment: ${var.experiment_id}
+              # Registry mode: NO per-agent `experiment`/`reviewer-experiment`/`agent`
+              # binding. The entrypoint reads every agent from
+              # catalog.schema.agent_registry and reviews each one's OWN experiment
+              # (the reviewer's traces land in and are skipped from that same
+              # experiment). catalog/schema locate the registry table. (Pass an
+              # explicit experiment only for a local/manual single-agent override.)
               warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
               # Most powerful VIABLE judge. Effort is auto-resolved from this alias
               # (databricks-gpt-5-5-pro => xhigh) unless continuous_rlm_reasoning_effort
               # is set to override it explicitly.
@@ -60,12 +67,11 @@ resources:
               max-reviews: ${var.rlm_max_reviews_per_run}
               sample-rate: ${var.rlm_sample_rate}
               min-tokens: ${var.rlm_min_tokens}
-              reviewer-experiment: ${var.experiment_id}
               max-turns: ${var.rlm_max_turns}
-              # Goal-steering: the review rubric is derived from the operator's goal so
-              # HALO judges and recommends toward what the user is optimizing for. Empty
-              # objective-metric => the default five-guideline rubric (no goal).
-              agent: ${var.agent_name}
+              # Goal-steering GLOBAL FALLBACK: each agent's per-agent goal_config in the
+              # registry takes precedence; these bundle vars apply only to an agent with
+              # NO goal_config configured. Empty objective-metric => the default
+              # five-guideline rubric (no goal).
               objective-metric: ${var.objective_metric}
               goal-direction: ${var.goal_direction}
               goal-target: ${var.goal_target}
