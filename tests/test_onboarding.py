@@ -358,6 +358,17 @@ def test_create_experiment_bare_name_failclosed_when_home_unresolvable() -> None
     assert client.created == []  # never attempted
 
 
+@pytest.mark.parametrize("slashes_only", ["/", "//", "///"])
+def test_create_experiment_failclosed_on_slashes_only_name(slashes_only: str) -> None:
+    # A slashes-only name starts with '/' but has NO leaf segment — it is not a valid
+    # absolute workspace path. Fail closed with an honest ExperimentAccessError BEFORE
+    # any create; nothing is created at an invalid path.
+    client = _FakeExperimentClient(create_returns="exp-x")
+    with pytest.raises(ExperimentAccessError):
+        create_experiment(slashes_only, client=client)
+    assert client.created == []  # never attempted
+
+
 def test_create_experiment_refuses_existing_name() -> None:
     # (f) The 'already exists' refusal is preserved, now against the FINAL absolute
     # name — never silently reuse another agent's experiment.

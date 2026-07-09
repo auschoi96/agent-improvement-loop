@@ -248,13 +248,20 @@ def _absolute_experiment_path(name: str, *, client: ExperimentClient) -> str:
     """Resolve ``name`` to a valid ABSOLUTE workspace experiment path (fail-closed).
 
     An already-absolute name (leading ``/``) is returned unchanged — back-compat, the
-    wizard may already pass one. A BARE name is placed under the caller's workspace
+    wizard may already pass one — provided it has a real, non-empty leaf segment; a
+    slashes-only name (``/``, ``//``) has none and is fail-closed rather than created
+    at an invalid workspace path. A BARE name is placed under the caller's workspace
     home (resolved LIVE via :meth:`ExperimentClient.workspace_home`); surrounding
     slashes are trimmed so it becomes a clean path segment. If the home cannot be
     resolved, we raise :class:`ExperimentAccessError` with an actionable message
     rather than create at a guessed/fabricated path.
     """
     if name.startswith("/"):
+        if not name.strip("/"):
+            raise ExperimentAccessError(
+                f"invalid experiment name {name!r}: a workspace experiment path needs a "
+                "name after '/' — e.g. '/Users/you/my-agent'. No experiment was created."
+            )
         return name
     home = client.workspace_home()
     if not home:
