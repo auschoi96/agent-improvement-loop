@@ -37,6 +37,14 @@ run then dies mid-flight. So this entrypoint requires a **static** ``DATABRICKS_
 experiment lives in), drops any ambient ``DATABRICKS_CONFIG_PROFILE`` so nothing falls
 back to refreshing OAuth, and refuses to run without one.
 
+**Registry-driven (UC ``agent_registry``).** The agent's experiment is resolved by name
+from the UC ``agent_registry`` (the SAME table the app writes and the scheduled jobs
+read) via the shared :func:`ail.jobs.multi_agent.resolve_registered_agent`, so a
+UI-onboarded agent is plannable with just ``--agent`` + the UC connection. ``--experiment``
+is an optional local/manual override: when given it wins (no registry read); when omitted
+the experiment comes from UC. Fail-closed when neither yields an experiment — the cycle
+never plans against an empty/guessed experiment.
+
 **Reuse.** The feedback assembly, goal construction, readiness gate, and publish are
 the *same* seams the (paused, prove-before-propose) unified cycle uses
 (:mod:`ail.jobs.optimization_cycle`); only the cycle is the evidence-first
@@ -52,6 +60,7 @@ from functools import partial
 
 from ail.goals.compiler import CompiledGoal
 from ail.jobs import optimization_cycle as oc
+from ail.jobs.multi_agent import resolve_registered_agent
 from ail.jobs.publish_job import resolve_job_auth
 from ail.loop.candidate_builders import evidence_candidate_builder
 from ail.loop.decision_rules import FeedbackBundle
@@ -63,6 +72,7 @@ from ail.registry import Agent
 
 __all__ = [
     "resolve_static_auth",
+    "resolve_planner_agent",
     "surface_evidence",
     "surface_plan",
     "surface_proposals",
@@ -289,6 +299,45 @@ def resolve_goal(args: argparse.Namespace) -> tuple[CompiledGoal, str]:
 
 
 # ---------------------------------------------------------------------------
+# Agent resolution (GAP): registry-driven experiment, with --experiment as override.
+# ---------------------------------------------------------------------------
+
+
+def resolve_planner_agent(args: argparse.Namespace) -> tuple[Agent, str]:
+    """Resolve the planner's :class:`~ail.registry.Agent`, registry-driven by default.
+
+    Returns ``(agent, source)`` where ``source`` is:
+
+    * ``"uc-registry"`` — the default: resolve the agent by name from the UC
+      ``agent_registry`` (the SAME table the app writes and the scheduled jobs read) via
+      the shared :func:`ail.jobs.multi_agent.resolve_registered_agent`, taking its
+      ``experiment_id`` — and carrying ``goal_config`` and the rest — straight from UC.
+      So a UI-onboarded agent is plannable with just ``--agent`` + the UC connection
+      (``--warehouse-id`` / ``--catalog`` / ``--schema``); or
+    * ``"explicit-arg"`` — the local/manual override: when ``--experiment`` is given it
+      WINS, and the Agent is built from it directly with **no** registry read (a one-off
+      run against an explicit experiment).
+
+    Fail-closed: with neither ``--experiment`` nor a registry match,
+    :func:`resolve_registered_agent` raises :class:`KeyError` — the cycle never plans
+    against an empty/guessed experiment. A real registry-read infra error propagates.
+    """
+    if args.experiment:
+        return Agent(agent_name=args.agent, experiment_id=args.experiment), "explicit-arg"
+    from ail.publish import _build_workspace_client
+
+    client = _build_workspace_client(None)  # static env token (resolve_static_auth pinned it)
+    agent = resolve_registered_agent(
+        args.agent,
+        warehouse_id=args.warehouse_id,
+        catalog=args.catalog,
+        schema=args.schema,
+        client=client,
+    )
+    return agent, "uc-registry"
+
+
+# ---------------------------------------------------------------------------
 # One evidence-first run: read evidence -> plan/gate/propose -> publish.
 # ---------------------------------------------------------------------------
 
@@ -298,11 +347,20 @@ def run(args: argparse.Namespace) -> int:
 
     Returns ``0`` on a completed run (proposals published, or the empty set published
     to clear a superseded slice — unless ``--dry-run``). Returns ``2`` fail-closed when
-    the **evidence or readiness could not be read**: it prints an honest error and
-    publishes **nothing** (it never clears the agent's slice on an unknown state, and
-    never fabricates a proposal).
+    the **agent cannot be resolved** (no ``--experiment`` and not in the registry) or the
+    **evidence or readiness could not be read**: it prints an honest error and publishes
+    **nothing** (it never clears the agent's slice on an unknown state, and never
+    fabricates a proposal or a guessed experiment).
     """
-    agent = Agent(agent_name=args.agent, experiment_id=args.experiment)
+    try:
+        agent, experiment_source = resolve_planner_agent(args)
+    except KeyError as exc:
+        print(f"{_TAG} ERROR: {exc}; writing NO proposal (fail-closed, no guessed experiment).")
+        return 2
+    # The reused feedback/gate seams read ``args.experiment``; pin it to the resolved id
+    # so a registry-resolved experiment (when --experiment was omitted) is what the cycle
+    # actually runs against — not the None it started as.
+    args.experiment = agent.experiment_id
     goal, goal_source = resolve_goal(args)
 
     planner: Planner = (
@@ -310,9 +368,9 @@ def run(args: argparse.Namespace) -> int:
     )
 
     print(
-        f"{_TAG} agent={agent.agent_name} experiment={args.experiment} "
-        f"host={os.environ.get('DATABRICKS_HOST')} goal_source={goal_source} "
-        f"objective={goal.objective_metric} "
+        f"{_TAG} agent={agent.agent_name} experiment={agent.experiment_id} "
+        f"experiment_source={experiment_source} host={os.environ.get('DATABRICKS_HOST')} "
+        f"goal_source={goal_source} objective={goal.objective_metric} "
         f"target={goal.target.kind}:{goal.target.value} confirmed={goal.human_confirmed} "
         f"table={args.catalog}.{args.schema}.agent_proposed_actions dry_run={args.dry_run}"
     )
@@ -409,11 +467,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         description=(
             "Local companion planner (evidence-first, no proving): read an agent's "
             "judge/RLM/L0 evidence, plan (Lane A + Lane B), gate on readiness + judge trust, "
-            "and publish PENDING evidence-backed proposals. Proves nothing; applies nothing."
+            "and publish PENDING evidence-backed proposals. Registry-driven: the agent's "
+            "experiment is resolved from the UC agent_registry by --agent; --experiment is an "
+            "optional local override. Proves nothing; applies nothing."
         )
     )
     parser.add_argument("--agent", default="claude_code", help="Agent name (proposal scope).")
-    parser.add_argument("--experiment", required=True, help="MLflow experiment id (the agent's).")
+    parser.add_argument(
+        "--experiment",
+        default=None,
+        help="MLflow experiment id (LOCAL/MANUAL OVERRIDE). Optional: when omitted, the "
+        "experiment is resolved from the UC agent_registry by --agent (the registry-driven "
+        "default). When given, it OVERRIDES the registry (a one-off run against this experiment). "
+        "Fail-closed if neither is available.",
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get("DATABRICKS_HOST"),
