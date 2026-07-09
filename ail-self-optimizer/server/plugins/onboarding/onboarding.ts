@@ -67,6 +67,25 @@ function goalsField(body: Record<string, unknown>): string[] {
   return Array.isArray(v) ? v.filter((g): g is string => typeof g === 'string') : [];
 }
 
+// A plain-object payload field (e.g. the requirements-confirmed goal_config). Only a
+// non-null, non-array object is forwarded; anything else is omitted so the engine sees
+// it as absent and validates fail-closed. The engine (not the route) owns the shape —
+// the route relays it verbatim (two-tier: goal knobs are Python's source of truth).
+function recordField(body: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const v = body[key];
+  return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+// An optional trimmed string field; a blank/absent/non-string value is omitted so the
+// engine persists it as None (a registered-but-not-fully-functional agent) rather than
+// an empty-string table/path. Never fabricated.
+function optionalStringField(body: Record<string, unknown>, key: string): string | undefined {
+  const v = body[key];
+  if (typeof v !== 'string') return undefined;
+  const trimmed = v.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 // The human's explicit objective target (a signed relative fraction). Only a finite
 // number is forwarded; anything else is omitted so the engine refuses honestly
 // ("set/acknowledge the target first") rather than being handed a fabricated value.
@@ -120,7 +139,11 @@ export async function handleCreateExperiment(
 }
 
 // Page 4: register the agent by reusing ail.publish_versions (server-side). The
-// actor is the AUTHENTICATED identity; a spoofed actor in the body is ignored.
+// actor is the AUTHENTICATED identity; a spoofed actor in the body is ignored. The
+// extended registry fields — the executor's target_workspace, the memory job's
+// annotations_table, and the requirements-confirmed goal_config — are forwarded to the
+// engine, which sets them on the persisted Agent and validates their types fail-closed
+// (a bad type is an honest REFUSED, nothing written). All three are optional.
 export async function handleRegisterAgent(
   req: OnboardingHttpRequest,
   res: OnboardingHttpResponse,
@@ -136,7 +159,16 @@ export async function handleRegisterAgent(
     return badRequest(res, 'agent_name and experiment_id are required');
   }
   if (goals.length === 0) return badRequest(res, 'select at least one goal');
-  await dispatch(res, bridge, { action: 'register_agent', actor, agent_name, experiment_id, goals });
+  await dispatch(res, bridge, {
+    action: 'register_agent',
+    actor,
+    agent_name,
+    experiment_id,
+    goals,
+    goal_config: recordField(body, 'goal_config'),
+    annotations_table: optionalStringField(body, 'annotations_table'),
+    target_workspace: optionalStringField(body, 'target_workspace'),
+  });
 }
 
 // Free-form requirements PREVIEW: hand the raw requirements blob to the engine,

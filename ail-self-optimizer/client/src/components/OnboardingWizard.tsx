@@ -144,7 +144,14 @@ export function OnboardingWizard({
     if (!state.resolved) return;
     void postJson<RegisterResponse>(
       API.register,
-      registerBody(state.agentName, state.resolved.experiment_id, state.goals)
+      // Thread the captured executor path + memory table, and the requirements-confirmed
+      // goal_config when present (null on the catalog path → RLM neutral). The actor is
+      // NEVER sent — the server resolves it from the authenticated request.
+      registerBody(state.agentName, state.resolved.experiment_id, state.goals, {
+        targetWorkspace: state.targetWorkspace,
+        annotationsTable: state.annotationsTable,
+        goalConfig: state.goalConfig,
+      })
     )
       .then(({ status, body }) => {
         if (status === 401) {
@@ -474,9 +481,15 @@ function DataGateStep({ state, patch, requirements, reqError }: RequirementsProp
 }
 
 // Page 4 — name + register. Registering reuses ail.publish_versions server-side, so
-// the agent appears in the existing AgentSwitcher on the next refresh.
+// the agent appears in the existing AgentSwitcher on the next refresh. This step also
+// CAPTURES the two fields that make the agent fully functional across the loop — the
+// executor's target workspace and the memory job's annotations table — and threads
+// them (plus any requirements-confirmed goal_config) onto the register payload. Both
+// are optional and are never fabricated: an agent registered without them is honestly
+// registered-but-not-fully-functional (the executor / memory job stay fail-closed).
 function RegisterStep({ state, patch, result }: StepProps & { result: RegisterResponse | null }) {
   const message = result ? registerMessage(result) : null;
+  const done = result?.outcome === 'registered';
   return (
     <div className="space-y-4">
       <div className="rounded-md border p-3 space-y-1 text-sm">
@@ -496,9 +509,42 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
           value={state.agentName}
           placeholder="e.g. my_claude_code_agent"
           onChange={(e) => patch({ agentName: e.target.value })}
-          disabled={result?.outcome === 'registered'}
+          disabled={done}
         />
       </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="target-workspace">Target workspace (repo/path the executor edits)</Label>
+        <Input
+          id="target-workspace"
+          className="w-full max-w-xl"
+          value={state.targetWorkspace}
+          placeholder="e.g. /Workspace/Repos/me/my_agent"
+          onChange={(e) => patch({ targetWorkspace: e.target.value })}
+          disabled={done}
+        />
+        <p className="text-xs text-muted-foreground">
+          Required for the open-ended executor to run this agent — it edits and snapshots this path. Leave blank to
+          register now and add it later; until then the executor stays fail-closed on this agent. Not guessed.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="annotations-table">Annotations table (OTEL table the memory job reads)</Label>
+        <Input
+          id="annotations-table"
+          className="w-full max-w-xl"
+          value={state.annotationsTable}
+          placeholder="e.g. catalog.schema.otel_annotations"
+          onChange={(e) => patch({ annotationsTable: e.target.value })}
+          disabled={done}
+        />
+        <p className="text-xs text-muted-foreground">
+          Fully-qualified table the memory-distiller reads this agent&apos;s annotations from. Required for the memory
+          job — it skips an agent with no annotations table. Leave blank to add it later. Not guessed.
+        </p>
+      </div>
+
       <Message message={message} />
     </div>
   );
@@ -571,6 +617,12 @@ function RequirementsMode({ state, patch, onClose }: StepProps & { onClose: () =
         return;
       }
       setConfirmResult(body);
+      // Capture the confirmed goal (Python's registry goal_config shape) into wizard
+      // state so the register step threads it onto the payload — confirm → register →
+      // RLM steers. Relayed verbatim (two-tier: Python owns the goal knobs).
+      if (body.outcome === 'requirements_confirmed') {
+        patch({ goalConfig: body.goal_config ?? null });
+      }
     } catch {
       setConfirmResult({ outcome: 'error', error: 'Network error confirming requirements.' });
     } finally {

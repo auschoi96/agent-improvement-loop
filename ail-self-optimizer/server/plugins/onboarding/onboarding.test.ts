@@ -170,6 +170,55 @@ describe('handleRegisterAgent — authenticated write, body identity ignored', (
     expect((captured.body as { outcome: string }).outcome).toBe('registered');
   });
 
+  it('forwards the executor workspace, memory table, and goal_config; actor stays server-set', async () => {
+    const { bridge, calls } = recordingBridge({ outcome: 'registered', agent_name: 'my_agent' });
+    const { res } = fakeRes();
+    const goal_config = {
+      objective_metric: 'no_hallucinated_tool_calls',
+      goal_direction: 'maximize',
+      goal_target: 0.25,
+    };
+    await handleRegisterAgent(
+      req(AUTH, {
+        agent_name: 'my_agent',
+        experiment_id: 'exp-1',
+        goals: ['cost'],
+        target_workspace: '  /Workspace/Repos/me/my_agent ',
+        annotations_table: ' catalog.schema.otel_annotations ',
+        goal_config,
+        actor: 'attacker@evil.com',
+      }),
+      res,
+      bridge
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].actor).toBe('onboarder@databricks.com');
+    expect(calls[0].target_workspace).toBe('/Workspace/Repos/me/my_agent');
+    expect(calls[0].annotations_table).toBe('catalog.schema.otel_annotations');
+    expect(calls[0].goal_config).toEqual(goal_config);
+  });
+
+  it('omits blank/malformed extended fields so the engine sees them absent', async () => {
+    const { bridge, calls } = recordingBridge({ outcome: 'registered', agent_name: 'my_agent' });
+    const { res } = fakeRes();
+    await handleRegisterAgent(
+      req(AUTH, {
+        agent_name: 'my_agent',
+        experiment_id: 'exp-1',
+        goals: ['cost'],
+        target_workspace: '   ',
+        annotations_table: 42,
+        goal_config: [1, 2, 3],
+      }),
+      res,
+      bridge
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].target_workspace).toBeUndefined();
+    expect(calls[0].annotations_table).toBeUndefined();
+    expect(calls[0].goal_config).toBeUndefined();
+  });
+
   it('refuses missing agent_name / experiment_id (400) and never calls the engine', async () => {
     const { bridge, calls } = recordingBridge();
     const { res, captured } = fakeRes();
