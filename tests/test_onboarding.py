@@ -39,6 +39,7 @@ from ail.onboarding.service import (
     RegisterResult,
     RequirementsConfirmResult,
     RequirementsPreviewResult,
+    compiled_goal_to_goal_config,
     load_registered_agents,
     register_agent,
     run_action,
@@ -390,6 +391,67 @@ def test_register_does_not_fabricate_success_on_write_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# register_agent: the EXTENDED registry fields (goal_config / annotations_table /
+# target_workspace) — what makes a wizard-registered agent fully functional across
+# the loop (Slice 4). Capture the Agent handed to publish_registry (no live write).
+# ---------------------------------------------------------------------------
+
+
+class _CapturePublishRegistry:
+    """Capture the ``AgentRegistry`` publish_registry was called with (no write)."""
+
+    def __init__(self) -> None:
+        self.registries: list[Any] = []
+
+    def __call__(self, registry: Any, **_kwargs: Any) -> None:
+        self.registries.append(registry)
+
+
+_SLICE4_GOAL_CONFIG = {
+    "objective_metric": "duration_seconds",
+    "goal_direction": "minimize",
+    "goal_target": -0.30,
+    "goal_target_kind": "relative",
+    "guardrail_judge": ["correctness:4.0"],
+}
+
+
+def test_register_persists_all_three_extended_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    cap = _CapturePublishRegistry()
+    monkeypatch.setattr("ail.onboarding.service.publish_registry", cap)
+    result = _register(
+        _RecordingClient(),
+        goal_config=_SLICE4_GOAL_CONFIG,
+        annotations_table="cat.sch.otel_annotations",
+        target_workspace="/Workspace/Repos/me/my_agent",
+    )
+    assert result.outcome is OnboardingOutcome.REGISTERED
+    assert len(cap.registries) == 1
+    agent = cap.registries[0].agents[0]
+    # ALL THREE new carriers land on the persisted Agent...
+    assert agent.goal_config == _SLICE4_GOAL_CONFIG
+    assert agent.annotations_table == "cat.sch.otel_annotations"
+    assert agent.target_workspace == "/Workspace/Repos/me/my_agent"
+    # ...alongside the fields register always carried (no regression).
+    assert agent.agent_name == "my_agent"
+    assert agent.experiment_id == "exp-1"
+    assert agent.judge_config is not None
+
+
+def test_register_backcompat_extended_fields_default_to_none(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Called exactly as today (none of the three supplied) => all three persist as
+    # None — a registered-but-not-fully-functional agent, honest, no regression.
+    cap = _CapturePublishRegistry()
+    monkeypatch.setattr("ail.onboarding.service.publish_registry", cap)
+    result = _register(_RecordingClient())
+    assert result.outcome is OnboardingOutcome.REGISTERED
+    agent = cap.registries[0].agents[0]
+    assert agent.goal_config is None
+    assert agent.annotations_table is None
+    assert agent.target_workspace is None
+
+
+# ---------------------------------------------------------------------------
 # load_registered_agents: authoritative read, tolerant of a fresh table
 # ---------------------------------------------------------------------------
 
@@ -469,6 +531,65 @@ def test_run_register_errors_without_warehouse(monkeypatch) -> None:  # type: ig
 def test_run_create_refuses_anonymous() -> None:
     result = run_create("Fresh", actor="")
     assert result.outcome is OnboardingOutcome.REFUSED
+
+
+# ---------------------------------------------------------------------------
+# register_agent dispatch: the extended fields are parsed fail-closed at the payload
+# boundary (a bad type is a REFUSED, nothing written — never a crash or silent drop).
+# ---------------------------------------------------------------------------
+
+
+def _register_action(**fields: Any) -> Any:
+    payload = {
+        "action": "register_agent",
+        "actor": "dev@databricks.com",
+        "agent_name": "x",
+        "experiment_id": "e",
+        "goals": ["cost"],
+    }
+    payload.update(fields)
+    return run_action(payload)
+
+
+@pytest.mark.parametrize(
+    "bad_goal_config",
+    [
+        "not-json-{[",  # a string that does not parse as JSON
+        "[1, 2, 3]",  # parses, but a JSON array is not a mapping
+        "42",  # parses, but a scalar is not a mapping
+        [1, 2, 3],  # a native list is not a mapping
+        42,  # a native scalar is not a mapping
+        True,  # a bool is not a mapping (and never a stray 1.0-style coercion)
+    ],
+)
+def test_register_dispatch_refuses_non_dict_goal_config(bad_goal_config: Any) -> None:
+    result = _register_action(goal_config=bad_goal_config)
+    assert isinstance(result, RegisterResult)
+    assert result.outcome is OnboardingOutcome.REFUSED
+    assert "goal_config" in (result.refused_reason or "")
+
+
+@pytest.mark.parametrize("field", ["annotations_table", "target_workspace"])
+def test_register_dispatch_refuses_non_string_field(field: str) -> None:
+    result = _register_action(**{field: {"not": "a string"}})
+    assert isinstance(result, RegisterResult)
+    assert result.outcome is OnboardingOutcome.REFUSED
+    assert field in (result.refused_reason or "")
+
+
+def test_register_dispatch_accepts_json_string_goal_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A well-formed goal_config (as a JSON-object string) + string annotations_table /
+    # target_workspace pass type validation and reach run_register — proven by the
+    # honest no-warehouse ERROR (NOT a type REFUSED), with no live write attempted.
+    monkeypatch.delenv("DATABRICKS_WAREHOUSE_ID", raising=False)
+    result = _register_action(
+        goal_config='{"objective_metric": "duration_seconds", "goal_direction": "minimize"}',
+        annotations_table="cat.sch.otel_annotations",
+        target_workspace="/Workspace/Repos/me/my_agent",
+    )
+    assert isinstance(result, RegisterResult)
+    assert result.outcome is OnboardingOutcome.ERROR
+    assert "warehouse" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -795,3 +916,64 @@ def test_run_action_dispatches_preview_and_confirm() -> None:
         }
     )
     assert confirm.outcome is OnboardingOutcome.REFUSED
+
+
+# ---------------------------------------------------------------------------
+# goal_config wiring: confirm -> register -> RLM actually STEERS (Slice 4). The
+# helper serializes a CompiledGoal to the exact keys the continuous-RLM lane reads,
+# and the confirmed-requirements result surfaces that goal_config for the wizard to
+# thread onto the register payload.
+# ---------------------------------------------------------------------------
+
+
+def test_compiled_goal_to_goal_config_round_trips_through_rlm_knobs() -> None:
+    from ail.goals.compiler import CompiledGoal, GoalTarget, Guardrail
+    from ail.jobs.continuous_rlm import _knobs_from_goal_config
+
+    goal = CompiledGoal(
+        objective_metric="duration_seconds",  # a generic L0 objective (not judged)
+        direction="minimize",
+        target=GoalTarget(value=-0.30, kind="relative"),
+        guardrails=(Guardrail(name="correctness", kind="judge", threshold=4.0),),
+        cohort="my_agent",
+    )
+    gc = compiled_goal_to_goal_config(goal)
+    # JSON-clean: the registry stores it as goal_config_json (json.dumps must not raise).
+    assert json.loads(json.dumps(gc)) == gc
+    # Read back by the RLM lane => the SAME goal knobs (proves the steering wires up).
+    knobs = _knobs_from_goal_config(gc, cohort="my_agent")
+    assert knobs["objective_metric"] == "duration_seconds"
+    assert knobs["goal_direction"] == "minimize"
+    assert knobs["goal_target"] == -0.30
+    assert knobs["goal_target_kind"] == "relative"
+    assert knobs["guardrail_specs"] == ["correctness:4.0"]
+    # And the judge-guardrail spec decodes back to its name + threshold, exactly as
+    # ail.jobs.continuous_rlm._build_rubric reconstructs it.
+    name, _, threshold = knobs["guardrail_specs"][0].partition(":")
+    assert name == "correctness" and float(threshold) == 4.0
+
+
+def test_confirm_surfaces_goal_config_that_steers_the_rlm() -> None:
+    from ail.jobs.continuous_rlm import _knobs_from_goal_config
+
+    result = run_confirm_requirements(
+        "correctness matters most; never hallucinate a tool call; keep latency low",
+        objective_target=0.25,  # a maximize objective => positive relative target
+        experiment_id="exp-1",
+        agent_name="claude_code",
+        actor="dev@databricks.com",
+        llm=_mock_llm(_THREE_DIMS),
+        author=_spy_author([]),
+        persist=lambda _g: None,
+    )
+    assert result.outcome is OnboardingOutcome.REQUIREMENTS_CONFIRMED
+    # The confirmed goal is surfaced in the registry goal_config shape...
+    assert result.goal_config is not None
+    assert result.goal_config["objective_metric"] == "no_hallucinated_tool_calls"
+    assert result.goal_config["goal_direction"] == "maximize"
+    assert result.goal_config["goal_target"] == 0.25
+    # ...and the RLM lane reads it back to the same objective (confirm -> register -> RLM).
+    knobs = _knobs_from_goal_config(result.goal_config, cohort="claude_code")
+    assert knobs["objective_metric"] == "no_hallucinated_tool_calls"
+    assert knobs["goal_direction"] == "maximize"
+    assert knobs["goal_target"] == 0.25

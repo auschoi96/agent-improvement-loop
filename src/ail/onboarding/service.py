@@ -100,6 +100,7 @@ __all__ = [
     "RequirementsPreviewResult",
     "RequirementsConfirmResult",
     "ErrorResult",
+    "compiled_goal_to_goal_config",
     "register_agent",
     "run_requirements",
     "run_preview_requirements",
@@ -249,6 +250,11 @@ class RequirementsConfirmResult(_Contract):
     objective_target: float | None = None
     authored_judges: list[str] = Field(default_factory=list)
     persisted: bool = False
+    #: The confirmed goal serialized to the registry ``goal_config`` shape (the keys
+    #: :func:`ail.jobs.continuous_rlm._knobs_from_goal_config` reads). The wizard threads
+    #: this onto the ``register_agent`` payload so a requirements-confirmed goal steers
+    #: the continuous-RLM lane; ``None`` on any non-success outcome.
+    goal_config: dict[str, Any] | None = None
     actor: str = ""
     refused_reason: str | None = None
     error: str | None = None
@@ -267,6 +273,37 @@ class ErrorResult(_Contract):
 # ---------------------------------------------------------------------------
 
 
+def compiled_goal_to_goal_config(goal: CompiledGoal) -> dict[str, Any]:
+    """Serialize a :class:`~ail.goals.compiler.CompiledGoal` to the registry ``goal_config``.
+
+    Maps to the exact keys the continuous-RLM lane consumes
+    (:func:`ail.jobs.continuous_rlm._knobs_from_goal_config`): ``objective_metric``,
+    ``goal_direction``, ``goal_target``, ``goal_target_kind``, and ``guardrail_judge``
+    (one ``'name'`` or ``'name:threshold'`` spec per **judge** guardrail — the same
+    ``'name:threshold'`` shape :func:`ail.jobs.continuous_rlm._build_rubric` decodes).
+    Deterministic-metric guardrails are intentionally **not** serialized: the RLM's
+    ``guardrail_judge`` knob is judge-only (a metric guardrail there would be
+    reconstructed as ``kind='judge'`` and fail closed). All values are plain JSON
+    scalars/lists so :func:`ail.publish_versions.publish_registry` can ``json.dumps``
+    the dict onto the ``goal_config_json`` column.
+
+    Pure: no I/O, no side effects — a wizard-confirmed requirements goal flows through
+    this onto the ``register_agent`` payload so ``confirm → register → RLM`` steers.
+    """
+    judge_specs = [
+        f"{g.name}:{g.threshold}" if g.threshold is not None else g.name
+        for g in goal.guardrails
+        if g.kind == "judge"
+    ]
+    return {
+        "objective_metric": goal.objective_metric,
+        "goal_direction": str(goal.direction),
+        "goal_target": goal.target.value,
+        "goal_target_kind": str(goal.target.kind),
+        "guardrail_judge": judge_specs,
+    }
+
+
 def register_agent(
     *,
     agent_name: str,
@@ -279,6 +316,9 @@ def register_agent(
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
     generated_at: str | None = None,
+    goal_config: dict[str, Any] | None = None,
+    annotations_table: str | None = None,
+    target_workspace: str | None = None,
 ) -> RegisterResult:
     """Register one agent by **reusing** :func:`ail.publish_versions.publish_registry`.
 
@@ -290,6 +330,17 @@ def register_agent(
     ``agent_name`` REPLACE, so other agents are untouched). A write failure inside
     ``publish_registry`` propagates to the caller, which surfaces it as ``ERROR`` —
     never a fabricated ``registered``.
+
+    The optional ``goal_config`` / ``annotations_table`` / ``target_workspace`` are set
+    on the :class:`~ail.registry.Agent` verbatim (the write path already persists all
+    three columns). They are what make a registered agent fully functional across the
+    loop: ``goal_config`` steers the continuous-RLM lane
+    (:func:`ail.jobs.continuous_rlm._knobs_from_goal_config`), ``annotations_table`` is
+    the OTEL table the memory-distiller job reads, and ``target_workspace`` is the
+    repo/path the open-ended executor edits. ``None`` for any of them is a legitimate
+    *registered-but-not-fully-functional* state (the fixed-catalog path leaves
+    ``goal_config`` ``None`` → RLM neutral; an agent without the other two is skipped by
+    the memory job / fails closed in the executor, by design — never fabricated).
     """
     name = agent_name.strip()
     exp = experiment_id.strip()
@@ -331,6 +382,9 @@ def register_agent(
         experiment_id=exp,
         description=f"Registered via the onboarding wizard by {actor}; goals: {labels}.",
         judge_config=judge_config,
+        goal_config=goal_config,
+        annotations_table=annotations_table,
+        target_workspace=target_workspace,
     )
     publish_registry(
         AgentRegistry(agents=[agent]),
@@ -685,6 +739,9 @@ def run_confirm_requirements(
         objective_target=objective_target,
         authored_judges=list(execution.authored_names),
         persisted=execution.persisted,
+        # Surface the confirmed goal in the registry goal_config shape so the wizard can
+        # thread it onto the register_agent payload (confirm → register → RLM steers).
+        goal_config=compiled_goal_to_goal_config(execution.goal),
         actor=actor,
     )
 
@@ -814,8 +871,17 @@ def run_register(
     warehouse_id: str | None = None,
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
+    goal_config: dict[str, Any] | None = None,
+    annotations_table: str | None = None,
+    target_workspace: str | None = None,
 ) -> RegisterResult:
-    """Register an agent live (fail-closed; a write failure is ERROR, never registered)."""
+    """Register an agent live (fail-closed; a write failure is ERROR, never registered).
+
+    Threads the optional extended registry fields (``goal_config`` /
+    ``annotations_table`` / ``target_workspace``) to :func:`register_agent`, which sets
+    them on the persisted :class:`~ail.registry.Agent`. Type validation of these fields
+    happens in :func:`run_action` (the payload boundary); here they are already typed.
+    """
     if not actor.strip():
         return _register_refused(
             agent_name,
@@ -851,6 +917,9 @@ def run_register(
             existing_agents=existing,
             catalog=catalog,
             schema=schema,
+            goal_config=goal_config,
+            annotations_table=annotations_table,
+            target_workspace=target_workspace,
         )
     except Exception as exc:  # noqa: BLE001 - any infra failure is an honest ERROR, never a fake register
         return RegisterResult(
@@ -879,6 +948,51 @@ def _claimed_experiments(
 # ---------------------------------------------------------------------------
 # Dispatch + CLI (the bridge invokes `python -m ail.onboarding.service`)
 # ---------------------------------------------------------------------------
+
+
+def _coerce_goal_config(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Coerce a payload ``goal_config`` (dict | JSON-object string | absent) → dict|None.
+
+    Returns ``(value, error)``: ``error`` is a fail-closed refusal reason for anything
+    that is neither absent/``None``, a JSON object, nor a JSON string that parses to an
+    object — never a silently-dropped field or a crash. A blank string is treated as
+    absent (``None``). A ``bool``/scalar/array is refused (it is not a goal mapping).
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool):  # a bool is an int; it is never a goal mapping
+        return None, "goal_config must be a JSON object (mapping), not a boolean"
+    if isinstance(raw, dict):
+        return raw, None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None, None
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return None, "goal_config must be a JSON object or a JSON-object string"
+        if not isinstance(parsed, dict):
+            return None, "goal_config must be a JSON object (mapping), not a scalar/array"
+        return parsed, None
+    return None, (
+        f"goal_config must be a JSON object (mapping) or string, not a {type(raw).__name__}"
+    )
+
+
+def _coerce_optional_str(raw: Any, field: str) -> tuple[str | None, str | None]:
+    """Coerce an optional string payload field → str|None, fail-closed on a non-string.
+
+    Returns ``(value, error)``: a blank string is treated as absent (``None``, i.e. the
+    field was left unset); a non-string value is a fail-closed refusal reason, never a
+    coerced/dropped value. A ``bool`` is a non-string and is refused.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, str):
+        text = raw.strip()
+        return (text or None), None
+    return None, f"{field} must be a string (a fully-qualified name), not a {type(raw).__name__}"
 
 
 def run_action(payload: dict[str, Any]) -> BaseModel:
@@ -940,15 +1054,38 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
     if action == "create_experiment":
         return run_create(str(payload.get("name") or ""), actor=actor, profile=profile)
     if action == "register_agent":
+        name = str(payload.get("agent_name") or "")
+        exp = str(payload.get("experiment_id") or "")
+        # Parse the extended registry fields fail-closed BEFORE any live write: a bad
+        # type is an honest REFUSED (nothing written), never a crash or a silently
+        # dropped field. goal_config accepts a JSON object OR a JSON-object string
+        # (the browser may relay it either way); annotations_table/target_workspace
+        # must be strings. The actor is the authenticated identity the route injected.
+        goal_config, gc_err = _coerce_goal_config(payload.get("goal_config"))
+        if gc_err is not None:
+            return _register_refused(name, exp, goal_keys, actor, gc_err)
+        annotations_table, at_err = _coerce_optional_str(
+            payload.get("annotations_table"), "annotations_table"
+        )
+        if at_err is not None:
+            return _register_refused(name, exp, goal_keys, actor, at_err)
+        target_workspace, tw_err = _coerce_optional_str(
+            payload.get("target_workspace"), "target_workspace"
+        )
+        if tw_err is not None:
+            return _register_refused(name, exp, goal_keys, actor, tw_err)
         return run_register(
-            agent_name=str(payload.get("agent_name") or ""),
-            experiment_id=str(payload.get("experiment_id") or ""),
+            agent_name=name,
+            experiment_id=exp,
             goal_keys=goal_keys,
             actor=actor,
             profile=profile,
             warehouse_id=warehouse_id,
             catalog=catalog,
             schema=schema,
+            goal_config=goal_config,
+            annotations_table=annotations_table,
+            target_workspace=target_workspace,
         )
     return ErrorResult(action=action, error=f"unknown onboarding action {action!r}")
 
