@@ -30,6 +30,8 @@ from ail.jobs.bootstrap_tables import (
 )
 from ail.loop.publish_proposals import PROPOSALS_TABLE
 from ail.loop.publish_proposals import _ddl as proposals_ddl
+from ail.publish_versions import REGISTRY_TABLE
+from ail.publish_versions import _ddl as versions_ddl
 
 # The deployed app's SQL query registry — the source of truth for the drift
 # guard. typegen runs a live DESCRIBE QUERY against each of these at build time.
@@ -429,6 +431,20 @@ def _proposals_create() -> str:
     return next(s for s in stmts if s.strip().upper().startswith("CREATE TABLE"))
 
 
+#: The three source-of-truth columns Slice 1 added to agent_registry — the real
+#: regression the reconcile step must migrate onto a pre-existing table.
+_REGISTRY_ADDED = ["goal_config_json", "annotations_table", "target_workspace"]
+
+
+def _registry_create() -> str:
+    stmts = versions_ddl("cat", "sch")
+    return next(
+        s
+        for s in stmts
+        if s.strip().upper().startswith("CREATE TABLE") and f".{REGISTRY_TABLE} (" in s
+    )
+
+
 # -- fakes: an information_schema-aware SQL client -------------------------
 
 _INFO_SCHEMA_TABLE_RE = re.compile(r"LOWER\(table_name\)\s*=\s*LOWER\('([^']+)'\)", re.IGNORECASE)
@@ -530,6 +546,34 @@ def test_reconcile_migrates_missing_columns_on_existing_table() -> None:
     assert "verify_requested BOOLEAN" in block
     assert "change_plan STRING" in block
     # and it was actually executed on the warehouse.
+    assert alter in client.statement_execution.statements
+
+
+def test_reconcile_migrates_registry_source_of_truth_columns() -> None:
+    # Slice 1's regression: an EXISTING agent_registry predates goal_config_json /
+    # annotations_table / target_workspace. The reconcile must ADD exactly those
+    # three before anything reads them — proving agent_registry is covered by the
+    # bootstrap auto-migration (via _versions_ddl in _DDL_PRODUCERS).
+    declared = _declared_columns(_registry_create())
+    declared_names = [n for n, _ in declared]
+    assert set(_REGISTRY_ADDED) <= set(declared_names)
+    # LIVE = pre-existing table missing exactly the three new columns.
+    live_rows = [(n, t.lower()) for n, t in declared if n not in _REGISTRY_ADDED]
+    client = _ReconcileClient({REGISTRY_TABLE: live_rows})
+
+    alters = reconcile_app_table_columns(client, "wh-1", catalog="cat", schema="sch")
+
+    # Exactly one ALTER (only agent_registry present live; the other tables absent).
+    assert len(alters) == 1
+    alter = alters[0]
+    assert bootstrap_tables._is_add_columns_alter(alter)
+    assert alter.startswith(f"ALTER TABLE `cat`.`sch`.{REGISTRY_TABLE} ADD COLUMNS (")
+    block = alter[alter.index("(") + 1 : alter.rindex(")")]
+    added = {seg.split()[0] for seg in block.split(", ")}
+    assert added == set(_REGISTRY_ADDED)
+    # name+type preserved for a migrated column, and actually executed.
+    assert "goal_config_json STRING" in block
+    assert "target_workspace STRING" in block
     assert alter in client.statement_execution.statements
 
 

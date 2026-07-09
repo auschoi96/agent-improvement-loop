@@ -77,6 +77,55 @@ def test_agent_target_workspace_round_trips_json() -> None:
     assert restored == agent
 
 
+def test_agent_goal_config_and_annotations_table_absent_are_none() -> None:
+    # Optional at the model level: a registry entry is valid before the continuous-RLM
+    # goal or the distiller's annotations table are configured (Slice 4 populates them).
+    agent = Agent(agent_name="x", experiment_id="1")
+    assert agent.goal_config is None
+    assert agent.annotations_table is None
+    assert DEFAULT_REGISTRY.get("claude_code").goal_config is None
+    assert DEFAULT_REGISTRY.get("claude_code").annotations_table is None
+
+
+def test_agent_goal_config_and_annotations_table_are_carried() -> None:
+    # goal_config carries the continuous_rlm goal knobs (free-form, symmetric with
+    # judge_config); annotations_table is the memory_distiller's UC table.
+    goal = {
+        "objective_metric": "total_tokens",
+        "goal_direction": "decrease",
+        "goal_target": 0.2,
+        "goal_target_kind": "relative",
+        "guardrail_judge": "correctness",
+    }
+    agent = Agent(
+        agent_name="x",
+        experiment_id="1",
+        goal_config=goal,
+        annotations_table="cat.sch.x_annotations",
+    )
+    assert agent.goal_config == goal
+    assert agent.annotations_table == "cat.sch.x_annotations"
+
+
+def test_agent_goal_config_and_annotations_table_round_trip_json() -> None:
+    agent = Agent(
+        agent_name="x",
+        experiment_id="1",
+        goal_config={"objective_metric": "total_tokens", "goal_direction": "decrease"},
+        annotations_table="cat.sch.x_annotations",
+    )
+    restored = Agent.model_validate_json(agent.model_dump_json())
+    assert restored == agent
+
+
+def test_agent_annotations_table_typo_is_loud() -> None:
+    # extra='forbid': a near-miss field name fails at load rather than being dropped.
+    with pytest.raises(ValueError):
+        Agent.model_validate(
+            {"agent_name": "x", "experiment_id": "1", "annotation_table": "cat.sch.typo"}
+        )
+
+
 def test_agent_cohort_uses_agent_tag_by_default() -> None:
     cohort = DEFAULT_REGISTRY.get("claude_code").cohort()
     assert cohort.name == "claude_code"

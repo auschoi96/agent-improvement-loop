@@ -29,11 +29,12 @@ from ail.publish_versions import (
     _registry_row,
     _version_l0_row,
     build_phase2_version_bundle,
+    load_registered_agents_full,
     publish_registry,
     publish_version_bundle,
 )
 from ail.readiness import ReadinessThresholds, ReadinessTier
-from ail.registry import DEFAULT_REGISTRY
+from ail.registry import DEFAULT_REGISTRY, Agent, AgentRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_PATH = REPO_ROOT / "artifacts" / "phase2_token_lever.json"
@@ -88,6 +89,71 @@ class _FakeStatementExecution:
 class _FakeClient:
     def __init__(self) -> None:
         self.statement_execution = _FakeStatementExecution()
+
+
+# -- read fake (serves a configured result set) for load_registered_agents_full --
+
+
+class _Col:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _Schema:
+    def __init__(self, cols: list[str]) -> None:
+        self.columns = [_Col(c) for c in cols]
+
+
+class _Manifest:
+    def __init__(self, cols: list[str]) -> None:
+        self.schema = _Schema(cols)
+
+
+class _ResultData:
+    def __init__(self, data: list[list]) -> None:  # type: ignore[type-arg]
+        self.data_array = data
+
+
+class _Err:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+
+class _ReadStatus:
+    def __init__(self, state: StatementState, err: _Err | None = None) -> None:
+        self.state = state
+        self.error = err
+
+
+class _ReadResp:
+    def __init__(
+        self,
+        state: StatementState,
+        *,
+        cols: list[str] | None = None,
+        data: list[list] | None = None,  # type: ignore[type-arg]
+        err: _Err | None = None,
+    ) -> None:
+        self.statement_id = "stmt-r"
+        self.status = _ReadStatus(state, err)
+        self.manifest = _Manifest(cols) if cols else None
+        self.result = _ResultData(data or []) if cols else None
+
+
+class _ReadStmtExec:
+    def __init__(self, resp: _ReadResp) -> None:
+        self._resp = resp
+
+    def execute_statement(self, *, warehouse_id, statement, wait_timeout=None):  # type: ignore[no-untyped-def]
+        return self._resp
+
+    def get_statement(self, statement_id):  # type: ignore[no-untyped-def]
+        return self._resp
+
+
+class _ReadClient:
+    def __init__(self, resp: _ReadResp) -> None:
+        self.statement_execution = _ReadStmtExec(resp)
 
 
 # -- aggregation reproduces the real 35.4% headline ------------------------
@@ -291,6 +357,19 @@ def test_ddl_creates_the_four_unified_tables() -> None:
         assert f".{table} (" in ddl
 
 
+def test_registry_ddl_declares_the_three_source_of_truth_columns() -> None:
+    # The single-source-of-truth extension: the per-agent job goal knobs
+    # (goal_config_json), the memory_distiller's annotations_table, and the
+    # executor-required target_workspace must be in the agent_registry DDL.
+    registry_ddl = next(s for s in pv._ddl("cat", "sch") if f".{pv.REGISTRY_TABLE} (" in s)
+    for column in (
+        "goal_config_json STRING",
+        "annotations_table STRING",
+        "target_workspace STRING",
+    ):
+        assert column in registry_ddl
+
+
 # -- write path: idempotent, composite-key REPLACE WHERE -------------------
 
 
@@ -324,3 +403,128 @@ def test_publish_registry_writes_one_slice_per_agent() -> None:
     swaps = [s for s in client.statement_execution.statements if "REPLACE WHERE" in s]
     assert len(swaps) == 1
     assert "agent_name = 'claude_code'" in swaps[0]
+
+
+def test_publish_registry_persists_the_three_source_of_truth_columns() -> None:
+    # The write path must name the new columns AND carry their values into the
+    # staging INSERT, so what publish_registry writes is what a job/companion reads.
+    agent = Agent(
+        agent_name="mas",
+        experiment_id="42",
+        goal_config={"objective_metric": "total_tokens", "goal_direction": "decrease"},
+        annotations_table="cat.sch.mas_annotations",
+        target_workspace="/repos/mas",
+    )
+    client = _FakeClient()
+    publish_registry(
+        AgentRegistry(agents=[agent]),
+        client=client,
+        warehouse_id="wh",
+        catalog="cat",
+        schema="sch",
+    )
+    inserts = [s for s in client.statement_execution.statements if s.startswith("INSERT INTO")]
+    staging_insert = next(s for s in inserts if "_stg_agent_registry" in s and "VALUES" in s)
+    for column in ("goal_config_json", "annotations_table", "target_workspace"):
+        assert column in staging_insert
+    assert "cat.sch.mas_annotations" in staging_insert
+    assert "/repos/mas" in staging_insert
+    assert "total_tokens" in staging_insert  # the goal_config JSON payload
+
+
+# -- load_registered_agents_full: the typed read-back of the source of truth ---
+
+
+def _read_client(agent: Agent, *, generated_at: str = "t") -> _ReadClient:
+    """A read client that returns exactly what ``_registry_row`` would write for ``agent``.
+
+    Wires the REAL write serialization (``_registry_row`` + ``REGISTRY_COLUMNS``) to
+    the REAL read reconstruction, so the round-trip breaks if either side drifts.
+    """
+    row = _registry_row(agent, generated_at=generated_at)
+    return _ReadClient(_ReadResp(StatementState.SUCCEEDED, cols=list(REGISTRY_COLUMNS), data=[row]))
+
+
+def test_load_full_round_trips_a_fully_populated_agent() -> None:
+    agent = Agent(
+        agent_name="mas",
+        experiment_id="42",
+        description="the supervisor agent",
+        judge_config={"scorer": "correctness"},
+        goal_config={
+            "objective_metric": "total_tokens",
+            "goal_direction": "decrease",
+            "goal_target": 0.2,
+            "goal_target_kind": "relative",
+            "guardrail_judge": "correctness",
+        },
+        annotations_table="cat.sch.mas_annotations",
+        tag_filter={"ail.agent": "mas"},
+        target_workspace="/repos/mas",
+    )
+    got = load_registered_agents_full(
+        client=_read_client(agent), warehouse_id="wh", catalog="cat", schema="sch"
+    )
+    assert len(got) == 1
+    restored = got[0]
+    # the three source-of-truth fields survive the write -> read round-trip...
+    assert restored.goal_config == agent.goal_config
+    assert restored.annotations_table == agent.annotations_table
+    assert restored.target_workspace == agent.target_workspace
+    # ...and nothing else was lost or fabricated (generated_at is not an Agent field).
+    assert restored == agent
+
+
+def test_load_full_tolerates_missing_table() -> None:
+    resp = _ReadResp(StatementState.FAILED, err=_Err("TABLE_OR_VIEW_NOT_FOUND: agent_registry"))
+    got = load_registered_agents_full(
+        client=_ReadClient(resp), warehouse_id="wh", catalog="cat", schema="sch"
+    )
+    assert got == []
+
+
+def test_load_full_tolerates_old_rows_missing_the_new_columns() -> None:
+    # A pre-migration table: SELECT * returns only the ORIGINAL columns, so the row
+    # dict has no goal_config_json / annotations_table / target_workspace keys at all.
+    old_cols = [
+        "agent_name",
+        "experiment_id",
+        "description",
+        "judge_config_json",
+        "tag_filter_json",
+        "generated_at",
+    ]
+    old_row = ["claude_code", "660599403165942", "the reference agent", None, None, "t"]
+    resp = _ReadResp(StatementState.SUCCEEDED, cols=old_cols, data=[old_row])
+    got = load_registered_agents_full(
+        client=_ReadClient(resp), warehouse_id="wh", catalog="cat", schema="sch"
+    )
+    assert len(got) == 1
+    agent = got[0]
+    assert agent.agent_name == "claude_code"
+    assert agent.experiment_id == "660599403165942"
+    # the new fields are None (never fabricated), and reconstruction did not crash.
+    assert agent.goal_config is None
+    assert agent.annotations_table is None
+    assert agent.target_workspace is None
+
+
+def test_load_full_skips_rows_missing_a_primary_key() -> None:
+    # A row with no experiment_id can't form a valid Agent -> skipped, not fabricated.
+    resp = _ReadResp(
+        StatementState.SUCCEEDED,
+        cols=list(REGISTRY_COLUMNS),
+        data=[[None, None, "", None, None, None, None, None, "t"]],
+    )
+    got = load_registered_agents_full(
+        client=_ReadClient(resp), warehouse_id="wh", catalog="cat", schema="sch"
+    )
+    assert got == []
+
+
+def test_load_full_fails_closed_on_other_error() -> None:
+    resp = _ReadResp(StatementState.FAILED, err=_Err("PERMISSION_DENIED on warehouse"))
+    with pytest.raises(RuntimeError):
+        load_registered_agents_full(
+            client=_ReadClient(resp), warehouse_id="wh", catalog="cat", schema="sch"
+        )
