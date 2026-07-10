@@ -181,7 +181,7 @@ class TestScorerFactory:
 
 
 # ---------------------------------------------------------------------------
-# Token-efficiency judge — bounded 1..5, consumes L0 inputs (not the raw trace)
+# Token-efficiency judge — bounded 1..5, {{ trace }}-based and MemAlign-alignable
 # ---------------------------------------------------------------------------
 
 
@@ -234,14 +234,26 @@ class TestTokenEfficiencyJudge:
     def test_in_default_set(self) -> None:
         assert DEFAULT_SCORERS["token_efficiency"] is TOKEN_EFFICIENCY
 
-    def test_rubric_reads_l0_summary_not_raw_trace(self) -> None:
-        # Large-trace-safe: the judge reasons over inputs/outputs/expectations
-        # (a small L0 summary), never {{ trace }} (900K-token traces blow context).
+    def test_rubric_is_trace_based(self) -> None:
+        # token_efficiency is now a {{ trace }}-based judge: MemAlign aligns it from
+        # human labels on the real traces it reads. It no longer consumes an L0
+        # summary via {{ inputs }}, and it does not use {{ expectations }}.
         ins = make_token_efficiency_judge(model="openai:/gpt-4.1-mini").instructions
-        assert "{{ inputs }}" in ins
-        assert "{{ outputs }}" in ins
-        assert "{{ expectations }}" in ins
-        assert "{{ trace }}" not in ins
+        assert "{{ trace }}" in ins
+        assert "{{ inputs }}" not in ins
+        assert "{{ expectations }}" not in ins
+
+    def test_is_auto_alignable_and_in_cadence_set(self) -> None:
+        # The judge the deployed ail-auto-align cadence includes and re-aligns:
+        # its spec is auto_alignable, so it lands in the cadence's `alignable` set
+        # (the exact predicate ail.judges.auto_align.auto_align_scorers filters on).
+        assert TOKEN_EFFICIENCY.auto_alignable is True
+        alignable = {s.name for s in DEFAULT_SCORERS.values() if s.auto_alignable}
+        assert "token_efficiency" in alignable
+        # trace-based and expectations-free — the alignable shape MemAlign needs.
+        ins = make_token_efficiency_judge(model="openai:/gpt-4.1-mini").instructions
+        assert "{{ trace }}" in ins
+        assert "{{ expectations }}" not in ins
 
     def test_rubric_is_quality_conditioned_anti_gaming(self) -> None:
         # The rubric must explicitly refuse to reward "fewer tokens by doing less".

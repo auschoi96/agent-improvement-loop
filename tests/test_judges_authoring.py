@@ -228,12 +228,16 @@ class TestAuthoredJudgeIsAlignShaped:
         assert callable(getattr(judge, "align", None))
         assert judge.name == spec.name
 
-    def test_token_efficiency_stays_computed_inputs_not_trace(self) -> None:
-        # RECONCILE: the deterministic-L0 token_efficiency scorer is deliberately
-        # NOT a {{ trace }} judge (it judges an L0 summary). Authoring is the path
-        # for human-defined QUALITY dimensions; it does not change this exclusion.
-        assert "{{ trace }}" not in TOKEN_EFFICIENCY.instructions
-        assert "{{ inputs }}" in TOKEN_EFFICIENCY.instructions
+    def test_token_efficiency_is_trace_based_like_authored_judges(self) -> None:
+        # token_efficiency is now a {{ trace }}-based, MemAlign-alignable judge —
+        # it obeys authoring convention 1 like any authored judge (it no longer
+        # reads an L0 summary via {{ inputs }}). The deterministic L0 layer
+        # (ail.metrics) still owns the un-gameable token/cost count; this judge
+        # only adds the subjective quality-per-token call.
+        assert "{{ trace }}" in TOKEN_EFFICIENCY.instructions
+        assert "{{ inputs }}" not in TOKEN_EFFICIENCY.instructions
+        assert "{{ expectations }}" not in TOKEN_EFFICIENCY.instructions
+        assert TOKEN_EFFICIENCY.auto_alignable is True
 
 
 # ---------------------------------------------------------------------------

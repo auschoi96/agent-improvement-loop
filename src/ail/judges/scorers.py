@@ -12,14 +12,20 @@ chosen for the Milestone-1 token-reduction lever:
 * **groundedness** — whether the response is supported by the provided context
   (``yes``/``no``), the anti-hallucination check.
 * **token_efficiency** — graded (1–5) judgement of whether the token spend was
-  *justified*, conditioned on task success. This is the **hybrid** scorer: it
-  does **not** ask the LLM to count tokens or recompute redundancy — those are
-  L0 deterministic facts (:mod:`ail.metrics`). It feeds the LLM the already-
-  computed L0 signals (via :func:`build_token_efficiency_inputs`) and asks only
-  the judgement layer — was the spend worth it, was redundancy avoidable, is
-  quality-per-token good — naming the specific waste so the rationale is
-  actionable. It is the Phase-2 partner of ``correctness``: tokens may fall only
-  if quality does not (see :func:`build_token_efficiency_inputs` and the rubric).
+  *justified* for the work accomplished. This is a **``{{ trace }}``-based,
+  MemAlign-alignable** judge: it reads the run's trace directly (the tool-call
+  sequence, redundant/repeated reads, boilerplate re-runs, output verbosity,
+  spend vs. work) and — like every other judge — the scheduled auto-align
+  cadence (:func:`ail.judges.auto_align.auto_align_scorers`) re-aligns it from
+  human trace labels. It **complements**, and does not replace, the
+  deterministic L0 layer (:mod:`ail.metrics`): L0 owns the un-gameable
+  token/cost *count*; the judge adds the subjective call L0 cannot make — was
+  that spend justified, was the redundancy avoidable, is quality-per-token
+  good — conditioned on success read from the trace. As a ``{{ trace }}`` judge
+  it is context-bound: it aligns and scores on judge-ingestible traces, and the
+  heavy tail (~900K-token traces) needs the not-yet-built digest-fed-judge seam
+  (see :func:`make_token_efficiency_judge`). It is the Phase-2 partner of
+  ``correctness``: tokens may fall only if quality does not.
 
 Each scorer is a :class:`ScorerSpec` (name + instructions/rubric + output type)
 that the factory turns into an MLflow ``Judge``. Instructions and the feedback
@@ -84,13 +90,13 @@ class ScorerSpec:
 
     ``auto_alignable`` marks whether the scheduled MemAlign auto-align cadence
     (:func:`ail.judges.auto_align.auto_align_scorers`) may align this judge from
-    human trace labels. Almost every judge is (the default ``True``): it grades a
-    real run and a human can label that run. The exception is a **computed-inputs**
-    judge whose rubric is fed derived signals (not the raw trace) and needs
-    ``{{ expectations }}`` that the trace-label align path cannot supply — aligning
-    it is a category error. Setting this ``False`` (see ``token_efficiency``) is the
-    generic, name-free opt-out the auto-align cadence honours so it skips such a
-    judge cleanly instead of failing on it every run.
+    human trace labels. Every built-in judge is (the default ``True``): each is a
+    ``{{ trace }}`` judge that grades a real run, and a human can label that run.
+    Setting this ``False`` is the generic, name-free opt-out the cadence honours —
+    for a judge that cannot be aligned from trace labels (e.g. one fed only
+    app-computed inputs and ``{{ expectations }}`` the trace-label align path
+    cannot supply) — so it skips such a judge cleanly instead of recording a
+    spurious failure every run. No built-in scorer currently sets it ``False``.
     """
 
     name: str
@@ -188,39 +194,41 @@ TOKEN_EFFICIENCY = ScorerSpec(
     # As with modularity, a bounded Literal loses make_judge's default mean
     # aggregation; restore aggregations meaningful for a graded metric.
     aggregations=("mean", "median", "p90"),
-    # NOT auto-alignable: this is a deliberate COMPUTED-INPUTS test judge — it is fed
-    # the already-computed L0 signals via build_token_efficiency_inputs (never the raw
-    # {{ trace }}) and its rubric needs {{ expectations }} / success criteria that the
-    # human-trace-label MemAlign path does not supply. Auto-aligning it is a category
-    # error (it made the nightly ail-auto-align report failed=1), so the cadence skips it.
-    auto_alignable=False,
+    # token_efficiency is a {{ trace }}-based, MemAlign-alignable judge (auto_alignable
+    # defaults True): the ail-auto-align cadence includes it and re-aligns it from human
+    # trace labels like every other judge. It complements the deterministic L0 layer —
+    # ail.metrics owns the un-gameable token/cost count; the judge learns the subjective
+    # "was that spend justified / was the redundancy avoidable" call from those labels.
     instructions=(
-        "You are rating the TOKEN EFFICIENCY of an agent run on a 1-to-5 scale.\n\n"
-        "Task / request, with the run's L0 deterministic measurements:\n"
-        "{{ inputs }}\n\n"
-        "Agent response / outcome to judge:\n{{ outputs }}\n\n"
-        "Expected result / success criteria (ground truth):\n{{ expectations }}\n\n"
-        "The numbers under 'l0_signals' in the input are ALREADY MEASURED facts "
-        "(token counts, tool-call count, redundancy rate, repeated targets, cost, "
-        "model) computed deterministically from the trace. DO NOT recount tokens "
-        "or recompute any of them, and do not reward or penalize small rounding — "
-        "treat them as given and JUDGE them.\n\n"
-        "Your job is the judgement the numbers cannot make on their own:\n"
-        "  - Was the token spend JUSTIFIED by what the task actually required? A "
-        "large spend on a genuinely large task can still be efficient.\n"
-        "  - Was the redundancy AVOIDABLE or NECESSARY? Re-reading the same file "
-        "many times or re-running identical shell setup is usually avoidable "
-        "waste; re-checking a file that legitimately changed is not. Use the "
-        "named 'repeated_calls' targets to decide which.\n"
-        "  - Is QUALITY-PER-TOKEN good — did the spend buy a correspondingly "
-        "complete, correct outcome?\n\n"
-        "CRITICAL — efficiency is conditioned on SUCCESS. Spending few tokens by "
-        "doing less, stopping early, or producing a wrong/incomplete result is "
-        "NOT efficient: judge it harshly. If the response did not accomplish the "
-        "task (per the expected result / success criteria), a low token count "
-        "earns a LOW score, not a high one. Reward fewer tokens only when the "
-        "task was still accomplished. This scorer pairs with the correctness "
-        "guardrail: tokens may fall only when quality does not.\n\n"
+        "You are rating the TOKEN EFFICIENCY of an agent run on a 1-to-5 scale, "
+        "judging it directly FROM THE TRACE of the run.\n\n"
+        "Full execution trace to judge:\n{{ trace }}\n\n"
+        "Read the trace end to end — the sequence of tool calls, the model turns, "
+        "and the final response — and decide whether the tokens the run spent were "
+        "justified by the work it actually accomplished. Judge whether the run "
+        "SUCCEEDED from the trace itself: does it reach a complete, coherent "
+        "outcome for the task it was given, or does it stall, loop, or give up? Do "
+        "not assume an external ground-truth answer — read success or failure off "
+        "the trace.\n\n"
+        "Weigh the concrete efficiency signals the trace exposes:\n"
+        "  - REDUNDANT WORK — the same file read again and again, identical "
+        "searches or shell setup re-run, the same context re-fetched when nothing "
+        "changed to justify it. Re-checking something that legitimately changed is "
+        "not waste; re-deriving an unchanged fact is.\n"
+        "  - BOILERPLATE / RE-RUNS — repeated scaffolding, re-issuing a command "
+        "that already succeeded, re-loading state the run already had.\n"
+        "  - OUTPUT VERBOSITY — long, padded, or repetitive model output that "
+        "spends tokens without adding information the task needed.\n"
+        "  - SPEND vs. WORK — a large spend on a genuinely large task can still be "
+        "efficient; a large spend that bought only a small or incomplete result is "
+        "not. Judge QUALITY-PER-TOKEN: did the spend buy a correspondingly "
+        "complete outcome?\n\n"
+        "CRITICAL — efficiency is conditioned on SUCCESS, read from the trace. "
+        "Spending few tokens by doing less, stopping early, or leaving the task "
+        "unfinished or wrong is NOT efficient: score it LOW, not high. Reward "
+        "fewer tokens only when the trace shows the task was still accomplished. "
+        "This scorer pairs with the correctness guardrail: tokens may fall only "
+        "when quality does not.\n\n"
         "Scoring guide:\n"
         "  1 - large avoidable waste (e.g. the same target hit many times for no "
         "gain), or tokens burned without accomplishing the task\n"
@@ -230,9 +238,9 @@ TOKEN_EFFICIENCY = ScorerSpec(
         "  5 - tightly efficient; spend is well justified by the task with no "
         "meaningful avoidable waste\n\n"
         "Return the single integer (1-5) that best fits. In the rationale, NAME "
-        "the specific waste you saw (which repeated target, which boilerplate, or "
-        "say there was none) so the call is actionable — do not just restate the "
-        "numbers."
+        "the specific waste you saw in the trace (which repeated read, which "
+        "re-run command, which verbose passage — or say there was none) so the "
+        "call is actionable — do not just restate token counts."
     ),
 )
 
@@ -349,15 +357,24 @@ def make_token_efficiency_judge(
 ) -> Judge:
     """Build the **token-efficiency** judge (graded 1–5).
 
-    The hybrid scorer. It judges efficiency from the **L0 summary**, never the
-    raw trace: feed its ``inputs`` with :func:`build_token_efficiency_inputs`,
-    which packs the already-computed deterministic signals (tokens, tool-call
-    count, redundancy, named repeated targets, cost, model) into a compact dict.
-    The judge adds only the verdict — was the spend justified, was redundancy
-    avoidable, is quality-per-token good — conditioned on task success. It is
-    deliberately **not** given ``{{ trace }}``: this corpus has 900K-token
-    traces that exceed a judge's context window, and the L0 facts the judge
-    needs are already summarized.
+    A ``{{ trace }}``-based, MemAlign-alignable judge: it reads the run's trace
+    directly and grades quality-per-token — was the spend justified, was the
+    redundancy avoidable, did the run actually finish the job — judging success
+    *from the trace*, not from a ground-truth expectation. It **complements** the
+    deterministic L0 layer (:mod:`ail.metrics`), which owns the un-gameable
+    token/cost count; the judge adds the subjective call L0 cannot make, and the
+    scheduled auto-align cadence re-aligns it from human labels like every other
+    judge.
+
+    Large-trace caveat (honest scope): as a ``{{ trace }}`` judge it is
+    context-bound — it can align and score only on **judge-ingestible** traces.
+    The corpus's heavy tail (~900K-token traces, ``docs/ARCHITECTURE.md`` §8)
+    exceeds a judge's context window; those are **not** covered here and need the
+    not-yet-built digest-fed-judge seam (a digest supplied at the trace-feeding
+    boundary, not a rubric change). This does not fake coverage of the big
+    traces. The retained :func:`build_token_efficiency_inputs` is an independent
+    L0-summary helper (used by the labeling workflow and tests), not this judge's
+    input path.
     """
     return make_scorer(
         TOKEN_EFFICIENCY, model=model, instructions=instructions, inference_params=inference_params
@@ -378,12 +395,14 @@ def build_token_efficiency_inputs(
 ) -> dict[str, Any]:
     """Build the token-efficiency judge's ``inputs`` from an L0 record.
 
-    This is the L0→L2 bridge: it consumes the **already-computed**
+    This is an L0→dict bridge: it consumes the **already-computed**
     :class:`ail.metrics.contract.TraceMetrics` (the deterministic L0 metrics for
-    one trace) and packs the signals the judge reasons over into a small dict.
-    Nothing here re-derives L0 — every number is copied straight from ``metrics``
-    — so the judge never recounts tokens or recomputes redundancy, and it scores
-    off this **summary**, not the raw (possibly 900K-token) trace.
+    one trace) and packs those signals into a small dict. Nothing here re-derives
+    L0 — every number is copied straight from ``metrics`` — so any consumer of
+    this **summary** reads facts rather than recounting them from the raw
+    (possibly 900K-token) trace. NOTE: the default ``token_efficiency`` judge is
+    now ``{{ trace }}``-based and does **not** read this; the helper is retained
+    for the labeling workflow and tests.
 
     Args:
         metrics: The per-trace L0 metrics (from

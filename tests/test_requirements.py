@@ -14,7 +14,8 @@ Coverage map (the slice-1 acceptance list):
 * GAP A round-trip (persist a confirmed goal -> the loop's load reads it back);
 * GAP B (an authored judge validates via the dynamic allowlist; an unreadable
   registry fails closed);
-* token_efficiency excluded from the auto-align cadence.
+* token_efficiency included in the auto-align cadence (trace-based, alignable),
+  and the generic auto_alignable=False opt-out still excludes an opted-out judge.
 """
 
 from __future__ import annotations
@@ -669,16 +670,18 @@ class TestLoopGoalLoad:
 
 
 # ---------------------------------------------------------------------------
-# Piece 5: token_efficiency excluded from the auto-align cadence
+# Piece 5: token_efficiency included in the auto-align cadence (+ the generic
+# auto_alignable=False opt-out still excludes an opted-out judge)
 # ---------------------------------------------------------------------------
 
 
-class TestAutoAlignExclusion:
-    def test_token_efficiency_marked_not_auto_alignable(self) -> None:
+class TestAutoAlignInclusion:
+    def test_token_efficiency_is_auto_alignable(self) -> None:
         from ail.judges.scorers import CORRECTNESS, TOKEN_EFFICIENCY
 
-        assert TOKEN_EFFICIENCY.auto_alignable is False
-        # the other built-ins remain alignable
+        # token_efficiency is now a {{ trace }}-based, MemAlign-alignable judge —
+        # the cadence aligns it from human trace labels like every other built-in.
+        assert TOKEN_EFFICIENCY.auto_alignable is True
         assert CORRECTNESS.auto_alignable is True
 
     def test_authored_judge_is_auto_alignable_by_default(self) -> None:
@@ -687,7 +690,7 @@ class TestAutoAlignExclusion:
         spec = build_judge_spec("no hallucinated tool calls", "never invent tools")
         assert spec.auto_alignable is True
 
-    def test_cadence_excludes_non_auto_alignable_judges(self) -> None:
+    def test_cadence_includes_all_built_in_judges(self) -> None:
         from ail.judges.auto_align import AutoAlignState, auto_align_scorers
 
         class _Source:
@@ -703,6 +706,48 @@ class TestAutoAlignExclusion:
 
         report = auto_align_scorers("exp", source=_Source(), store=_Store(), register=False)
         judged = {r.judge_name for r in report.results}
-        assert "token_efficiency" not in judged
-        assert judged == {"correctness", "modularity", "groundedness"}
+        # token_efficiency is no longer skipped — it is one of the four aligned.
+        assert "token_efficiency" in judged
+        assert judged == {"correctness", "modularity", "groundedness", "token_efficiency"}
+
+    def test_cadence_still_excludes_an_opted_out_judge(self) -> None:
+        # The generic, name-free opt-out mechanism is unchanged: a spec with
+        # auto_alignable=False is excluded entirely (not attempted, not reported).
+        from ail.judges.auto_align import AutoAlignState, auto_align_scorers
+        from ail.judges.scorers import ScorerSpec
+
+        alignable = ScorerSpec(
+            name="alignable_dim",
+            instructions="Grade {{ trace }}.",
+            feedback_value_type=bool,
+            description="d",
+        )
+        opted_out = ScorerSpec(
+            name="opted_out_dim",
+            instructions="Grade {{ inputs }}.",
+            feedback_value_type=bool,
+            description="d",
+            auto_alignable=False,
+        )
+
+        class _Source:
+            def iter_traces(self, **kwargs: Any):  # type: ignore[no-untyped-def]
+                return iter(())
+
+        class _Store:
+            def read(self, judge_name: str) -> AutoAlignState:
+                return AutoAlignState()
+
+            def write(self, judge_name: str, state: AutoAlignState) -> None:  # pragma: no cover
+                pass
+
+        report = auto_align_scorers(
+            "exp",
+            source=_Source(),
+            store=_Store(),
+            scorers={alignable.name: alignable, opted_out.name: opted_out},
+            register=False,
+        )
+        judged = {r.judge_name for r in report.results}
+        assert judged == {"alignable_dim"}
         assert report.n_failed == 0
