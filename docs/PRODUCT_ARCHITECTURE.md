@@ -73,8 +73,10 @@ own agents. Not a multi-org SaaS.
   feedback and alignment silently fails.
 - Judges score on **judge-ingestible (smaller) traces**. For very large traces (100s of K
   tokens), feed the judge the **RLM digest** instead of the raw trace.
-- **Token / cost is deterministic L0** — no LLM judge needed. Judges are for **quality**
-  dimensions the human defines.
+- **Token / cost has two complementary layers.** The **un-gameable count** is deterministic
+  L0 (`ail.metrics`, no LLM). On top of it, `token_efficiency` is a **`{{trace}}`-based,
+  MemAlign-alignable** judge that learns the subjective "was that spend justified / was the
+  redundancy avoidable" call from human labels — it **complements** L0, it does not replace it.
 
 ### Auto-align (MemAlign)
 - A **scheduled check** counts human labels; when they cross the floor (~20 per dimension) with

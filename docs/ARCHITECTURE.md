@@ -298,7 +298,10 @@ unchanged at 549,300; verdict `token_waste_score=82` attached; HALO's review in
 its own trace.) What was deferred — the **Deno** RLM runtime — is now only a
 *soft* HALO dependency (the `run_code` tool); the reviewer runs without it. A
 distinct, complementary in-platform pattern remains: where a verdict needs
-trace-derived signal but the trace fits, feed a **summary/digest** rather than
-the raw trace — exactly what the L2 token-efficiency judge does with the L0
-summary (it scores off `build_token_efficiency_inputs(...)`, never `{{ trace }}`).
-A `{{ trace }}` judge, where the trace fits, still obeys rules 1–3.
+trace-derived signal but the raw trace does **not** fit a judge's context window,
+feed a **summary/digest** rather than the raw trace — the not-yet-built
+digest-fed-judge seam the L2 `token_efficiency` judge will need for the corpus's
+heavy tail. (`token_efficiency` is itself a `{{ trace }}` judge today: it aligns
+and scores on judge-ingestible traces, and the big-trace tail is the documented
+gap that seam fills — see `docs/JUDGE_AUTHORING.md`.) A `{{ trace }}` judge, where
+the trace fits, still obeys rules 1–3.

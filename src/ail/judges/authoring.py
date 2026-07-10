@@ -22,8 +22,8 @@ know them:
    feedback on real traces (:func:`ail.judges.alignment.align_judge`). Authoring
    a judge on app-computed/derived inputs instead would yield *zero* MemAlign
    training examples — the documented mistake this capability exists to avoid.
-   (The one deliberate exception in this codebase is ``token_efficiency``, which
-   is computed-inputs on purpose; see the module note below.)
+   Every built-in judge (``token_efficiency`` included) is a ``{{ trace }}``
+   judge and follows this convention.
 2. **The label schema's name EXACTLY matches the judge name.**
    :func:`ail.judges.alignment.align_judge` / MemAlign pair a human's feedback to
    a judge's scores by matching the label-schema ``name`` to the judge ``name`` —

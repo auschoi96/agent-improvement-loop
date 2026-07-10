@@ -31,8 +31,9 @@ feedback attached to the *real traces* the `{{ trace }}` judge reads, so a
 
 Authoring a judge on **app-computed / derived inputs** instead (e.g. feeding it a
 pre-summarized dict) would yield **zero** MemAlign training examples — the exact
-mistake this capability exists to avoid. The one deliberate exception in this
-codebase is `token_efficiency` (see [the exclusion](#tokencost-stays-deterministic-l0)).
+mistake this capability exists to avoid. Every built-in judge follows this
+convention, including `token_efficiency`, which is now a `{{ trace }}`-based,
+MemAlign-alignable judge (see [token/cost](#tokencost-l0-count-vs-the-trace-based-judge)).
 
 Structurally, an authored judge is what `align_judge` / `score_anchor` accept:
 `judge.get_input_fields()` includes a `trace` field, and `judge.align(...)` works.
@@ -147,21 +148,31 @@ traces**.
 > intentionally **not** built here; the `{{ trace }}` template (`TRACE_TEMPLATE_VAR`)
 > is the single documented slot it will occupy. Nothing here precludes it.
 
-## token/cost stays deterministic L0
+## token/cost: L0 count vs. the trace-based judge
 
-Authoring is the general route for **human-defined QUALITY dimensions**. It does
-**not** cover token/cost, which stay **deterministic L0** and are the one
-deliberate exception to convention 1:
+Token/cost has **two complementary layers**, not one:
 
-- The `token_efficiency` scorer (`ail.judges.scorers`, see `scorers.py:341`) is
-  intentionally a **computed-inputs** judge: it reads an already-computed L0
-  summary (`build_token_efficiency_inputs`) via `{{ inputs }}`, **not**
-  `{{ trace }}`. It is therefore **deliberately not MemAlign-aligned** — the
-  un-gameable L0 deterministic layer (`ail.metrics`) already covers token/cost, so
-  there is nothing subjective for MemAlign to learn.
-- This is by design, not an oversight. **Computed-inputs judges are deliberately
-  not aligned.** Authoring leaves that scorer and its behaviour untouched and adds
-  the general `{{ trace }}` authoring path alongside it.
+- **L0 (deterministic, un-gameable count).** `ail.metrics` measures the raw
+  token/cost *count* from the trace deterministically. Nothing subjective, nothing
+  an LLM could game — this is the objective floor, and it is unchanged.
+- **`token_efficiency` (trace-based, MemAlign-alignable judge).** The
+  `token_efficiency` scorer (`ail.judges.scorers`) is now a `{{ trace }}`-based
+  judge like any authored one: it reads the run's trace and grades the *subjective*
+  call the count cannot make — was that spend **justified**, was the redundancy
+  **avoidable**, is quality-per-token good — judging success from the trace. It is
+  therefore **MemAlign-alignable**: the scheduled `ail-auto-align` cadence includes
+  it and re-aligns it from human trace labels like every other judge. It
+  **complements** the L0 layer; it does not replace it.
+
+**Large-trace caveat (honest scope).** As a `{{ trace }}` judge, `token_efficiency`
+is context-bound: alignment and scoring work only on **judge-ingestible** traces.
+The corpus's heavy tail (~900K-token traces, §8) exceeds a judge's context window
+and is **not** covered here; that tail needs the not-yet-built **digest-fed-judge**
+seam described in [Large traces](#large-traces-v1-scope--the-digest-seam) (a digest
+supplied at the trace-feeding boundary, not a rubric change). This is a real,
+documented gap — not faked coverage. The retained `build_token_efficiency_inputs`
+helper is an independent L0-summary utility (used by the labeling workflow and
+tests), not this judge's input path.
 
 ## What authoring reuses vs. adds
 

@@ -102,29 +102,33 @@ pass/fail). `modularity` is graded because structure quality has gradations.
 
 #### `token_efficiency` — the hybrid, L0-conditioned scorer
 
-`token_efficiency` (graded `1..5`) is the **hybrid** judge and the direct
-Phase-2 partner of `correctness`. It does **not** ask the LLM to count tokens or
-recompute redundancy — those are L0 deterministic facts (`ail.metrics`,
-un-gameable, `docs/ARCHITECTURE.md` §3). Instead it **consumes** the L0 signals
-and adds only the judgement layer.
+`token_efficiency` (graded `1..5`) is a **`{{ trace }}`-based, MemAlign-alignable**
+judge and the direct Phase-2 partner of `correctness`. It reads the run's trace
+directly and grades the *subjective* call the deterministic layer cannot make.
 
-- `build_token_efficiency_inputs(metrics: TraceMetrics, *, task=None) -> dict`
-  is the L0→L2 bridge: it copies the already-computed per-trace L0 signals
-  (tokens, tool-call count, redundancy rate, the **named** top repeated targets,
-  cost, model, duration) into a compact `{"task": ..., "l0_signals": {...}}`
-  dict. Nothing is re-derived; the judge reads this summary.
-- **Large-trace-safe by design.** It scores off that L0 *summary*, never
-  `{{ trace }}`. The corpus reaches 943K-token traces (§8) that exceed a judge's
-  context window, so a flat `{{ trace }}` judge is not an option here; the L0
-  digest is. (A recursive-review digest, when L3 exists, plugs into the same
-  `inputs` slot.)
+- **Complements L0, does not replace it.** The un-gameable token/cost **count** is
+  a deterministic L0 fact (`ail.metrics`, `docs/ARCHITECTURE.md` §3). On top of
+  that, `token_efficiency` judges — from the trace — whether the spend was
+  **justified**, whether the redundancy was **avoidable**, and whether
+  quality-per-token was good, naming the specific waste it saw. L0 gives the
+  number; the judge gives the verdict on the number.
+- **MemAlign-alignable.** Because it is a `{{ trace }}` judge (`auto_alignable=True`),
+  the scheduled `ail-auto-align` cadence includes it and re-aligns it from human
+  trace labels like every other built-in judge.
+- **Large-trace caveat (honest scope).** As a `{{ trace }}` judge it is
+  context-bound: alignment and scoring work on **judge-ingestible** traces. The
+  corpus's heavy tail (~943K-token traces, §8) exceeds a judge's context window and
+  is **not** covered here; that tail needs the not-yet-built **digest-fed-judge**
+  seam (a digest supplied at the trace-feeding boundary, not a rubric change). This
+  is a real documented gap, not faked coverage. The retained
+  `build_token_efficiency_inputs` helper is an independent L0-summary utility (used
+  by the labeling workflow below and tests), not this judge's input path.
 - **Quality-conditioned / anti-gaming.** Efficiency is scored *conditioned on
-  task success*: spending few tokens by doing less or producing a wrong result
-  scores **low**, not high. The rubric refuses to reward "fewer tokens, worse
-  outcome", which is exactly why it is paired with `correctness` as the Phase-2
-  guardrail — tokens may fall only when quality does not. Its rationale names the
-  specific waste (which repeated target / which boilerplate) so the verdict is
-  actionable.
+  success read from the trace*: spending few tokens by doing less or leaving the
+  task unfinished/wrong scores **low**, not high. The rubric refuses to reward
+  "fewer tokens, worse outcome", which is exactly why it is paired with
+  `correctness` as the Phase-2 guardrail — tokens may fall only when quality does
+  not.
 
 ### Authoring — `ail.judges.authoring`
 
@@ -133,8 +137,8 @@ door. `author_judge(name, description, *, experiment_id, scale=..., ...)` turns 
 plain-language description into a registered, MemAlign-alignable `{{ trace }}`
 judge **plus** the label schema whose `name` matches the judge name (the pairing
 `align()` needs). It is additive — it composes `make_scorer` and
-`create_aligned_scorer`, and does not change the scorers above or the
-`token_efficiency` computed-inputs exclusion. CLI: `ail-author-judge`. Full
+`create_aligned_scorer`, and does not change the built-in scorers above. CLI:
+`ail-author-judge`. Full
 details, the two hard conventions, and the large-trace/Designer-Critic seams are
 in **`docs/JUDGE_AUTHORING.md`**.
 
@@ -264,10 +268,8 @@ from ail.judges.labeling import TraceLabel, record_labels, assemble_pools
 
 labels = [
     TraceLabel(trace_id="tr-1", name="token_efficiency", value=2,
-               rationale="re-read foo.py 34x for no gain",
-               inputs=build_token_efficiency_inputs(metrics_1, task="refactor X"),
-               outputs="<agent response>"),
-    # ... ~30-50 human-graded traces ...
+               rationale="re-read foo.py 34x for no gain"),
+    # ... ~30-50 human-graded traces; MemAlign reads each trace by its id ...
 ]
 record_labels(labels, labeler_id="austin")                # HUMAN assessments on traces
 alignment_set, anchor = assemble_pools(source, labels, judge_name="token_efficiency")
