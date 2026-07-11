@@ -11,6 +11,7 @@ are ``importorskip``-guarded, and the end-to-end live review is
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import contextmanager
@@ -98,6 +99,45 @@ def captured_feedback(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 class TestReviewTrace:
+    def test_normalizes_chat_tool_history_for_databricks_responses(self) -> None:
+        long_call_id = "call_" + "x" * 180
+        items = rv._normalize_databricks_responses_input(
+            [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": long_call_id,
+                            "function": {"name": "read_file", "arguments": '{"path":"/a"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": long_call_id, "content": "file contents"},
+            ]
+        )
+        assert items == [
+            {"role": "assistant", "content": ""},
+            {
+                "type": "function_call",
+                "call_id": "ail_" + rv.hashlib.sha256(long_call_id.encode()).hexdigest()[:16],
+                "name": "read_file",
+                "arguments": '{"path":"/a"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "ail_" + rv.hashlib.sha256(long_call_id.encode()).hexdigest()[:16],
+                "output": "file contents",
+            },
+        ]
+
+    def test_prepares_otel_alias_for_halo_import(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import opentelemetry.util.types as otel_types
+
+        monkeypatch.delattr(otel_types, "_ExtendedAttributes", raising=False)
+        rv._prepare_halo_otel_compatibility()
+        assert hasattr(otel_types, "_ExtendedAttributes")
+
     def test_returns_parsed_verdict_with_reviewer_trace_id(
         self, synthetic_trace: Any, captured_feedback: list[dict[str, Any]]
     ) -> None:
@@ -456,19 +496,40 @@ class TestEngineSeam:
 
         captured: dict[str, Any] = {}
 
-        def fake_run_engine(messages: Any, config: Any, trace_path: Any, **kw: Any) -> list[Any]:
+        async def fake_run_engine_async(
+            messages: Any, config: Any, trace_path: Any, **kw: Any
+        ) -> list[Any]:
             captured["messages"] = messages
             captured["trace_path"] = trace_path
             return [
                 SimpleNamespace(final=True, item=SimpleNamespace(role="assistant", content=_REPORT))
             ]
 
-        monkeypatch.setattr(engine_main, "run_engine", fake_run_engine)
+        monkeypatch.setattr(engine_main, "run_engine_async", fake_run_engine_async)
         jsonl = tmp_path / "t.jsonl"
         jsonl.write_text("{}\n")
         report = rv.run_halo_review("PROMPT", jsonl, model="m", base_url="http://x", api_key="k")
         assert "token_efficiency" in report
         assert captured["messages"][0].content == "PROMPT"
+
+    def test_run_halo_review_works_inside_running_event_loop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        pytest.importorskip("engine", reason="needs the l3 extra (halo-engine)")
+        import engine.main as engine_main
+
+        async def fake_run_engine_async(*args: Any, **kwargs: Any) -> list[Any]:
+            return [
+                SimpleNamespace(final=True, item=SimpleNamespace(role="assistant", content=_REPORT))
+            ]
+
+        monkeypatch.setattr(engine_main, "run_engine_async", fake_run_engine_async)
+        jsonl = tmp_path / "t.jsonl"
+        jsonl.write_text("{}\n")
+        async def invoke() -> str:
+            return rv.run_halo_review("PROMPT", jsonl, model="m", base_url="http://x", api_key="k")
+
+        assert "token_efficiency" in asyncio.run(invoke())
 
 
 class TestReasoningEffort:

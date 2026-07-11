@@ -49,6 +49,16 @@ class TestJudgeModelDefault:
         assert job.DEFAULT_JUDGE_MODEL == "databricks-gpt-5-5-pro"
         assert captured["kwargs"]["judge_model"] == "databricks-gpt-5-5-pro"
 
+    def test_fails_when_all_selected_reviews_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(job, "resolve_job_auth", lambda **kw: "minted")
+        monkeypatch.setattr(job, "run_continuous_rlm", lambda *a, **kw: type(
+            "Report",
+            (),
+            {"n_scanned": 1, "n_already_reviewed": 0, "n_reviewer_traces_skipped": 0,
+             "n_sampled_out": 0, "n_selected": 1, "n_reviewed": 0, "n_failed": 1},
+        )())
+        assert job.main(["--experiment=EXP1", "--warehouse-id=wh-1", "--objective-metric="]) == 1
+
     def test_judge_model_is_overridable(self, captured: dict[str, Any]) -> None:
         job.main(
             [

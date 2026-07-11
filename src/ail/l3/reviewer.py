@@ -35,10 +35,14 @@ HALO is imported lazily inside :func:`run_halo_review` so the rest of the module
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import hashlib
 import json
 import os
 import re
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +71,176 @@ __all__ = [
     "run_halo_review",
     "review_trace",
 ]
+
+
+def _prepare_halo_otel_compatibility() -> None:
+    """Restore the private OTel alias expected by Catalyst tracing.
+
+    HALO imports its Catalyst telemetry module even when telemetry is disabled.
+    Databricks runtimes can provide a newer ``opentelemetry-api`` where the
+    private ``_ExtendedAttributes`` alias is absent, while Catalyst 0.1.7 still
+    reaches it through ``opentelemetry.trace``.  The alias is only a typing
+    expression, so restoring it before HALO imports keeps trace navigation
+    available without changing HALO's runtime behavior.
+    """
+    from collections.abc import Mapping
+
+    import opentelemetry.util.types as otel_types
+
+    if not hasattr(otel_types, "_ExtendedAttributes"):
+        # Catalyst only needs this alias while OpenTelemetry evaluates type
+        # annotations during import; ``Any`` preserves the runtime contract.
+        from typing import Any
+
+        otel_types._ExtendedAttributes = Mapping[str, Any]  # type: ignore[attr-defined]
+
+
+@contextmanager
+def _databricks_responses_compatibility(enabled: bool) -> Iterator[None]:
+    """Normalize role-message items for Databricks' Responses gateway.
+
+    The OpenAI Agents SDK emits typed ``function_call`` items correctly, but
+    HALO's replay history can also contain a role-based assistant item whose
+    ``content`` is ``None``. Databricks validates that field more strictly than
+    OpenAI and returns ``Missing required parameter: input[n].content``. Only
+    role-based items are changed; typed Responses items remain untouched.
+    """
+    if not enabled:
+        yield
+        return
+
+    import engine.agents.agent_context as agent_context_module
+    import engine.agents.compactor as compactor_module
+    from agents.models.openai_responses import OpenAIResponsesModel
+
+    original = OpenAIResponsesModel._build_response_create_kwargs
+
+    @functools.wraps(original)
+    def patched(self: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        payload = original(self, *args, **kwargs)
+        items = payload.get("input")
+        if isinstance(items, list):
+            payload["input"] = _normalize_databricks_responses_input(items)
+        return payload
+
+    OpenAIResponsesModel._build_response_create_kwargs = patched  # type: ignore[method-assign]
+    original_compact = compactor_module.compact
+
+    async def responses_compact(*, client: Any, compaction_model: Any, item: Any) -> str:
+        from engine.agents.prompt_templates import COMPACTION_SYSTEM_PROMPT
+
+        user_text = compactor_module._item_as_prompt(item)
+        response = await client.responses.create(
+            model=compaction_model.name,
+            instructions=COMPACTION_SYSTEM_PROMPT,
+            input=[{"role": "user", "content": user_text}],
+        )
+        return (getattr(response, "output_text", None) or "").strip()
+
+    compactor_module.compact = responses_compact
+    agent_context_module.compact = responses_compact
+    try:
+        yield
+    finally:
+        OpenAIResponsesModel._build_response_create_kwargs = original  # type: ignore[method-assign]
+        compactor_module.compact = original_compact
+        agent_context_module.compact = original_compact
+
+
+def _shorten_response_item_id(value: Any, *, required_prefix: str | None = None) -> str:
+    """Keep replayed Responses identifiers valid and within 64 characters."""
+    text = str(value)
+    if len(text) <= 64 and (required_prefix is None or text.startswith(required_prefix)):
+        return text
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    if required_prefix is not None:
+        return f"{required_prefix}_{digest}"
+    return f"ail_{digest}"
+
+
+def _normalize_databricks_responses_input(items: list[Any]) -> list[Any]:
+    """Convert Chat Completions tool history into valid Responses input items.
+
+    HALO replays trace history through the Agents SDK. Some traces contain the
+    OpenAI Chat Completions shape (``assistant.tool_calls`` and ``role=tool``),
+    while the Responses endpoint requires typed ``function_call`` and
+    ``function_call_output`` items. Typed Responses items are otherwise left
+    intact; only oversized identifiers are shortened.
+    """
+    normalized: list[Any] = []
+    call_id_map: dict[str, str] = {}
+
+    for item in items:
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+
+        item_type = item.get("type")
+        if item_type:
+            typed_item = dict(item)
+            if isinstance(typed_item.get("id"), str):
+                required_prefix = {
+                    "function_call": "fc",
+                    "message": "msg",
+                    "reasoning": "rs",
+                }.get(item_type)
+                typed_item["id"] = _shorten_response_item_id(
+                    typed_item["id"], required_prefix=required_prefix
+                )
+            if isinstance(typed_item.get("call_id"), str):
+                original_call_id = typed_item["call_id"]
+                short_call_id = call_id_map.setdefault(
+                    original_call_id, _shorten_response_item_id(original_call_id)
+                )
+                typed_item["call_id"] = short_call_id
+            normalized.append(typed_item)
+            continue
+
+        role = item.get("role")
+        if role == "assistant" and item.get("tool_calls"):
+            assistant_message = {key: value for key, value in item.items() if key != "tool_calls"}
+            assistant_message["content"] = assistant_message.get("content") or ""
+            if isinstance(assistant_message.get("id"), str):
+                assistant_message["id"] = _shorten_response_item_id(assistant_message["id"])
+            normalized.append(assistant_message)
+            for tool_call in item["tool_calls"]:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") or {}
+                original_call_id = str(tool_call.get("id") or "")
+                short_call_id = call_id_map.setdefault(
+                    original_call_id, _shorten_response_item_id(original_call_id)
+                )
+                normalized.append(
+                    {
+                        "type": "function_call",
+                        "call_id": short_call_id,
+                        "name": function.get("name", ""),
+                        "arguments": function.get("arguments", "{}"),
+                    }
+                )
+            continue
+
+        if role == "tool":
+            original_call_id = str(item.get("tool_call_id") or "")
+            normalized.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id_map.setdefault(
+                        original_call_id, _shorten_response_item_id(original_call_id)
+                    ),
+                    "output": item.get("content") or "",
+                }
+            )
+            continue
+
+        role_item = dict(item)
+        role_item["content"] = role_item.get("content") or ""
+        if isinstance(role_item.get("id"), str):
+            role_item["id"] = _shorten_response_item_id(role_item["id"])
+        normalized.append(role_item)
+
+    return normalized
 
 #: Assessment name the **overall** verdict is attached under. Together with the
 #: per-guideline ``rlm_<id>`` and the ``rlm_recommended_assets`` names — and the
@@ -376,6 +550,7 @@ def build_engine_config(
         name=model,
         temperature=temperature,
         reasoning_effort=cast("ReasoningEffort | None", effort),
+        parallel_tool_calls=False,
     )
     return EngineConfig(
         root_agent=AgentConfig(name="l3-reviewer", model=model_cfg, maximum_turns=max_turns),
@@ -429,7 +604,7 @@ def run_halo_review(
     temperature: float | None = None,
     reasoning_effort: str | None = None,
     telemetry: bool = False,
-    use_responses_api: bool = False,
+    use_responses_api: bool | None = None,
     disable_agent_tracing: bool = True,
 ) -> str:
     """Run HALO over ``trace_path`` and return its free-text report.
@@ -439,23 +614,27 @@ def run_halo_review(
     ``halo-engine`` nor a model is needed in CI.
 
     HALO drives the OpenAI Agents SDK, which defaults to the **Responses API**.
-    Databricks FMAPI serving endpoints are **chat-completions** (``llm/v1/chat``)
-    and do not implement ``/responses``, so ``use_responses_api`` defaults to
-    ``False`` and we flip the SDK's global default to ``chat_completions`` (the
-    supported ``set_default_openai_api`` hook — HALO constructs its
-    ``OpenAIProvider`` with no explicit ``use_responses``, so it honours this).
+    Databricks reasoning endpoints such as ``databricks-gpt-5-5-pro`` only expose
+    the Responses API, while legacy chat endpoints expose chat-completions. When
+    ``use_responses_api`` is omitted, select the API from the model alias.
     ``disable_agent_tracing`` turns off the Agents SDK's own trace exporter
     (which would otherwise try to POST to OpenAI with the wrong credentials);
     our reviewer trace is the MLflow one opened by :func:`review_trace`, not the
     SDK's.
     """
+    _prepare_halo_otel_compatibility()
     import agents
-    from engine.main import run_engine
+    from engine.main import run_engine_async
     from engine.models.messages import AgentMessage
 
     if disable_agent_tracing:
         agents.set_tracing_disabled(True)
-    agents.set_default_openai_api("responses" if use_responses_api else "chat_completions")
+    use_responses = (
+        use_responses_api
+        if use_responses_api is not None
+        else model.lower().startswith(("databricks-gpt-5", "gpt-5"))
+    )
+    agents.set_default_openai_api("responses" if use_responses else "chat_completions")
 
     config = build_engine_config(
         model,
@@ -468,7 +647,22 @@ def run_halo_review(
         reasoning_effort=reasoning_effort,
     )
     messages = [AgentMessage(role="user", content=prompt)]
-    output_items = run_engine(messages, config, Path(trace_path), telemetry=telemetry)
+    def _run() -> Any:
+        return asyncio.run(
+            run_engine_async(messages, config, Path(trace_path), telemetry=telemetry)
+        )
+
+    responses_compat = use_responses and bool(base_url and "databricks" in base_url)
+    with _databricks_responses_compatibility(responses_compat):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            output_items = _run()
+        else:
+            # Databricks serverless invokes wheel tasks from an async-capable runtime.
+            # HALO owns a private event loop in a short-lived worker.
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                output_items = executor.submit(_run).result()
     return _extract_report_text(output_items)
 
 
@@ -713,7 +907,7 @@ def review_trace(
     max_parallel: int = _DEFAULT_MAX_PARALLEL,
     temperature: float | None = None,
     reasoning_effort: str | None = None,
-    use_responses_api: bool = False,
+    use_responses_api: bool | None = None,
     tracking_uri: str = "databricks",
     registry_uri: str = "databricks-uc",
 ) -> HaloReviewVerdict:

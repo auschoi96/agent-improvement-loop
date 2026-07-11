@@ -31,6 +31,7 @@ dependencies = [
 ]
 
 [project.scripts]
+ail = "ail.cli:main"
 # Wheel-task entrypoint for the scheduled Tier A publish Job (see databricks.yml).
 ail-publish-job = "ail.jobs.publish_job:main"
 # Wheel-task entrypoint for the app's Approve/Reject write-path on the deployed

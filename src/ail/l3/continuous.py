@@ -120,6 +120,7 @@ def select_unreviewed_traces(
     sample_rate: float,
     min_tokens: int | None = None,
     status: TraceStatus | None = TraceStatus.OK,
+    retry_failed: bool = False,
 ) -> tuple[list[TraceSelection], int, int, int]:
     """Choose the bounded, sampled, not-yet-reviewed subset for this firing.
 
@@ -140,7 +141,7 @@ def select_unreviewed_traces(
     n_already_reviewed = 0
     n_reviewer_traces_skipped = 0
     for trace in traces:
-        if has_rlm_assessment(trace):
+        if has_rlm_assessment(trace) and not (retry_failed and has_rlm_failure_marker(trace)):
             n_already_reviewed += 1
         elif is_rlm_reviewer_trace(trace):
             n_reviewer_traces_skipped += 1
@@ -159,6 +160,16 @@ def select_unreviewed_traces(
         sampled, top_n=max_reviews, min_tokens=min_tokens, status=status
     )
     return (selections, n_already_reviewed, n_reviewer_traces_skipped, n_sampled_out)
+
+
+def has_rlm_failure_marker(trace: NormalizedTrace) -> bool:
+    """Whether a trace has only the fail-closed RLM marker, not a verdict."""
+    raw = trace.raw
+    info = getattr(raw, "info", None)
+    return any(
+        str(getattr(assessment, "name", "") or "") == REVIEW_FAILED_FEEDBACK_NAME
+        for assessment in list(getattr(info, "assessments", None) or [])
+    )
 
 
 def run_continuous_rlm(
@@ -181,7 +192,8 @@ def run_continuous_rlm(
     max_turns: int | None = None,
     temperature: float | None = None,
     reasoning_effort: str | None = None,
-    use_responses_api: bool = False,
+    use_responses_api: bool | None = None,
+    retry_failed: bool = False,
 ) -> ContinuousRlmRunReport:
     """Run one bounded RLM pass over the most recent trace candidates.
 
@@ -214,6 +226,7 @@ def run_continuous_rlm(
         sample_rate=sample_rate,
         min_tokens=min_tokens,
         status=status,
+        retry_failed=retry_failed,
     )
 
     extra: dict[str, object] = {}

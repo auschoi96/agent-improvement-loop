@@ -17,6 +17,7 @@ improvement from a dashboard that says "improved" while quality stalls (the
 co-adaptation trap every reference loop we surveyed omits).
 
 > **New here?**
+> - [`docs/QUICK_CONNECT.md`](docs/QUICK_CONNECT.md) — wrap any Python agent or LLM call in minutes.
 > - [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — hands-on onboarding: connect traces, state a goal, walk the loop.
 > - [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md) — the current-state map: what's built, where each piece lives, how to operate it.
 > - [`docs/PRODUCT_ARCHITECTURE.md`](docs/PRODUCT_ARCHITECTURE.md) — the design of record (supersedes older prove-as-gate / unified-cycle language).

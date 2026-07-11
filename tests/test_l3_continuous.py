@@ -279,6 +279,16 @@ class TestContinuousRun:
         assert run2.n_selected == 0
         assert run2.n_already_reviewed == 1
 
+    def test_recovery_mode_reselects_failed_trace(self) -> None:
+        failing = _trace(
+            "bad-retry", 1_000, assessments=[_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME)]
+        )
+        selections, n_already, *_ = cr.select_unreviewed_traces(
+            [failing], max_reviews=1, sample_rate=1.0, min_tokens=0, retry_failed=True
+        )
+        assert [selection.trace_id for selection in selections] == ["bad-retry"]
+        assert n_already == 0
+
     def test_sets_trace_store_warehouse_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         source = _FakeSource([])
         monkeypatch.delenv(TRACING_WAREHOUSE_ENV, raising=False)

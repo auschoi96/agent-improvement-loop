@@ -271,6 +271,7 @@ def _run_rlm_for(
         max_turns=args.max_turns,
         temperature=args.temperature,
         reasoning_effort=reasoning_effort,
+        retry_failed=True,
     )
     print(
         "[ail.jobs.continuous_rlm] "
@@ -279,6 +280,16 @@ def _run_rlm_for(
         f"sampled_out={report.n_sampled_out} selected={report.n_selected} "
         f"reviewed={report.n_reviewed} failed={report.n_failed}"
     )
+    # A Databricks task must not report SUCCESS when HALO selected work but every
+    # review failed. The per-trace failure markers remain attached for diagnosis,
+    # while the non-zero exit makes the broken optimization loop visible to Jobs.
+    if report.n_selected > 0 and report.n_reviewed == 0:
+        print(
+            "[ail.jobs.continuous_rlm] all selected HALO reviews failed; "
+            "failing the task so the outage is observable",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

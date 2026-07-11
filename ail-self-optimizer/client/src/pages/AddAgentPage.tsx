@@ -1,10 +1,11 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { PageHeader } from '../shell/PageHeader';
 import { PanelBoundary } from '../shell/PanelBoundary';
 import { OnboardingWizard } from '../components/OnboardingWizard';
 import { agentSearch } from '../lib/navigation';
 import { useAgent } from '../context/agent-context';
+import { QuickConnectPanel } from '../components/QuickConnectPanel';
 
 // Add agent — the distinct onboarding flow. OnboardingWizard is re-homed unchanged:
 // every gate/scorer/floor fact still comes from the Python engine; nothing is
@@ -15,6 +16,7 @@ export function AddAgentPage() {
   const navigate = useNavigate();
   const { selected, reloadAgents } = useAgent();
   const registeredName = useRef<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const goOverview = () =>
     void navigate(`/overview${agentSearch(registeredName.current ?? selected?.agent_name ?? null)}`);
@@ -22,15 +24,24 @@ export function AddAgentPage() {
   return (
     <div className="space-y-6">
       <PageHeader />
-      <PanelBoundary title="Onboarding wizard failed to load">
-        <OnboardingWizard
-          onRegistered={(name) => {
-            registeredName.current = name;
-            reloadAgents();
-          }}
-          onClose={goOverview}
-        />
-      </PanelBoundary>
+      {!showAdvanced && <QuickConnectPanel onAdvanced={() => setShowAdvanced(true)} />}
+      {!showAdvanced && (
+        <p className="text-sm text-muted-foreground">
+          Already have MLflow traces? Use advanced setup to connect an existing experiment and enable governed
+          evaluation.
+        </p>
+      )}
+      {showAdvanced && (
+        <PanelBoundary title="Onboarding wizard failed to load">
+          <OnboardingWizard
+            onRegistered={(name) => {
+              registeredName.current = name;
+              reloadAgents();
+            }}
+            onClose={goOverview}
+          />
+        </PanelBoundary>
+      )}
     </div>
   );
 }

@@ -65,14 +65,14 @@ variables:
     default: ''
   # RLM sampling knobs — used by the standalone scheduled ail-continuous-rlm job.
   rlm_sample_rate:
-    description: Deterministic trace-id sample rate for the scheduled RLM review.
-    default: '0.10'
+    description: Deterministic trace-id sample rate; 1.0 reviews every eligible trace.
+    default: '1.0'
   rlm_max_reviews_per_run:
     description: Hard cap on HALO reviews performed by one scheduled RLM firing.
-    default: '2'
+    default: '100'
   rlm_min_tokens:
-    description: Token floor for RLM candidates; set 0 to allow small traces.
-    default: '50000'
+    description: Token floor for RLM candidates; 0 includes small traces.
+    default: '0'
   rlm_max_results:
     description: Max recent traces scanned per RLM firing before idempotency/sampling.
     default: '100'

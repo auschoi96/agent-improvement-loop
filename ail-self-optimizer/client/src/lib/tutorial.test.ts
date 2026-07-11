@@ -98,11 +98,9 @@ describe('readinessGateLines — TWO-TIER: every threshold is the Python value, 
 
   it('falls closed PER GATE when a threshold field is missing or non-finite — others still render', () => {
     // A partial/malformed thresholds object: one field missing, one NaN.
-    const partial = {
-      ...SENTINEL,
-      prove_min_traces: undefined as unknown as number,
-      scored_coverage_floor: NaN,
-    };
+    const partial = JSON.parse(
+      JSON.stringify({ ...SENTINEL, prove_min_traces: undefined, scored_coverage_floor: NaN }),
+    ) as Thresholds;
     const by = Object.fromEntries(readinessGateLines(partial).map((l) => [l.key, l]));
     // The bad gates show the neutral placeholder, never "undefined"/"NaN%".
     expect(by.prove.requirement).toBe(THRESHOLD_PLACEHOLDER);
@@ -151,7 +149,8 @@ describe('thresholdsFromRequirements — fail-closed extraction', () => {
     expect(thresholdsFromRequirements(null)).toBeNull();
     expect(thresholdsFromRequirements({ ...ok, outcome: 'error' })).toBeNull();
     // Missing thresholds object (defensive against a malformed response).
-    expect(thresholdsFromRequirements({ ...ok, thresholds: undefined as unknown as Thresholds })).toBeNull();
+    const missingThresholds = JSON.parse(JSON.stringify({ ...ok, thresholds: undefined })) as RequirementsResponse;
+    expect(thresholdsFromRequirements(missingThresholds)).toBeNull();
   });
 
   it('composes with readinessGateLines so a failed fetch shows placeholders, not numbers', () => {

@@ -191,30 +191,6 @@ declare module "@databricks/appkit-ui/react" {
           registered_at: string;
         }>;
       };
-    recent_activity: {
-        name: "recent_activity";
-        parameters: Record<string, never>;
-        result: Array<{
-          /** @sqlType STRING */
-          proposal_id: string;
-          /** @sqlType STRING */
-          agent_name: string;
-          /** @sqlType STRING */
-          status: string;
-          /** @sqlType STRING */
-          action_kind: string;
-          /** @sqlType STRING */
-          risk_class: string;
-          /** @sqlType STRING */
-          objective_metric: string;
-          /** @sqlType STRING */
-          trigger_summary: string;
-          /** @sqlType STRING */
-          created_at: string;
-          /** @sqlType STRING */
-          generated_at: string;
-        }>;
-      };
     proposed_actions: {
         name: "proposed_actions";
         parameters: {
@@ -272,6 +248,8 @@ declare module "@databricks/appkit-ui/react" {
           proof_n_promote: number;
           /** @sqlType INT */
           proof_n_block: number;
+          /** @sqlType INT */
+          proof_n_errored: number;
           /** @sqlType STRING */
           proof_suite_version: string;
           /** @sqlType STRING */
@@ -284,6 +262,42 @@ declare module "@databricks/appkit-ui/react" {
           gate_scored_coverage: number;
           /** @sqlType INT */
           gate_n_distrusted_judges: number;
+          /** @sqlType BOOLEAN */
+          verify_requested: boolean;
+          /** @sqlType STRING */
+          verify_status: string;
+          /** @sqlType STRING */
+          verify_requested_by: string;
+          /** @sqlType STRING */
+          verify_requested_at: string;
+          /** @sqlType STRING */
+          verify_completed_at: string;
+          /** @sqlType STRING */
+          verify_error: string;
+        }>;
+      };
+    recent_activity: {
+        name: "recent_activity";
+        parameters: Record<string, never>;
+        result: Array<{
+          /** @sqlType STRING */
+          proposal_id: string;
+          /** @sqlType STRING */
+          agent_name: string;
+          /** @sqlType STRING */
+          status: string;
+          /** @sqlType STRING */
+          action_kind: string;
+          /** @sqlType STRING */
+          risk_class: string;
+          /** @sqlType STRING */
+          objective_metric: string;
+          /** @sqlType STRING */
+          trigger_summary: string;
+          /** @sqlType STRING */
+          created_at: string;
+          /** @sqlType STRING */
+          generated_at: string;
         }>;
       };
     session_token_bars: {

@@ -11,25 +11,31 @@ let consoleErrors: string[] = [];
 let pageErrors: string[] = [];
 let failedRequests: string[] = [];
 
-test('smoke test - leaderboard loads and renders sections + data', async ({ page }) => {
+test('smoke test - overview loads and renders current sections + data', async ({ page }) => {
   await page.goto('/');
 
-  // App + section headings (h1/h2).
-  await expect(page.getByRole('heading', { name: 'Agent Self-Optimization' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Baseline vs new version' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Corpus summary' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Token heavy tail' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Tool-waste diagnosis' })).toBeVisible();
+  // Current app shell + overview headings.
+  await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+  await expect(page.getByText('Deterministic L0 leaderboard for the selected agent')).toBeVisible();
+  await expect(page.getByText('Token heavy tail', { exact: true })).toBeVisible();
+  await expect(page.getByText('Top sessions by total tokens', { exact: true })).toBeVisible();
 
-  // The Phase-B priority visual renders the REAL Phase-2 result once the
-  // version_comparisons query resolves: the -35.4% token headline and the honest
-  // (amber, NOT green) controlled-proof status. Doubles as the "data loaded" wait.
-  await expect(page.getByText('Controlled proof', { exact: false })).toBeVisible({ timeout: 30000 });
-  await expect(page.getByText('-35.4%', { exact: false }).first()).toBeVisible({ timeout: 30000 });
-
-  // Corpus KPI cards render after the corpus_summary query resolves. 'Traces' is
-  // a unique KPI label.
+  // Corpus KPI cards render after the corpus_summary query resolves.
   await expect(page.getByText('Traces', { exact: true })).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText('Total Tokens', { exact: true }).first()).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText('Tool Calls', { exact: true }).first()).toBeVisible({ timeout: 30000 });
+});
+
+test('smoke test - quick connect is the default add-agent path', async ({ page }) => {
+  await page.goto('/add-agent');
+
+  await expect(page.getByText('Quick connect', { exact: true })).toBeVisible();
+  await expect(page.getByText('Instrument any Python agent, HTTP wrapper, or LLM call in minutes.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copy starter code' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Use advanced setup' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Use advanced setup' }).click();
+  await expect(page.locator('[data-slot="card-title"]').filter({ hasText: 'Add an agent' })).toBeVisible();
 });
 
 // ── Lifecycle hooks (artifact capture; unchanged from template) ──────────────
