@@ -169,6 +169,7 @@ export function spawnPythonLabelingBridge(options: SpawnBridgeOptions = {}): Lab
 //: How many recent traces the read side scans (mirrors ail.labeling.service
 //: DEFAULT_SCAN_LIMIT — a pagination bound, not a readiness threshold).
 const DEFAULT_SCAN_LIMIT = 100_000;
+const MAX_TRACE_RESULTS_PER_PAGE = 1_000;
 //: How many "needs a label" traces the worklist returns (mirrors DEFAULT_WORKLIST_LIMIT).
 const DEFAULT_WORKLIST_LIMIT = 50;
 
@@ -219,6 +220,17 @@ interface AssessmentWriteBody {
   feedback: { value: unknown };
   rationale?: string;
 }
+
+interface LabelingApiRequest {
+  path: string;
+  method: 'GET' | 'POST';
+  headers: Headers;
+  raw: boolean;
+  query?: Record<string, string>;
+  payload?: unknown;
+}
+
+type LabelingApiRequestFn = (request: LabelingApiRequest) => Promise<unknown>;
 
 export interface RestBridgeOptions {
   /** SQL warehouse id for the v4 UC tracing endpoints (env: DATABRICKS_WAREHOUSE_ID). */
@@ -547,15 +559,15 @@ async function runRestLabel(client: LabelingRestClient, input: LabelingAction): 
 // how the approvals bridge builds + uses its WorkspaceClient. The 2-step async trace
 // search (start → poll the operation to `done`) is hidden here so the bridge logic — and
 // its tests — deal only in the resolved trace infos.
-function adaptWorkspaceClient(
-  ws: WorkspaceClient,
+export function adaptLabelingApiClient(
+  request: LabelingApiRequestFn,
   cfg: { warehouseId: string; searchTimeoutMs: number; searchPollMs: number }
 ): LabelingRestClient {
   const jsonHeaders = (): Headers => new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' });
   const getHeaders = (): Headers => new Headers({ Accept: 'application/json' });
   return {
     async listScorers(experimentId) {
-      const resp = (await ws.apiClient.request({
+      const resp = (await request({
         path: `/api/2.0/managed-evals/scheduled-scorers/${experimentId}`,
         method: 'GET',
         headers: getHeaders(),
@@ -564,38 +576,64 @@ function adaptWorkspaceClient(
       return resp.scheduled_scorers?.scorers ?? [];
     },
     async searchTraces(experimentId, maxResults) {
-      const start = (await ws.apiClient.request({
-        path: '/api/4.0/mlflow/traces/search-long-running',
-        method: 'POST',
-        headers: jsonHeaders(),
-        raw: false,
-        payload: {
-          locations: [{ type: 'MLFLOW_EXPERIMENT', mlflow_experiment: { experiment_id: experimentId } }],
-          max_results: maxResults,
-          sql_warehouse_id: cfg.warehouseId,
-          order_by: ['timestamp_ms DESC'],
-        },
-      })) as { name?: string };
-      const opId = start.name;
-      if (!opId) throw new Error('trace search returned no operation id');
-      const deadline = Date.now() + cfg.searchTimeoutMs;
-      for (;;) {
-        const op = (await ws.apiClient.request({
-          path: `/api/4.0/mlflow/traces/search/operations/${opId}`,
-          method: 'GET',
-          headers: getHeaders(),
+      const traces: RestTraceInfo[] = [];
+      let pageToken: string | undefined;
+      const seenTokens = new Set<string>();
+      while (traces.length < maxResults) {
+        const pageSize = Math.min(MAX_TRACE_RESULTS_PER_PAGE, maxResults - traces.length);
+        const start = (await request({
+          path: '/api/4.0/mlflow/traces/search-long-running',
+          method: 'POST',
+          headers: jsonHeaders(),
           raw: false,
-          query: { sql_warehouse_id: cfg.warehouseId },
-        })) as { done?: boolean; response?: { trace_infos?: RestTraceInfo[] } };
-        if (op.done) return op.response?.trace_infos ?? [];
-        if (Date.now() >= deadline) {
-          throw new Error(`trace search did not complete in ${cfg.searchTimeoutMs}ms`);
+          payload: {
+            locations: [{ type: 'MLFLOW_EXPERIMENT', mlflow_experiment: { experiment_id: experimentId } }],
+            max_results: pageSize,
+            sql_warehouse_id: cfg.warehouseId,
+            order_by: ['timestamp_ms DESC'],
+            ...(pageToken ? { page_token: pageToken } : {}),
+          },
+        })) as { name?: string };
+        const opId = start.name;
+        if (!opId) throw new Error('trace search returned no operation id');
+        const deadline = Date.now() + cfg.searchTimeoutMs;
+        let response: { trace_infos?: RestTraceInfo[]; next_page_token?: string } | undefined;
+        for (;;) {
+          const op = (await request({
+            path: `/api/4.0/mlflow/traces/search/operations/${opId}`,
+            method: 'GET',
+            headers: getHeaders(),
+            raw: false,
+            query: { sql_warehouse_id: cfg.warehouseId },
+          })) as {
+            done?: boolean;
+            error?: { message?: string; error_code?: string };
+            response?: { trace_infos?: RestTraceInfo[]; next_page_token?: string };
+          };
+          if (op.done) {
+            if (op.error) {
+              throw new Error(op.error.message || op.error.error_code || 'trace search operation failed');
+            }
+            response = op.response;
+            break;
+          }
+          if (Date.now() >= deadline) {
+            throw new Error(`trace search did not complete in ${cfg.searchTimeoutMs}ms`);
+          }
+          await sleep(cfg.searchPollMs);
         }
-        await sleep(cfg.searchPollMs);
+        const page = response?.trace_infos ?? [];
+        traces.push(...page.slice(0, maxResults - traces.length));
+        const nextToken = response?.next_page_token;
+        if (!nextToken || page.length === 0 || traces.length >= maxResults) break;
+        if (seenTokens.has(nextToken)) throw new Error('trace search returned a repeated pagination token');
+        seenTokens.add(nextToken);
+        pageToken = nextToken;
       }
+      return traces;
     },
     async createAssessment(location, traceId, body) {
-      return (await ws.apiClient.request({
+      return (await request({
         path: `/api/4.0/mlflow/traces/${location}/${traceId}/assessments`,
         method: 'POST',
         headers: jsonHeaders(),
@@ -605,6 +643,13 @@ function adaptWorkspaceClient(
       })) as { assessment_id?: string };
     },
   };
+}
+
+function adaptWorkspaceClient(
+  ws: WorkspaceClient,
+  cfg: { warehouseId: string; searchTimeoutMs: number; searchPollMs: number }
+): LabelingRestClient {
+  return adaptLabelingApiClient((request) => ws.apiClient.request(request), cfg);
 }
 
 export function restLabelingBridge(options: RestBridgeOptions = {}): LabelingBridge {

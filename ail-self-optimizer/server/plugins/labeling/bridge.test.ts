@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  adaptLabelingApiClient,
   spawnPythonLabelingBridge,
   restLabelingBridge,
   selectLabelingBridge,
@@ -212,6 +213,72 @@ describe('restLabelingBridge — dimensions (read) from judges + scanned traces'
     const res = (await bridge(DIMS)) as DimResult;
     expect(res.outcome).toBe('error');
     expect(res.error).toMatch(/MLflow Traces UI/);
+  });
+});
+
+describe('adaptLabelingApiClient — paginated MLflow trace search', () => {
+  it('never exceeds the 1000-row API limit and follows next_page_token', async () => {
+    const requests: Array<{ path: string; method: string; payload?: Record<string, unknown> }> = [];
+    let page = 0;
+    const request: Parameters<typeof adaptLabelingApiClient>[0] = (apiRequest) => {
+      requests.push({
+        path: apiRequest.path,
+        method: apiRequest.method,
+        ...(apiRequest.payload && typeof apiRequest.payload === 'object'
+          ? { payload: apiRequest.payload as Record<string, unknown> }
+          : {}),
+      });
+      if (apiRequest.method === 'POST') {
+        page += 1;
+        return Promise.resolve({ name: `operation-${page}` });
+      }
+      const pathParts = apiRequest.path.split('-');
+      const operation = Number(pathParts[pathParts.length - 1]);
+      if (operation === 1) {
+        return Promise.resolve({
+          done: true,
+          response: {
+            trace_infos: Array.from({ length: 1_000 }, (_, index) => traceInfo(`first-${index}`)),
+            next_page_token: 'page-2',
+          },
+        });
+      }
+      return Promise.resolve({
+        done: true,
+        response: {
+          trace_infos: Array.from({ length: 500 }, (_, index) => traceInfo(`second-${index}`)),
+        },
+      });
+    };
+
+    const client = adaptLabelingApiClient(request, {
+      warehouseId: 'wh-1',
+      searchTimeoutMs: 1_000,
+      searchPollMs: 0,
+    });
+    const traces = await client.searchTraces('exp-1', 1_500);
+    const starts = requests.filter((request) => request.method === 'POST');
+
+    expect(traces).toHaveLength(1_500);
+    expect(starts.map((request) => request.payload?.max_results)).toEqual([1_000, 500]);
+    expect(starts[0]?.payload).not.toHaveProperty('page_token');
+    expect(starts[1]?.payload).toMatchObject({ page_token: 'page-2' });
+  });
+
+  it('surfaces a failed async search operation', async () => {
+    const request: Parameters<typeof adaptLabelingApiClient>[0] = (apiRequest) =>
+      Promise.resolve(
+        apiRequest.method === 'POST'
+          ? { name: 'operation-1' }
+          : { done: true, error: { error_code: 'INTERNAL_ERROR', message: 'warehouse failed' } }
+      );
+    const client = adaptLabelingApiClient(request, {
+      warehouseId: 'wh-1',
+      searchTimeoutMs: 1_000,
+      searchPollMs: 0,
+    });
+
+    await expect(client.searchTraces('exp-1', 100)).rejects.toThrow(/warehouse failed/);
   });
 });
 
