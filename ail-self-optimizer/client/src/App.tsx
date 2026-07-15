@@ -35,7 +35,7 @@ export default function App() {
                 <Route path="/overview" element={<LiveRefreshBoundary><OverviewPage /></LiveRefreshBoundary>} />
                 <Route path="/compare" element={<LiveRefreshBoundary><ComparePage /></LiveRefreshBoundary>} />
                 <Route path="/approvals" element={<LiveRefreshBoundary><ApprovalsPage /></LiveRefreshBoundary>} />
-                <Route path="/labeling" element={<LiveRefreshBoundary><LabelingPage /></LiveRefreshBoundary>} />
+                <Route path="/labeling" element={<LabelingPage />} />
                 <Route path="/activity" element={<LiveRefreshBoundary><ActivityPage /></LiveRefreshBoundary>} />
                 <Route path="/lineage" element={<LiveRefreshBoundary><LineagePage /></LiveRefreshBoundary>} />
                 <Route path="/add-agent" element={<AddAgentPage />} />
