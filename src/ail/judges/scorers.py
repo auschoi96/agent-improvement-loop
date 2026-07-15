@@ -12,14 +12,11 @@ chosen for the Milestone-1 token-reduction lever:
 * **groundedness** — whether the response is supported by the provided context
   (``yes``/``no``), the anti-hallucination check.
 * **token_efficiency** — graded (1–5) judgement of whether the token spend was
-  *justified*, conditioned on task success. This is the **hybrid** scorer: it
-  does **not** ask the LLM to count tokens or recompute redundancy — those are
-  L0 deterministic facts (:mod:`ail.metrics`). It feeds the LLM the already-
-  computed L0 signals (via :func:`build_token_efficiency_inputs`) and asks only
-  the judgement layer — was the spend worth it, was redundancy avoidable, is
-  quality-per-token good — naming the specific waste so the rationale is
-  actionable. It is the Phase-2 partner of ``correctness``: tokens may fall only
-  if quality does not (see :func:`build_token_efficiency_inputs` and the rubric).
+  *justified*, conditioned on task success. The judge reads the full MLflow trace,
+  including its recorded token usage and tool-call history, so the same assessment
+  can be human-labelled and MemAlign-aligned. Deterministic L0 token/cost metrics
+  remain the authoritative optimization objective; this judge adds the qualitative
+  question of whether the spend was necessary.
 
 Each scorer is a :class:`ScorerSpec` (name + instructions/rubric + output type)
 that the factory turns into an MLflow ``Judge``. Instructions and the feedback
@@ -84,13 +81,7 @@ class ScorerSpec:
 
     ``auto_alignable`` marks whether the scheduled MemAlign auto-align cadence
     (:func:`ail.judges.auto_align.auto_align_scorers`) may align this judge from
-    human trace labels. Almost every judge is (the default ``True``): it grades a
-    real run and a human can label that run. The exception is a **computed-inputs**
-    judge whose rubric is fed derived signals (not the raw trace) and needs
-    ``{{ expectations }}`` that the trace-label align path cannot supply — aligning
-    it is a category error. Setting this ``False`` (see ``token_efficiency``) is the
-    generic, name-free opt-out the auto-align cadence honours so it skips such a
-    judge cleanly instead of failing on it every run.
+    human trace labels. Every built-in judge is trace-native and alignable.
     """
 
     name: str
@@ -110,21 +101,18 @@ class ScorerSpec:
 
 CORRECTNESS = ScorerSpec(
     name="correctness",
-    description="Does the response correctly accomplish the task, per the expected result?",
+    description="Does the traced agent run correctly and completely accomplish the user's task?",
     feedback_value_type=Literal["yes", "no"],  # constrained categorical guardrail
     instructions=(
-        "You are judging whether an agent's response is CORRECT.\n\n"
-        "Task / request:\n{{ inputs }}\n\n"
-        "Agent response to judge:\n{{ outputs }}\n\n"
-        "Expected result (ground truth):\n{{ expectations }}\n\n"
-        "A response is correct when it accomplishes the task and is consistent "
-        "with the expected result: the substantive facts, conclusions, and any "
-        "code or commands match what is expected. Ignore differences in wording, "
-        "formatting, or ordering that do not change the outcome. If the expected "
-        "result is empty, judge whether the response correctly and completely "
-        "satisfies the task on its own terms.\n\n"
-        "Answer 'yes' if the response is correct, or 'no' if it is wrong, "
-        "incomplete, or contradicts the expected result. Briefly justify the call."
+        "You are judging whether a complete agent run is CORRECT.\n\n"
+        "Inspect the request, intermediate reasoning and tool calls, tool results, "
+        "errors, validations, and final response in this MLflow trace:\n{{ trace }}\n\n"
+        "A run is correct only when it actually accomplishes the user's task and its "
+        "claims are supported by the observed tool results. Penalize incomplete work, "
+        "ignored failures, fabricated success, incorrect code or commands, and a final "
+        "answer that overstates what was verified. Ignore harmless wording differences.\n\n"
+        "Answer 'yes' only when the traced evidence supports a correct and complete "
+        "outcome; otherwise answer 'no'. Briefly cite the decisive trace evidence."
     ),
 )
 
@@ -136,10 +124,9 @@ MODULARITY = ScorerSpec(
     # restore aggregations meaningful for a graded metric (Phase-4 leaderboard).
     aggregations=("mean", "median", "p90"),
     instructions=(
-        "You are rating the MODULARITY of the code in an agent's response on a "
-        "1-to-5 scale.\n\n"
-        "Task / request:\n{{ inputs }}\n\n"
-        "Agent response to judge:\n{{ outputs }}\n\n"
+        "You are rating the MODULARITY of code produced or modified by an agent run "
+        "on a 1-to-5 scale. Inspect the complete MLflow trace, including the request, "
+        "file edits, tool results, tests, and final response:\n{{ trace }}\n\n"
         "Modular code has clear separation of concerns, small focused functions "
         "with single responsibilities, low coupling and high cohesion, reuse of "
         "existing helpers instead of duplication, and sensible names. Penalize "
@@ -152,7 +139,7 @@ MODULARITY = ScorerSpec(
         "  4 - clean separation with minor issues\n"
         "  5 - exemplary modularity, cohesive and reusable\n\n"
         "Return the single integer (1-5) that best fits, and briefly justify it. "
-        "If the response contains no code to assess, return 3 and say so."
+        "If the run contains no code change to assess, return 3 and say so."
     ),
 )
 
@@ -161,20 +148,15 @@ GROUNDEDNESS = ScorerSpec(
     description="Is the response supported by the provided context, with no fabrication?",
     feedback_value_type=Literal["yes", "no"],  # constrained categorical
     instructions=(
-        "You are judging whether an agent's response is GROUNDED in the context "
-        "it was given.\n\n"
-        "Provided context / request (the only support the response may rely on):\n"
-        "{{ inputs }}\n\n"
-        "Agent response to judge:\n{{ outputs }}\n\n"
-        "A response is grounded when every substantive claim, file path, symbol, "
-        "API, figure, or quotation in it is supported by the provided context. A "
-        "response is NOT grounded if it invents facts, cites sources or paths not "
-        "present in the context, or states specifics that the context does not "
-        "support — even if they sound plausible. General knowledge that does not "
-        "contradict the context is acceptable.\n\n"
-        "Answer 'yes' if the response is fully grounded, or 'no' if any part is "
-        "unsupported or fabricated. Briefly justify the call, naming the "
-        "ungrounded claim if there is one."
+        "You are judging whether an agent run is GROUNDED in the evidence it actually "
+        "observed. Inspect the complete MLflow trace:\n{{ trace }}\n\n"
+        "Every substantive claim in the final response about files, APIs, commands, "
+        "tests, metrics, or outcomes must be supported by the request or by a tool "
+        "result visible in the trace. A run is not grounded when it invents a path or "
+        "fact, claims a command/test succeeded without evidence, or presents an "
+        "assumption as an observed result.\n\n"
+        "Answer 'yes' only when the final response is fully supported by traced "
+        "evidence; otherwise answer 'no' and name the unsupported claim."
     ),
 )
 
@@ -188,24 +170,13 @@ TOKEN_EFFICIENCY = ScorerSpec(
     # As with modularity, a bounded Literal loses make_judge's default mean
     # aggregation; restore aggregations meaningful for a graded metric.
     aggregations=("mean", "median", "p90"),
-    # NOT auto-alignable: this is a deliberate COMPUTED-INPUTS test judge — it is fed
-    # the already-computed L0 signals via build_token_efficiency_inputs (never the raw
-    # {{ trace }}) and its rubric needs {{ expectations }} / success criteria that the
-    # human-trace-label MemAlign path does not supply. Auto-aligning it is a category
-    # error (it made the nightly ail-auto-align report failed=1), so the cadence skips it.
-    auto_alignable=False,
+    auto_alignable=True,
     instructions=(
-        "You are rating the TOKEN EFFICIENCY of an agent run on a 1-to-5 scale.\n\n"
-        "Task / request, with the run's L0 deterministic measurements:\n"
-        "{{ inputs }}\n\n"
-        "Agent response / outcome to judge:\n{{ outputs }}\n\n"
-        "Expected result / success criteria (ground truth):\n{{ expectations }}\n\n"
-        "The numbers under 'l0_signals' in the input are ALREADY MEASURED facts "
-        "(token counts, tool-call count, redundancy rate, repeated targets, cost, "
-        "model) computed deterministically from the trace. DO NOT recount tokens "
-        "or recompute any of them, and do not reward or penalize small rounding — "
-        "treat them as given and JUDGE them.\n\n"
-        "Your job is the judgement the numbers cannot make on their own:\n"
+        "You are rating the TOKEN EFFICIENCY of an agent run on a 1-to-5 scale. "
+        "Inspect the complete MLflow trace, including its request, recorded token "
+        "usage, tool calls and results, errors, and final response:\n{{ trace }}\n\n"
+        "Use the trace's recorded usage as the measurement; do not invent a token "
+        "count. Your job is the judgement the raw number cannot make on its own:\n"
         "  - Was the token spend JUSTIFIED by what the task actually required? A "
         "large spend on a genuinely large task can still be efficient.\n"
         "  - Was the redundancy AVOIDABLE or NECESSARY? Re-reading the same file "

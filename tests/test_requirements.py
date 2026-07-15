@@ -669,16 +669,15 @@ class TestLoopGoalLoad:
 
 
 # ---------------------------------------------------------------------------
-# Piece 5: token_efficiency excluded from the auto-align cadence
+# Piece 5: trace-native judges participate in auto-align
 # ---------------------------------------------------------------------------
 
 
 class TestAutoAlignExclusion:
-    def test_token_efficiency_marked_not_auto_alignable(self) -> None:
+    def test_token_efficiency_is_auto_alignable(self) -> None:
         from ail.judges.scorers import CORRECTNESS, TOKEN_EFFICIENCY
 
-        assert TOKEN_EFFICIENCY.auto_alignable is False
-        # the other built-ins remain alignable
+        assert TOKEN_EFFICIENCY.auto_alignable is True
         assert CORRECTNESS.auto_alignable is True
 
     def test_authored_judge_is_auto_alignable_by_default(self) -> None:
@@ -687,7 +686,7 @@ class TestAutoAlignExclusion:
         spec = build_judge_spec("no hallucinated tool calls", "never invent tools")
         assert spec.auto_alignable is True
 
-    def test_cadence_excludes_non_auto_alignable_judges(self) -> None:
+    def test_cadence_includes_token_efficiency(self) -> None:
         from ail.judges.auto_align import AutoAlignState, auto_align_scorers
 
         class _Source:
@@ -703,6 +702,5 @@ class TestAutoAlignExclusion:
 
         report = auto_align_scorers("exp", source=_Source(), store=_Store(), register=False)
         judged = {r.judge_name for r in report.results}
-        assert "token_efficiency" not in judged
-        assert judged == {"correctness", "modularity", "groundedness"}
+        assert judged == {"correctness", "modularity", "groundedness", "token_efficiency"}
         assert report.n_failed == 0

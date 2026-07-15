@@ -39,6 +39,11 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     setReloadKey((k) => k + 1);
   }, []);
 
+  useEffect(() => {
+    const timer = window.setInterval(reloadAgents, 30_000);
+    return () => window.clearInterval(timer);
+  }, [reloadAgents]);
+
   const agents = state.agents;
   const requested = searchParams.get(AGENT_PARAM);
 

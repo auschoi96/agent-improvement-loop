@@ -73,6 +73,7 @@ resources:
               model: ${var.auto_align_judge_model}
               reflection-lm: ${var.auto_align_reflection_lm}
               embedding-model: ${var.auto_align_embedding_model}
+              embedding-dim: ${var.auto_align_embedding_dim}
               # Empty by default -> the entrypoint mints a short-lived bearer from
               # the run-as identity. Set both to read a stored token from a secret
               # scope (production-hardened service-principal path).

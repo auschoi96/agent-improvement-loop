@@ -40,6 +40,9 @@ variables:
   agent_name:
     description: Agent the RLM/companion lanes scope their cohort + proposals to.
     default: claude_code
+  onboarding_goal_llm_endpoint:
+    description: Chat endpoint used to turn Quick Connect requirements into structured goals.
+    default: databricks-claude-sonnet-4-6
   objective_metric:
     description: Objective metric used to steer RLM goal rubrics and local companion planning.
     default: total_tokens
@@ -69,16 +72,24 @@ variables:
     default: '1.0'
   rlm_max_reviews_per_run:
     description: Hard cap on HALO reviews performed by one scheduled RLM firing.
-    default: '100'
+    default: '8'
+  rlm_max_workers:
+    description: Bounded parallel HALO reviews per firing.
+    default: '4'
   rlm_min_tokens:
     description: Token floor for RLM candidates; 0 includes small traces.
     default: '0'
   rlm_max_results:
-    description: Max recent traces scanned per RLM firing before idempotency/sampling.
-    default: '100'
+    description: Max traces scanned per RLM firing before idempotency/sampling.
+    default: '10000'
   rlm_max_turns:
     description: HALO max turns per agent arm for scheduled RLM reviews.
     default: '40'
+  continuous_rlm_timeout_seconds:
+    description: >-
+      Hard wall-clock bound for one scheduled RLM batch. Any unassessed traces remain
+      eligible for a queued later firing, so a hung HALO batch cannot starve arrivals.
+    default: 7200
   # Standalone scheduled ail-continuous-rlm job — the dedicated high-powered RLM
   # deep-reviewer. It reuses the shared rlm_* sampling knobs and the shared goal vars
   # (objective_metric etc.) but runs on its own model, schedule, and pause switch.
@@ -99,8 +110,8 @@ variables:
   continuous_rlm_cron:
     description: >-
       Quartz cron for the standalone RLM job (sec min hour day-of-month month day-of-week).
-      Default every 6h. A schedule, not a trace-arrival trigger: the trace store is a VIEW.
-    default: '0 0 */6 * * ?'
+      Default every five minutes. A schedule, not a trace-arrival trigger: the trace store is a VIEW.
+    default: '0 */5 * * * ?'
   continuous_rlm_pause_status:
     description: UNPAUSED (the standalone RLM schedule is live) or PAUSED (deployed-but-dormant).
     default: UNPAUSED
@@ -108,8 +119,8 @@ variables:
     description: >-
       Quartz cron for the auto-align trigger. A schedule, not a trace-arrival
       trigger: the trace store is a VIEW (no table_update possible). Default is
-      daily at 06:00 (before the 07:00 publish). Override for a different cadence.
-    default: '0 0 6 * * ?'
+      every five minutes so a newly completed human-label batch aligns promptly.
+    default: '0 2/5 * * * ?'
   auto_align_pause_status:
     description: UNPAUSED (the auto-align schedule is live) or PAUSED (deployed-but-dormant).
     default: UNPAUSED
@@ -137,12 +148,24 @@ variables:
     default: '0.0'
   auto_align_sampling_rate:
     description: Scheduled-scorer sampling rate applied when a promoted judge is (re)registered.
-    default: '0.1'
+    default: '1.0'
   auto_align_judges:
     description: >-
       Comma-separated judge names to auto-align (empty => all built-in scorers).
       A judge with fewer than auto_align_label_floor labels simply skips.
     default: ''
+  judge_backfill_cron:
+    description: Five-minute judge coverage repair cadence.
+    default: '0 1/5 * * * ?'
+  judge_backfill_pause_status:
+    description: UNPAUSED keeps missing judge assessments converging to full coverage.
+    default: UNPAUSED
+  judge_backfill_max_evaluations:
+    description: Maximum missing judge/trace pairs evaluated per firing.
+    default: '32'
+  judge_backfill_max_workers:
+    description: Bounded parallel judge evaluations per firing.
+    default: '4'
   auto_align_judge_model:
     description: >-
       Judge model URI used to score the anchor (empty => MLflow's default judge
@@ -152,10 +175,13 @@ variables:
     description: >-
       MemAlign guideline-distillation model URI (empty => MLflow's default
       MemAlign). Set to drive the reflection model through the gateway explicitly.
-    default: ''
+    default: databricks:/databricks-claude-sonnet-4-6
   auto_align_embedding_model:
     description: MemAlign episodic-memory embedding model URI (only used with auto_align_reflection_lm).
-    default: ''
+    default: databricks:/databricks-gte-large-en
+  auto_align_embedding_dim:
+    description: Output dimension of the configured MemAlign embedding model.
+    default: '1024'
   # Advisory-memory distiller — the standalone scheduled ail-advisory-memory-distiller
   # job (resources/memory_distiller.job.yml). WRITE side only; the Lakebase sync +
   # read/injection side are separate. Reuses the shared catalog/schema/experiment_id/
@@ -176,13 +202,12 @@ variables:
   memory_distiller_cron:
     description: >-
       Quartz cron for the distiller schedule (sec min hour day-of-month month
-      day-of-week). Default DAILY at 08:30 UTC (after the 07:00 L0 publish).
-    default: '0 30 8 * * ?'
+      day-of-week). Default every fifteen minutes after RLM/MLflow assessments land.
+    default: '0 7/15 * * * ?'
   memory_distiller_pause_status:
     description: >-
-      PAUSED (the default — shipped deployed-but-dormant; unpause explicitly at
-      deploy) or UNPAUSED. Do NOT ship UNPAUSED (the schedule-footgun lesson).
-    default: PAUSED
+      UNPAUSED (the default) or PAUSED for an intentional maintenance window.
+    default: UNPAUSED
   memory_max_turns:
     description: HALO-free Claude Agent SDK max turns per distiller firing (keeps a run bounded).
     default: '30'

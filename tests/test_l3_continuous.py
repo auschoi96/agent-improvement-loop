@@ -93,13 +93,11 @@ class TestContinuousSelection:
         )
         assert not cr.has_rlm_assessment(_trace("t3", 1, assessments=[_assessment("correctness")]))
 
-    def test_has_rlm_assessment_treats_failure_marker_as_handled(self) -> None:
-        # A trace that only failed review (no verdict, just the honest marker) must
-        # read as already-handled so it is never re-reviewed.
+    def test_failure_marker_is_not_a_successful_rlm_assessment(self) -> None:
         assert cr.REVIEW_FAILED_FEEDBACK_NAME == "rlm_review_failed"
-        assert cr.has_rlm_assessment(
-            _trace("t4", 1, assessments=[_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME)])
-        )
+        trace = _trace("t4", 1, assessments=[_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME)])
+        assert cr.has_rlm_assessment(trace) is False
+        assert cr.has_rlm_failure_marker(trace) is True
 
     def test_select_skips_reviewed_reviewer_traces_and_ranks_by_tokens(self) -> None:
         traces = [
@@ -120,7 +118,7 @@ class TestContinuousSelection:
         assert n_already == 1
         assert n_reviewer_skipped == 1
         assert n_sampled_out == 0
-        assert [s.trace_id for s in selections] == ["big", "medium"]
+        assert [s.trace_id for s in selections] == ["errored", "big"]
 
     def test_sampling_is_deterministic_and_can_sample_out_all(self) -> None:
         assert cr.sample_trace_id("trace-a", 0.0) is False
@@ -139,6 +137,44 @@ class TestContinuousSelection:
 
 
 class TestContinuousRun:
+    def test_prepares_optional_sandbox_once_before_parallel_reviews(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = 0
+
+        class UnavailableSandbox:
+            @classmethod
+            def get(cls) -> None:
+                nonlocal calls
+                calls += 1
+                return None
+
+        monkeypatch.setattr(cr, "_halo_sandbox_class", lambda: UnavailableSandbox)
+
+        cr._prepare_halo_sandbox()
+        cr._prepare_halo_sandbox()
+
+        assert calls == 1
+
+    def test_can_disable_optional_sandbox_without_probing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = 0
+
+        class Sandbox:
+            @classmethod
+            def get(cls) -> object:
+                nonlocal calls
+                calls += 1
+                return object()
+
+        monkeypatch.setattr(cr, "_halo_sandbox_class", lambda: Sandbox)
+
+        cr._disable_halo_sandbox()
+
+        assert Sandbox.get() is None
+        assert calls == 0
+
     def test_run_reviews_only_selected_unreviewed_traces(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -158,6 +194,8 @@ class TestContinuousRun:
             return _verdict(trace_id)
 
         monkeypatch.setattr(cr, "review_trace", fake_review_trace)
+        disabled: list[bool] = []
+        monkeypatch.setattr(cr, "_disable_halo_sandbox", lambda: disabled.append(True))
         report = cr.run_continuous_rlm(
             "exp-1",
             judge_model="judge",
@@ -167,6 +205,7 @@ class TestContinuousRun:
             max_reviews=2,
             sample_rate=1.0,
             min_tokens=200,
+            enable_code_sandbox=False,
         )
 
         assert source.calls == [
@@ -178,6 +217,7 @@ class TestContinuousRun:
             }
         ]
         assert reviewed == ["big", "medium"]
+        assert disabled == [True]
         assert report.n_scanned == 5
         assert report.n_already_reviewed == 1
         assert report.n_reviewer_traces_skipped == 1
@@ -202,6 +242,7 @@ class TestContinuousRun:
 
         monkeypatch.setattr(cr, "review_trace", fail_review_trace)
         monkeypatch.setattr(cr, "_mark_review_failed", fake_mark_failed)
+        monkeypatch.setattr(cr, "_prepare_halo_sandbox", lambda: None)
         report = cr.run_continuous_rlm(
             "exp-1",
             judge_model="judge",
@@ -252,6 +293,7 @@ class TestContinuousRun:
 
         monkeypatch.setattr(cr, "review_trace", fail_review_trace)
         monkeypatch.setattr(cr, "_mark_review_failed", fake_mark_failed)
+        monkeypatch.setattr(cr, "_prepare_halo_sandbox", lambda: None)
 
         run1 = cr.run_continuous_rlm(
             "exp-1",
@@ -263,7 +305,8 @@ class TestContinuousRun:
         )
         assert reviewed == ["bad"]
         assert run1.n_failed == 1
-        assert cr.has_rlm_assessment(failing)  # marker now present
+        assert cr.has_rlm_assessment(failing) is False
+        assert cr.has_rlm_failure_marker(failing) is True
 
         run2 = cr.run_continuous_rlm(
             "exp-1",
@@ -288,6 +331,51 @@ class TestContinuousRun:
         )
         assert [selection.trace_id for selection in selections] == ["bad-retry"]
         assert n_already == 0
+
+    def test_recovery_mode_prioritizes_never_attempted_traces(self) -> None:
+        traces = [
+            _trace(
+                "failed-high-token",
+                10_000,
+                assessments=[_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME)],
+            ),
+            _trace("fresh-1", 500),
+            _trace("fresh-2", 400),
+        ]
+        selections, n_already, *_ = cr.select_unreviewed_traces(
+            traces,
+            max_reviews=2,
+            sample_rate=1.0,
+            min_tokens=0,
+            retry_failed=True,
+        )
+
+        assert [selection.trace_id for selection in selections] == ["fresh-1", "fresh-2"]
+        assert n_already == 0
+
+    def test_recovery_mode_uses_spare_capacity_for_failed_retries(self) -> None:
+        traces = [
+            _trace("fresh", 100),
+            _trace(
+                "failed-high",
+                1_000,
+                assessments=[_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME)],
+            ),
+            _trace(
+                "failed-low",
+                500,
+                assessments=[_assessment(cr.REVIEW_FAILED_FEEDBACK_NAME)],
+            ),
+        ]
+        selections, *_ = cr.select_unreviewed_traces(
+            traces,
+            max_reviews=2,
+            sample_rate=1.0,
+            min_tokens=0,
+            retry_failed=True,
+        )
+
+        assert [selection.trace_id for selection in selections] == ["fresh", "failed-high"]
 
     def test_sets_trace_store_warehouse_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         source = _FakeSource([])

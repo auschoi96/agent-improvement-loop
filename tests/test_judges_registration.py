@@ -106,9 +106,10 @@ class TestRegisterScorers:
             assert start_call[1] == "exp1"
             assert start_call[2].sample_rate == 0.25
 
-    def test_default_sampling_rate_is_conservative(self, offline: dict[str, _FakeScorer]) -> None:
-        # The default must be a fraction, never an implicit 100% (cost lever).
-        assert 0.0 < reg.DEFAULT_SAMPLING_RATE < 1.0
+    def test_default_sampling_rate_covers_every_trace(
+        self, offline: dict[str, _FakeScorer]
+    ) -> None:
+        assert reg.DEFAULT_SAMPLING_RATE == 1.0
         active = reg.register_scorers("exp1")
         assert all(r.scorer.sample_rate == reg.DEFAULT_SAMPLING_RATE for r in active)
 

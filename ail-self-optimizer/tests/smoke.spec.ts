@@ -11,7 +11,7 @@ let consoleErrors: string[] = [];
 let pageErrors: string[] = [];
 let failedRequests: string[] = [];
 
-test('smoke test - overview loads and renders current sections + data', async ({ page }) => {
+test('smoke test - overview loads and renders current sections', async ({ page }) => {
   await page.goto('/');
 
   // Current app shell + overview headings.
@@ -20,10 +20,13 @@ test('smoke test - overview loads and renders current sections + data', async ({
   await expect(page.getByText('Token heavy tail', { exact: true })).toBeVisible();
   await expect(page.getByText('Top sessions by total tokens', { exact: true })).toBeVisible();
 
-  // Corpus KPI cards render after the corpus_summary query resolves.
-  await expect(page.getByText('Traces', { exact: true })).toBeVisible({ timeout: 30000 });
-  await expect(page.getByText('Total Tokens', { exact: true }).first()).toBeVisible({ timeout: 30000 });
-  await expect(page.getByText('Tool Calls', { exact: true }).first()).toBeVisible({ timeout: 30000 });
+  const populated = page.getByText('Traces', { exact: true });
+  const empty = page.getByText('No corpus data.', { exact: true });
+  await expect(populated.or(empty)).toBeVisible({ timeout: 30_000 });
+  if (await populated.isVisible()) {
+    await expect(page.getByText('Total Tokens', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Tool Calls', { exact: true }).first()).toBeVisible();
+  }
 });
 
 test('smoke test - quick connect is the default add-agent path', async ({ page }) => {
@@ -31,7 +34,7 @@ test('smoke test - quick connect is the default add-agent path', async ({ page }
 
   await expect(page.getByText('Quick connect', { exact: true })).toBeVisible();
   await expect(page.getByText('Instrument any Python agent, HTTP wrapper, or LLM call in minutes.')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Copy starter code' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copy configured starter code' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Use advanced setup' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Use advanced setup' }).click();

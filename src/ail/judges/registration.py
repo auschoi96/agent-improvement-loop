@@ -16,11 +16,9 @@ but those delegate to the ``databricks-agents`` backend at runtime, so this
 module fails fast with a clear message when that package is not installed.
 Install it with the ``agents`` extra: ``pip install 'ail[agents]'``.
 
-Cost lever — ``sampling_rate``: every scored trace runs the judge model over the
-trace's inputs/outputs, and this corpus has rare ~900K-token traces, so scoring
-100% of traces risks runaway cost. ``sampling_rate`` (0–1) is the knob; it
-defaults to a conservative :data:`DEFAULT_SAMPLING_RATE` and is meant to be
-raised deliberately, never silently pinned to 1.0.
+Coverage contract — ``sampling_rate`` defaults to ``1.0`` so every incoming
+subject trace is evaluated. Deployers may lower it explicitly for a constrained
+environment, but the autonomous framework never silently samples away evidence.
 
 MemAlign-aware by construction: creating a scorer routes through the
 **align-then-register** flow (:func:`create_aligned_scorer`). When a non-empty
@@ -72,11 +70,9 @@ __all__ = [
     "unregister_scorers",
 ]
 
-#: Conservative default fraction of traces a scheduled scorer evaluates. Kept
-#: low on purpose: the reference corpus has rare ~900K-token traces and four
-#: judges run per scored trace, so 100% sampling risks runaway cost. Raise it
-#: deliberately for a given experiment; this is the documented cost lever.
-DEFAULT_SAMPLING_RATE = 0.1
+#: Evaluate every incoming subject trace by default. A separate idempotent backfill
+#: job repairs historical/missed coverage, so the intended steady state is 100%.
+DEFAULT_SAMPLING_RATE = 1.0
 
 #: Prefix for the best-effort experiment tag recording a judge's alignment state.
 #: The scheduled-scorer API exposes no per-scorer metadata field, so the

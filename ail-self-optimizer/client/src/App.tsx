@@ -12,6 +12,7 @@ import { LineagePage } from './pages/LineagePage';
 import { AddAgentPage } from './pages/AddAgentPage';
 import { HowItWorksPage } from './pages/HowItWorksPage';
 import { DEFAULT_PATH } from './lib/navigation';
+import { LiveRefreshBoundary } from './shell/LiveRefreshBoundary';
 
 // The app shell: a left Sidebar (primary IA, active state from the route), a persistent
 // top bar (agent/experiment "project switcher" + global actions + honesty note), and a
@@ -31,12 +32,12 @@ export default function App() {
             <div className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8">
               <Routes>
                 <Route path="/" element={<Navigate to={DEFAULT_PATH} replace />} />
-                <Route path="/overview" element={<OverviewPage />} />
-                <Route path="/compare" element={<ComparePage />} />
-                <Route path="/approvals" element={<ApprovalsPage />} />
-                <Route path="/labeling" element={<LabelingPage />} />
-                <Route path="/activity" element={<ActivityPage />} />
-                <Route path="/lineage" element={<LineagePage />} />
+                <Route path="/overview" element={<LiveRefreshBoundary><OverviewPage /></LiveRefreshBoundary>} />
+                <Route path="/compare" element={<LiveRefreshBoundary><ComparePage /></LiveRefreshBoundary>} />
+                <Route path="/approvals" element={<LiveRefreshBoundary><ApprovalsPage /></LiveRefreshBoundary>} />
+                <Route path="/labeling" element={<LiveRefreshBoundary><LabelingPage /></LiveRefreshBoundary>} />
+                <Route path="/activity" element={<LiveRefreshBoundary><ActivityPage /></LiveRefreshBoundary>} />
+                <Route path="/lineage" element={<LiveRefreshBoundary><LineagePage /></LiveRefreshBoundary>} />
                 <Route path="/add-agent" element={<AddAgentPage />} />
                 <Route path="/how-it-works" element={<HowItWorksPage />} />
                 <Route path="*" element={<Navigate to={DEFAULT_PATH} replace />} />

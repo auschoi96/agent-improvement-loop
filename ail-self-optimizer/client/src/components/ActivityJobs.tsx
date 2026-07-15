@@ -116,7 +116,7 @@ function RegisteredJobRuns() {
     <section className="space-y-3">
       <SectionHeading
         title="Registered-job run history"
-        description="The only two things that run as tracked Databricks jobs today: ail-apply-service (on-demand, one run per approve/reject) and ail-l0-publish-scheduled (scheduled L0 publish). Runs are discovered by name via the SDK and shown exactly as returned."
+        description="All deployed framework jobs: onboarding, L0 publishing, judge coverage, RLM, MemAlign, memory distillation, and approved-change application. Runs are discovered by name and shown exactly as returned."
       />
 
       {status === 'loading' && (

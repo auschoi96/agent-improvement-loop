@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
 from ail.jobs import companion_planner as cp
 from ail.jobs import optimization_cycle as oc
 from ail.loop.decision_rules import FeedbackBundle, RedundantReadSignal
@@ -152,6 +153,7 @@ def test_run_unreadable_feedback_returns_nonzero_and_never_publishes(
 
     code = cp.run(_args())
     assert code == 2
+    assert cp.os.environ[TRACING_WAREHOUSE_ENV] == "wh1"
     assert published == []  # nothing published: no slice cleared on an unknown state
     out = capsys.readouterr().out
     assert "could not read the agent's feedback" in out

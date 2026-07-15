@@ -62,6 +62,7 @@ const API = {
   register: '/api/onboarding/register',
   previewRequirements: '/api/onboarding/requirements/preview',
   confirmRequirements: '/api/onboarding/requirements/confirm',
+  status: '/api/onboarding/status',
 } as const;
 
 // The two intake modes — pick from the fixed goal catalog (the slice-1 stepper) or
@@ -80,13 +81,34 @@ const TONE_CLASS: Record<Tone, string> = {
 // "sign in" message; a network/parse failure is an error — never a fabricated
 // success. The body identity (actor) is NEVER sent; the server resolves it.
 async function postJson<T>(url: string, body: unknown): Promise<{ ok: boolean; status: number; body: T }> {
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const parsed = (await res.json().catch(() => ({}))) as T;
-  return { ok: res.ok, status: res.status, body: parsed };
+  let parsed = (await res.json().catch(() => ({}))) as T & {
+    outcome?: string;
+    request_id?: string;
+    run_id?: number;
+  };
+  const deadline = Date.now() + 15 * 60_000;
+  while (res.ok && parsed.outcome === 'pending' && parsed.request_id && parsed.run_id != null) {
+    if (Date.now() >= deadline) {
+      return {
+        ok: false,
+        status: 504,
+        body: { outcome: 'error', error: 'Onboarding did not finish within 15 minutes.' } as T,
+      };
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 3_000));
+    res = await fetch(API.status, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: parsed.request_id, run_id: parsed.run_id }),
+    });
+    parsed = (await res.json().catch(() => ({}))) as typeof parsed;
+  }
+  return { ok: res.ok, status: res.status, body: parsed as T };
 }
 
 function Message({ message }: { message: ToneMessage | null }) {
@@ -152,6 +174,7 @@ export function OnboardingWizard({
         targetWorkspace: state.targetWorkspace,
         annotationsTable: state.annotationsTable,
         goalConfig: state.goalConfig,
+        reviewerExperimentId: state.reviewerExperimentId,
       })
     )
       .then(({ status, body }) => {
@@ -235,7 +258,7 @@ export function OnboardingWizard({
             </div>
           </>
         ) : (
-          <RequirementsMode state={state} patch={patch} onClose={onClose} />
+          <RequirementsMode state={state} patch={patch} onClose={onClose} onRegistered={onRegistered} />
         )}
       </CardContent>
     </Card>
@@ -282,6 +305,14 @@ function ExperimentStep({ state, patch }: StepProps) {
   // deep-link + tracing snippet (both relayed VERBATIM from Python — never built here).
   const [created, setCreated] = useState<CreationResponse | null>(null);
 
+  async function createReviewer(baseName: string): Promise<string> {
+    const { body } = await postJson<CreationResponse>(API.create, createExperimentBody(`${baseName}-ail-internal`));
+    if (body.outcome !== 'created' || !body.experiment_id) {
+      throw new Error(body.error ?? 'Could not create the isolated reviewer experiment.');
+    }
+    return body.experiment_id;
+  }
+
   async function validate() {
     setBusy(true);
     setMessage(null);
@@ -295,7 +326,13 @@ function ExperimentStep({ state, patch }: StepProps) {
         return;
       }
       setMessage(freshnessMessage(body));
-      patch({ resolved: resolvedFromValidation(body) });
+      const resolved = resolvedFromValidation(body);
+      if (resolved) {
+        const reviewerExperimentId = await createReviewer(body.name || `agent-${body.experiment_id}`);
+        patch({ resolved, reviewerExperimentId });
+      } else {
+        patch({ resolved: null, reviewerExperimentId: '' });
+      }
     } catch {
       setMessage({ tone: 'error', text: 'Network error validating the experiment.' });
     } finally {
@@ -318,7 +355,17 @@ function ExperimentStep({ state, patch }: StepProps) {
       }
       setMessage(creationMessage(body));
       setCreated(body);
-      patch({ resolved: resolvedFromCreation(body) });
+      const resolved = resolvedFromCreation(body);
+      if (resolved) {
+        const reviewerExperimentId = await createReviewer(body.name || state.experimentNameInput);
+        patch({
+          resolved,
+          reviewerExperimentId,
+          annotationsTable: body.annotations_table ?? state.annotationsTable,
+        });
+      } else {
+        patch({ resolved: null, reviewerExperimentId: '' });
+      }
     } catch {
       setMessage({ tone: 'error', text: 'Network error creating the experiment.' });
     } finally {
@@ -342,7 +389,7 @@ function ExperimentStep({ state, patch }: StepProps) {
       >
         <div className="flex items-center gap-2">
           <RadioGroupItem value="validate" id="mode-validate" />
-          <Label htmlFor="mode-validate">Use an existing (fresh) experiment</Label>
+          <Label htmlFor="mode-validate">Use an existing experiment and include its trace history</Label>
         </div>
         <div className="flex items-center gap-2">
           <RadioGroupItem value="create" id="mode-create" />
@@ -362,11 +409,11 @@ function ExperimentStep({ state, patch }: StepProps) {
               onChange={(e) => patch({ experimentIdInput: e.target.value, resolved: null })}
             />
             <Button onClick={() => void validate()} disabled={busy || !state.experimentIdInput.trim()}>
-              {busy ? 'Validating…' : 'Validate freshness'}
+              {busy ? 'Validating…' : 'Validate & isolate reviewers'}
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Fresh = the experiment exists, has no prior traces, and is not already registered to another agent.
+            Existing traces are accepted when the experiment is not already registered. A separate reviewer experiment is created automatically.
           </p>
         </div>
       ) : (
@@ -535,6 +582,9 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
           {state.resolved?.name ? ` (${state.resolved.name})` : ''}
         </p>
         <p>
+          <span className="font-medium">Reviewer experiment:</span> {state.reviewerExperimentId || '—'}
+        </p>
+        <p>
           <span className="font-medium">Goals:</span> {state.goals.join(', ') || '—'}
         </p>
       </div>
@@ -592,7 +642,12 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
 // previews the routed plan, and — after the human sets/acknowledges the objective
 // target — authors the judges + persists the goal. Every routing/kind/target fact
 // is rendered from the Python response; nothing is re-derived here (two-tier).
-function RequirementsMode({ state, patch, onClose }: StepProps & { onClose: () => void }) {
+function RequirementsMode({
+  state,
+  patch,
+  onClose,
+  onRegistered,
+}: StepProps & { onClose: () => void; onRegistered: (name: string) => void }) {
   const [requirementsText, setRequirementsText] = useState('');
   const [preview, setPreview] = useState<RequirementsPreviewResponse | null>(null);
   const [previewMsg, setPreviewMsg] = useState<ToneMessage | null>(null);
@@ -600,6 +655,7 @@ function RequirementsMode({ state, patch, onClose }: StepProps & { onClose: () =
   const [targetInput, setTargetInput] = useState('');
   const [confirmResult, setConfirmResult] = useState<RequirementsConfirmResponse | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [registerResult, setRegisterResult] = useState<RegisterResponse | null>(null);
 
   const resolved = state.resolved;
   const agentName = state.agentName.trim();
@@ -659,6 +715,20 @@ function RequirementsMode({ state, patch, onClose }: StepProps & { onClose: () =
       // RLM steers. Relayed verbatim (two-tier: Python owns the goal knobs).
       if (body.outcome === 'requirements_confirmed') {
         patch({ goalConfig: body.goal_config ?? null });
+        if (!resolved || !body.goal_config) return;
+        const registered = await postJson<RegisterResponse>(
+          API.register,
+          registerBody(agentName, resolved.experiment_id, [], {
+            targetWorkspace: state.targetWorkspace,
+            annotationsTable: state.annotationsTable,
+            goalConfig: body.goal_config,
+            reviewerExperimentId: state.reviewerExperimentId,
+          })
+        );
+        setRegisterResult(registered.body);
+        if (registered.body.outcome === 'registered' && registered.body.agent_name) {
+          onRegistered(registered.body.agent_name);
+        }
       }
     } catch {
       setConfirmResult({ outcome: 'error', error: 'Network error confirming requirements.' });
@@ -681,6 +751,17 @@ function RequirementsMode({ state, patch, onClose }: StepProps & { onClose: () =
           value={state.agentName}
           placeholder="e.g. my_claude_code_agent"
           onChange={(e) => patch({ agentName: e.target.value })}
+          disabled={confirmed}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="req-target-workspace">Local project the companion may edit</Label>
+        <Input
+          id="req-target-workspace"
+          value={state.targetWorkspace}
+          onChange={(e) => patch({ targetWorkspace: e.target.value })}
+          placeholder="/path/to/your/agent/repo"
           disabled={confirmed}
         />
       </div>
@@ -722,6 +803,7 @@ function RequirementsMode({ state, patch, onClose }: StepProps & { onClose: () =
           disabled={confirmed}
         />
       )}
+      {registerResult && <Message message={registerMessage(registerResult)} />}
     </div>
   );
 }

@@ -88,7 +88,9 @@ class ExperimentClient(Protocol):
         """The experiment named ``name``, or ``None`` if none. Raises on auth."""
         ...
 
-    def create_experiment(self, name: str) -> str:
+    def create_experiment(
+        self, name: str, *, trace_location: UcTraceLocation | None = None
+    ) -> str:
         """Create an experiment and return its id. Raises when creation is denied."""
         ...
 
@@ -144,6 +146,19 @@ class ExperimentCreation:
     name: str
 
 
+@dataclass(frozen=True, slots=True)
+class UcTraceLocation:
+    """Databricks Traces-in-Unity-Catalog destination for an MLflow experiment."""
+
+    catalog: str
+    schema: str
+    table_prefix: str
+
+    @property
+    def annotations_table(self) -> str:
+        return f"{self.catalog}.{self.schema}.{self.table_prefix}_otel_annotations"
+
+
 def validate_experiment(
     experiment_id: str,
     *,
@@ -187,16 +202,10 @@ def validate_experiment(
     capped = n >= trace_probe
     owner = claimed.get(experiment_id)
     reasons: list[str] = []
-    if n > 0:
-        shown = f"{trace_probe}+" if capped else str(n)
-        reasons.append(
-            f"experiment already has {shown} trace(s) — one agent per experiment; "
-            "point at a new/empty experiment or create one so prior traces are not mixed in"
-        )
     if owner is not None:
         reasons.append(f"experiment is already registered to agent {owner!r}")
 
-    fresh = n == 0 and owner is None
+    fresh = owner is None
     return ExperimentValidation(
         experiment_id=experiment_id,
         name=info.name,
@@ -210,7 +219,12 @@ def validate_experiment(
     )
 
 
-def create_experiment(name: str, *, client: ExperimentClient) -> ExperimentCreation:
+def create_experiment(
+    name: str,
+    *,
+    client: ExperimentClient,
+    trace_location: UcTraceLocation | None = None,
+) -> ExperimentCreation:
     """Create a fresh experiment named ``name`` (fail-closed, honest on denial).
 
     Databricks-backed MLflow requires experiment names to be **absolute workspace
@@ -234,7 +248,11 @@ def create_experiment(name: str, *, client: ExperimentClient) -> ExperimentCreat
             f"an experiment named {target!r} already exists (id {existing.experiment_id}); "
             "choose a different name or validate that experiment instead of creating it"
         )
-    experiment_id = client.create_experiment(target)
+    experiment_id = (
+        client.create_experiment(target)
+        if trace_location is None
+        else client.create_experiment(target, trace_location=trace_location)
+    )
     if not experiment_id:
         # Fail-closed: the client returned no id — do NOT report a creation.
         raise ExperimentPermissionError(
@@ -350,9 +368,40 @@ class MlflowExperimentClient:
             return None
         return ExperimentInfo(experiment_id=str(exp.experiment_id), name=str(exp.name))
 
-    def create_experiment(self, name: str) -> str:
-        client = self._ensure()
+    def create_experiment(
+        self, name: str, *, trace_location: UcTraceLocation | None = None
+    ) -> str:
         try:
+            if trace_location is not None:
+                from databricks.sdk import WorkspaceClient
+
+                response = WorkspaceClient(profile=self._profile).api_client.do(
+                    "POST",
+                    "/api/2.0/mlflow/experiments/create",
+                    body={
+                        "name": name,
+                        "trace_location": {
+                            "uc_trace_location": {
+                                "catalog": trace_location.catalog,
+                                "schema": trace_location.schema,
+                                "table_prefix": trace_location.table_prefix,
+                            }
+                        },
+                        "tags": [
+                            {"key": "mlflow.experimentKind", "value": "genai_development"},
+                            {"key": "mlflow.experimentType", "value": "MLFLOW_EXPERIMENT"},
+                        ],
+                    },
+                )
+                experiment_id = (
+                    response.get("experiment_id") if isinstance(response, dict) else None
+                )
+                if not experiment_id:
+                    raise ExperimentPermissionError(
+                        f"Databricks returned no experiment id when creating {name!r}"
+                    )
+                return str(experiment_id)
+            client = self._ensure()
             return str(client.create_experiment(name))
         except Exception as exc:  # noqa: BLE001 - a denied create is an honest permission error
             if _is_permission(exc):

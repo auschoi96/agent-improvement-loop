@@ -212,7 +212,12 @@ def test_profile_forwarded_to_poll_would_be_refused(monkeypatch: pytest.MonkeyPa
 
     passthrough = bootstrap._poll_passthrough(
         argparse.Namespace(
-            experiment="e", catalog="c", schema="s", agent="claude_code", warehouse_id=None
+            experiment="e",
+            catalog="c",
+            schema="s",
+            agent="claude_code",
+            warehouse_id=None,
+            plan_every=1,
         )
     )
     assert "--profile" not in passthrough

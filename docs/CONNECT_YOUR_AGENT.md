@@ -22,7 +22,13 @@ This framework uses **one MLflow experiment per agent** (see
 own judges, its own scorer schedule, and its own baselines — which is exactly
 what lets the app distinguish agents and a supervisor/MAS from one another.
 
-Register the agent so the framework knows its experiment:
+The onboarding wizard accepts either a newly created experiment or an existing
+**empty** experiment. It deliberately rejects an experiment that already has
+traces or is already registered, so prior data is not silently mixed into a new
+agent cohort. The current wizard is therefore not an import-and-register flow
+for a populated existing experiment.
+
+The underlying registry shape is:
 
 ```python
 from ail.registry import Agent, AgentRegistry
@@ -30,7 +36,7 @@ from ail.registry import Agent, AgentRegistry
 # Register "my_agent" -> a dedicated experiment id.
 # A multi-agent / supervisor system is just another agent with its own experiment.
 registry = AgentRegistry.load()              # reads config/agents.yaml
-registry.add(Agent(name="my_agent", experiment_id="<your_experiment_id>"))
+registry.add(Agent(agent_name="my_agent", experiment_id="<your_experiment_id>"))
 ```
 
 Mirror it in `config/agents.yaml` (a test enforces the YAML and the in-code seed
@@ -74,7 +80,9 @@ re-instrument it. MLflow can ingest OTLP, so the play is:
 
 1. **Use OTEL going forward** — configure your agent's existing OTLP exporter to
    export to the MLflow experiment's tracing endpoint, **or**
-2. **Import a backlog of OTEL traces** you already have into the experiment.
+2. **Import a backlog of OTEL traces** you already have through an
+   MLflow-supported ingestion workflow. The current AIL UI does not provide a
+   file-upload control for OTEL backlog import.
 
 > **Honest note on exact wiring:** the precise OTLP endpoint, headers, and
 > exporter snippet depend on your **MLflow version** and whether you're on
@@ -190,11 +198,11 @@ actionable state, never a silently fabricated green number.
 
 ## TL;DR
 
-1. **Register the agent → it gets its own experiment.**
+1. **Create or validate an empty experiment, then register the agent.**
 2. **"Upload" = start tracing into that experiment** (native autolog *or* OTEL —
    ingestion is producer-agnostic).
 3. **Collect data:** ~10 traces to diagnose, ~20 labels to align a judge,
-   **50** to *prove* an improvement. Import an OTEL backlog or generate ≥30 to
+   **50** to *prove* an improvement. Import an OTEL backlog through MLflow or generate ≥30 to
    get the MemAlign/RLM/GEPA loop going.
 4. The loop and the live comparison view do the rest — and refuse to claim an
    improvement until the data actually supports it.

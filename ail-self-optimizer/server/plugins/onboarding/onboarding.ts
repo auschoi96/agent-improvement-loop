@@ -1,6 +1,11 @@
 import { Plugin, toPlugin, type IAppRouter, type PluginManifest } from '@databricks/appkit';
 import manifest from './manifest.json';
-import { selectOnboardingBridge, type OnboardingAction, type OnboardingBridge } from './bridge';
+import {
+  readJobOnboardingStatus,
+  selectOnboardingBridge,
+  type OnboardingAction,
+  type OnboardingBridge,
+} from './bridge';
 
 // The minimal HTTP shapes the handlers need — Express's Request/Response satisfy
 // these structurally, so the same handlers are used by injectRoutes and driven by a
@@ -135,7 +140,14 @@ export async function handleCreateExperiment(
   const body = (req.body ?? {}) as Record<string, unknown>;
   const name = stringField(body, 'name');
   if (!name) return badRequest(res, 'an experiment name is required');
-  await dispatch(res, bridge, { action: 'create_experiment', actor, name });
+  await dispatch(res, bridge, {
+    action: 'create_experiment',
+    actor,
+    name,
+    trace_catalog: process.env.AIL_TRACE_CATALOG || process.env.AIL_CATALOG,
+    trace_schema: process.env.AIL_TRACE_SCHEMA || 'mlflow_traces',
+    trace_table_prefix: optionalStringField(body, 'trace_table_prefix'),
+  });
 }
 
 // Page 4: register the agent by reusing ail.publish_versions (server-side). The
@@ -158,16 +170,18 @@ export async function handleRegisterAgent(
   if (!agent_name || !experiment_id) {
     return badRequest(res, 'agent_name and experiment_id are required');
   }
-  if (goals.length === 0) return badRequest(res, 'select at least one goal');
+  const goalConfig = recordField(body, 'goal_config');
+  if (goals.length === 0 && !goalConfig) return badRequest(res, 'select a goal or confirm requirements');
   await dispatch(res, bridge, {
     action: 'register_agent',
     actor,
     agent_name,
     experiment_id,
     goals,
-    goal_config: recordField(body, 'goal_config'),
+    goal_config: goalConfig,
+    reviewer_experiment_id: optionalStringField(body, 'reviewer_experiment_id'),
     annotations_table: optionalStringField(body, 'annotations_table'),
-    target_workspace: optionalStringField(body, 'target_workspace'),
+    target_workspace: optionalStringField(body, 'target_workspace') || process.env.AIL_DEFAULT_TARGET_WORKSPACE,
   });
 }
 
@@ -222,6 +236,49 @@ export async function handleConfirmRequirements(
   });
 }
 
+export async function handleBootstrapAgent(
+  req: OnboardingHttpRequest,
+  res: OnboardingHttpResponse,
+  bridge: OnboardingBridge
+): Promise<void> {
+  const actor = readActor(req);
+  if (!actor) return unauthorized(res);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const agent_name = stringField(body, 'agent_name');
+  const requirements_text = stringField(body, 'requirements_text');
+  if (!agent_name || !requirements_text) {
+    return badRequest(res, 'agent_name and requirements_text are required');
+  }
+  await dispatch(res, bridge, {
+    action: 'bootstrap_agent',
+    actor,
+    agent_name,
+    requirements_text,
+    target_workspace: optionalStringField(body, 'target_workspace') || process.env.AIL_DEFAULT_TARGET_WORKSPACE,
+    trace_schema: process.env.AIL_TRACE_SCHEMA || 'mlflow_traces',
+  });
+}
+
+export async function handleOnboardingStatus(
+  req: OnboardingHttpRequest,
+  res: OnboardingHttpResponse
+): Promise<void> {
+  const actor = readActor(req);
+  if (!actor) return unauthorized(res);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const requestId = stringField(body, 'request_id');
+  const runId = typeof body.run_id === 'number' ? body.run_id : Number(body.run_id);
+  if (!requestId || !Number.isFinite(runId)) return badRequest(res, 'request_id and run_id are required');
+  try {
+    res.status(200).json(await readJobOnboardingStatus(requestId, runId));
+  } catch (err) {
+    res.status(502).json({
+      outcome: 'error',
+      error: err instanceof Error ? err.message : 'onboarding status lookup failed',
+    });
+  }
+}
+
 // The custom AppKit plugin exposing the onboarding write-path. Routes mount under
 // /api/onboarding/... (server plugin convention). Reads stay two-tier SELECT-only
 // via the analytics plugin; only these authenticated routes write / read the
@@ -237,6 +294,18 @@ export class OnboardingPlugin extends Plugin {
       method: 'post',
       path: '/requirements',
       handler: (req, res) => handleRequirements(req, res, this.bridge),
+    });
+    this.route(router, {
+      name: 'bootstrap-agent',
+      method: 'post',
+      path: '/bootstrap',
+      handler: (req, res) => handleBootstrapAgent(req, res, this.bridge),
+    });
+    this.route(router, {
+      name: 'onboarding-status',
+      method: 'post',
+      path: '/status',
+      handler: (req, res) => handleOnboardingStatus(req, res),
     });
     this.route(router, {
       name: 'validate-experiment',

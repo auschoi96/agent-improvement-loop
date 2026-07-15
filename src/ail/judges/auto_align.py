@@ -86,6 +86,7 @@ from ail.judges.registration import (
 )
 from ail.judges.scorers import DEFAULT_SCORERS, ScorerSpec, make_scorer
 from ail.pools import ScoreValue
+from ail.trace_policy import is_internal_trace
 
 if TYPE_CHECKING:
     from mlflow.genai.judges.base import AlignmentOptimizer
@@ -486,6 +487,8 @@ def read_human_labels(
     for trace in source.iter_traces(
         experiment_id=experiment_id, max_results=max_results, order_by=["timestamp_ms DESC"]
     ):
+        if is_internal_trace(trace):
+            continue
         trace_id = getattr(trace, "trace_id", None)
         if not trace_id:
             continue

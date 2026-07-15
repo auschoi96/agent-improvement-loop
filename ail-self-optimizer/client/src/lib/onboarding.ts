@@ -92,6 +92,7 @@ export interface CreationResponse {
   // constructed in TS (a workspace value in TS would break reusability).
   experiment_url?: string;
   tracing_hint?: string;
+  annotations_table?: string;
   error?: string | null;
   prerequisite?: string | null;
   refused_reason?: string | null;
@@ -218,6 +219,7 @@ export interface WizardState {
   experimentIdInput: string;
   experimentNameInput: string;
   resolved: ResolvedExperiment | null;
+  reviewerExperimentId: string;
   goals: string[];
   accepted: boolean;
   agentName: string;
@@ -239,6 +241,7 @@ export const initialWizardState: WizardState = {
   experimentIdInput: '',
   experimentNameInput: '',
   resolved: null,
+  reviewerExperimentId: '',
   goals: [],
   accepted: false,
   agentName: '',
@@ -275,7 +278,9 @@ export function stepValidation(state: WizardState): StepValidation {
         ? { ok: true, reason: null }
         : { ok: false, reason: 'Accept the data prerequisites to continue.' };
     case 'register':
-      return state.agentName.trim() ? { ok: true, reason: null } : { ok: false, reason: 'Enter a unique agent name.' };
+      if (!state.agentName.trim()) return { ok: false, reason: 'Enter a unique agent name.' };
+      if (!state.reviewerExperimentId.trim()) return { ok: false, reason: 'Create the isolated reviewer experiment.' };
+      return { ok: true, reason: null };
     default:
       return { ok: false, reason: 'Unknown step.' };
   }
@@ -311,6 +316,7 @@ export interface RegisterExtras {
   targetWorkspace?: string;
   annotationsTable?: string;
   goalConfig?: Record<string, unknown> | null;
+  reviewerExperimentId?: string;
 }
 
 export interface RegisterBody {
@@ -320,6 +326,7 @@ export interface RegisterBody {
   target_workspace?: string;
   annotations_table?: string;
   goal_config?: Record<string, unknown>;
+  reviewer_experiment_id?: string;
 }
 
 export const registerBody = (
@@ -340,6 +347,8 @@ export const registerBody = (
   const annotationsTable = extras.annotationsTable?.trim();
   if (annotationsTable) body.annotations_table = annotationsTable;
   if (extras.goalConfig) body.goal_config = extras.goalConfig;
+  const reviewerExperimentId = extras.reviewerExperimentId?.trim();
+  if (reviewerExperimentId) body.reviewer_experiment_id = reviewerExperimentId;
   return body;
 };
 

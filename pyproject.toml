@@ -39,6 +39,7 @@ ail-publish-job = "ail.jobs.publish_job:main"
 # decision from job named parameters, runs the SAME ail.loop.apply_service engine,
 # and writes the real result to agent_apply_results for the app bridge to read back.
 ail-apply-job = "ail.jobs.apply_job:main"
+ail-onboarding-job = "ail.jobs.onboarding_job:main"
 # One-time, idempotent post-deploy bootstrap: provide-or-create the framework SQL
 # warehouse, grant CAN_USE to the single framework SP, and tag the experiment with
 # the monitoring warehouse. Run as a workspace admin (see docs/DEPLOY.md).
@@ -58,6 +59,7 @@ ail-author-judge = "ail.jobs.author_judge:main"
 # Register the built-in scheduled scorers against an explicit experiment. Thin CLI
 # over ail.judges.registration.register_scorers; no experiment/workspace default.
 ail-register-scorers = "ail.jobs.register_scorers_job:main"
+ail-judge-backfill = "ail.jobs.judge_backfill:main"
 # Suite builder (L8), draft half: `ail-suite-scaffold --experiment <id>` drafts YOUR OWN
 # Task Suite from YOUR OWN traces — stratifies by L0 (token/tool-call distribution), derives
 # a prompt per representative trace, and writes an UNFROZEN draft plus a companion checks.yaml

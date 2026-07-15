@@ -44,25 +44,55 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 class TestJudgeModelDefault:
     def test_defaults_to_gpt_5_5_pro(self, captured: dict[str, Any]) -> None:
-        rc = job.main(["--experiment=EXP1", "--warehouse-id=wh-1", "--objective-metric="])
+        rc = job.main(
+            [
+                "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
+                "--warehouse-id=wh-1",
+                "--objective-metric=",
+            ]
+        )
         assert rc == 0
         assert job.DEFAULT_JUDGE_MODEL == "databricks-gpt-5-5-pro"
         assert captured["kwargs"]["judge_model"] == "databricks-gpt-5-5-pro"
+        assert captured["kwargs"]["enable_code_sandbox"] is False
 
     def test_fails_when_all_selected_reviews_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(job, "resolve_job_auth", lambda **kw: "minted")
-        monkeypatch.setattr(job, "run_continuous_rlm", lambda *a, **kw: type(
-            "Report",
-            (),
-            {"n_scanned": 1, "n_already_reviewed": 0, "n_reviewer_traces_skipped": 0,
-             "n_sampled_out": 0, "n_selected": 1, "n_reviewed": 0, "n_failed": 1},
-        )())
-        assert job.main(["--experiment=EXP1", "--warehouse-id=wh-1", "--objective-metric="]) == 1
+        monkeypatch.setattr(
+            job,
+            "run_continuous_rlm",
+            lambda *a, **kw: type(
+                "Report",
+                (),
+                {
+                    "n_scanned": 1,
+                    "n_already_reviewed": 0,
+                    "n_reviewer_traces_skipped": 0,
+                    "n_sampled_out": 0,
+                    "n_selected": 1,
+                    "n_reviewed": 0,
+                    "n_failed": 1,
+                },
+            )(),
+        )
+        assert (
+            job.main(
+                [
+                    "--experiment=EXP1",
+                    "--reviewer-experiment=REV1",
+                    "--warehouse-id=wh-1",
+                    "--objective-metric=",
+                ]
+            )
+            == 1
+        )
 
     def test_judge_model_is_overridable(self, captured: dict[str, Any]) -> None:
         job.main(
             [
                 "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
                 "--warehouse-id=wh-1",
                 "--judge-model=databricks-gpt-5-5-pro-preview",
                 "--objective-metric=",
@@ -70,12 +100,25 @@ class TestJudgeModelDefault:
         )
         assert captured["kwargs"]["judge_model"] == "databricks-gpt-5-5-pro-preview"
 
+    def test_code_sandbox_can_be_enabled_for_manual_runs(self, captured: dict[str, Any]) -> None:
+        job.main(
+            [
+                "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
+                "--warehouse-id=wh-1",
+                "--objective-metric=",
+                "--code-sandbox=auto",
+            ]
+        )
+        assert captured["kwargs"]["enable_code_sandbox"] is True
+
 
 class TestGoalSteering:
     def test_goal_configured_builds_goal_derived_rubric(self, captured: dict[str, Any]) -> None:
         job.main(
             [
                 "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
                 "--warehouse-id=wh-1",
                 "--objective-metric=total_tokens",
                 "--goal-direction=minimize",
@@ -92,6 +135,7 @@ class TestGoalSteering:
         job.main(
             [
                 "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
                 "--warehouse-id=wh-1",
                 "--objective-metric=total_tokens",
                 "--guardrail-judge=correctness:4",
@@ -105,7 +149,14 @@ class TestGoalSteering:
         self, captured: dict[str, Any]
     ) -> None:
         # The bundle passes an empty string when no goal is configured.
-        job.main(["--experiment=EXP1", "--warehouse-id=wh-1", "--objective-metric="])
+        job.main(
+            [
+                "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
+                "--warehouse-id=wh-1",
+                "--objective-metric=",
+            ]
+        )
         assert captured["kwargs"]["rubric"] is DEFAULT_RUBRIC
 
     def test_unmapped_objective_metric_fails_loud(self, captured: dict[str, Any]) -> None:
@@ -115,6 +166,7 @@ class TestGoalSteering:
             job.main(
                 [
                     "--experiment=EXP1",
+                    "--reviewer-experiment=REV1",
                     "--warehouse-id=wh-1",
                     "--objective-metric=not_a_real_metric",
                 ]
@@ -131,6 +183,7 @@ class TestReasoningEffortPassthrough:
         job.main(
             [
                 "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
                 "--warehouse-id=wh-1",
                 "--objective-metric=",
                 f"--reasoning-effort={value}",
@@ -142,6 +195,7 @@ class TestReasoningEffortPassthrough:
         job.main(
             [
                 "--experiment=EXP1",
+                "--reviewer-experiment=REV1",
                 "--warehouse-id=wh-1",
                 "--objective-metric=",
                 "--reasoning-effort=high",
@@ -155,6 +209,7 @@ class TestReasoningEffortPassthrough:
             job.main(
                 [
                     "--experiment=EXP1",
+                    "--reviewer-experiment=REV1",
                     "--warehouse-id=wh-1",
                     "--objective-metric=",
                     "--reasoning-effort=banana",
@@ -174,6 +229,7 @@ def test_requires_warehouse_id(monkeypatch: pytest.MonkeyPatch) -> None:
 def _agent(name: str, exp: str, **over: Any) -> Any:
     from ail.registry import Agent
 
+    over.setdefault("reviewer_experiment_id", f"{exp}_REVIEWER")
     return Agent(agent_name=name, experiment_id=exp, **over)
 
 
@@ -223,8 +279,8 @@ def test_registry_mode_threads_each_agents_experiment_and_goal(
     # Agent a2 has no goal_config => the neutral default rubric.
     assert calls[1]["rubric"] is DEFAULT_RUBRIC
     # The reviewer's own traces land in each agent's own experiment (per-agent skip).
-    assert calls[0]["reviewer_experiment_id"] == "EXP_A"
-    assert calls[1]["reviewer_experiment_id"] == "EXP_B"
+    assert calls[0]["reviewer_experiment_id"] == "EXP_A_REVIEWER"
+    assert calls[1]["reviewer_experiment_id"] == "EXP_B_REVIEWER"
 
 
 def test_registry_mode_does_not_leak_global_goal_args_onto_agents(
@@ -265,8 +321,8 @@ def test_registry_mode_does_not_leak_global_goal_args_onto_agents(
     assert calls[1]["rubric"].rubric_id == "ail.l3.goal/total_tokens-minimize/v1"
     # Defense-in-depth: the global --reviewer-experiment is ignored in registry mode;
     # each agent's reviewer traces go to its OWN experiment.
-    assert calls[0]["reviewer_experiment_id"] == "EXP_A"
-    assert calls[1]["reviewer_experiment_id"] == "EXP_B"
+    assert calls[0]["reviewer_experiment_id"] == "EXP_A_REVIEWER"
+    assert calls[1]["reviewer_experiment_id"] == "EXP_B_REVIEWER"
 
 
 def test_registry_partial_goal_config_uses_neutral_defaults_not_global(
@@ -306,6 +362,7 @@ def test_single_agent_mode_still_honors_global_goal_args(
     rc = job.main(
         [
             "--experiment=EXP_SOLO",
+            "--reviewer-experiment=REV_SOLO",
             "--warehouse-id=wh",
             "--objective-metric=total_tokens",
             "--goal-direction=minimize",

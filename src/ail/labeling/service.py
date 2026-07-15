@@ -61,6 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ail.judges.auto_align import read_human_labels
 from ail.judges.labeling import TraceLabel, record_label
 from ail.readiness import ReadinessThresholds
+from ail.trace_policy import is_internal_trace
 
 if TYPE_CHECKING:
     from ail.ingest.base import TraceSource
@@ -88,7 +89,7 @@ __all__ = [
 #: the progress count is accurate during active labeling; when the experiment has
 #: more traces the result reports ``scan_capped=True`` and counts reflect the most
 #: recent traces (honest, and conservative — it never over-reports readiness).
-DEFAULT_SCAN_LIMIT = 200
+DEFAULT_SCAN_LIMIT: int | None = None
 
 #: How many "needs a label" traces the worklist returns (a UI page, not the whole
 #: corpus). Counts above are over the full scan; only the returned rows are capped.
@@ -295,6 +296,8 @@ def build_dimensions_state(
     for trace in source.iter_traces(
         experiment_id=experiment_id, max_results=scan_limit, order_by=["timestamp_ms DESC"]
     ):
+        if is_internal_trace(trace):
+            continue
         scanned += 1
         trace_id = getattr(trace, "trace_id", None)
         if not trace_id:
@@ -508,12 +511,18 @@ def _iso(value: Any) -> str | None:
 
 
 def _preview(trace: Any) -> str | None:
-    """A short request preview for the worklist row (from the normalized trace)."""
-    preview = getattr(trace, "request_preview", None)
-    if preview is None:
+    """A short request/response preview for the worklist row."""
+    request = getattr(trace, "request_preview", None)
+    response = getattr(trace, "response_preview", None)
+    if request is None and response is None:
         return None
-    text = str(preview)
-    return text if len(text) <= 240 else text[:237] + "…"
+    parts = []
+    if request is not None:
+        parts.append(f"Request: {request}")
+    if response is not None:
+        parts.append(f"Response: {response}")
+    text = "\n".join(parts)
+    return text if len(text) <= 500 else text[:497] + "…"
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,39 @@
+resources:
+  jobs:
+    onboarding_service:
+      name: ail-onboarding-service
+      description: Deployed app transport for MLflow experiment, goals, judge, and registry onboarding.
+      tags:
+        project: agent-improvement-loop
+        tier: onboarding
+        managed_by: dab
+      max_concurrent_runs: 4
+      queue:
+        enabled: true
+      parameters:
+        - name: request_id
+          default: ''
+        - name: payload_base64
+          default: ''
+      tasks:
+        - task_key: onboard
+          environment_key: serverless
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-onboarding-job
+            named_parameters:
+              request-id: '{{job.parameters.request_id}}'
+              payload-base64: '{{job.parameters.payload_base64}}'
+              warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              goal-llm-endpoint: ${var.onboarding_goal_llm_endpoint}
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              - ../dist/*.whl
+              - databricks-agents>=1.11,<2

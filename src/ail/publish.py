@@ -56,6 +56,7 @@ from typing import Any
 from ail.ingest.mlflow_source import MLflowTraceSource
 from ail.metrics.contract import L0MetricsReport
 from ail.metrics.l0_deterministic import compute_l0
+from ail.trace_policy import subject_traces
 
 REFERENCE_EXPERIMENT = "660599403165942"
 DEFAULT_CATALOG = "austin_choi_omni_agent_catalog"
@@ -462,7 +463,9 @@ def publish(
     os.environ.setdefault("MLFLOW_TRACING_SQL_WAREHOUSE_ID", warehouse_id)
 
     source = _build_source(profile)
-    traces = source.fetch_traces(experiment_id=experiment_id, max_results=max_results)
+    traces = subject_traces(
+        source.fetch_traces(experiment_id=experiment_id, max_results=max_results)
+    )
     stamp = generated_at or datetime.now(UTC).isoformat()
     report = compute_l0(traces, experiment_id=experiment_id, generated_at=stamp)
 

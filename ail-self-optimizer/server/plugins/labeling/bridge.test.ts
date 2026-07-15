@@ -304,7 +304,7 @@ describe('restLabelingBridge — unavailable deps fail closed to an honest state
   it('no SQL warehouse → honest "deployed labeling unavailable — use the MLflow Traces UI" (both actions)', async () => {
     let built = 0;
     const bridge = restLabelingBridge({
-      warehouseId: undefined,
+      warehouseId: '',
       clientFactory: () => {
         built += 1;
         return fakeRestClient({}).client;

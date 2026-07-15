@@ -168,7 +168,7 @@ export function spawnPythonLabelingBridge(options: SpawnBridgeOptions = {}): Lab
 
 //: How many recent traces the read side scans (mirrors ail.labeling.service
 //: DEFAULT_SCAN_LIMIT — a pagination bound, not a readiness threshold).
-const DEFAULT_SCAN_LIMIT = 200;
+const DEFAULT_SCAN_LIMIT = 100_000;
 //: How many "needs a label" traces the worklist returns (mirrors DEFAULT_WORKLIST_LIMIT).
 const DEFAULT_WORKLIST_LIMIT = 50;
 
@@ -196,7 +196,10 @@ interface RestTraceInfo {
   trace_id?: string;
   trace_location?: RestTraceLocation;
   request_preview?: string;
+  response_preview?: string;
   request_time?: string;
+  tags?: Record<string, string>;
+  trace_metadata?: Record<string, string>;
   assessments?: RestAssessment[];
 }
 export interface LabelingRestClient {
@@ -293,10 +296,29 @@ function cleanValue(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;
 }
 
-function previewOf(text: string | undefined): string | null {
-  if (text === undefined || text === null) return null;
-  const s = String(text);
-  return s.length <= 240 ? s : `${s.slice(0, 237)}…`;
+function previewOf(request: string | undefined, response: string | undefined): string | null {
+  if (request == null && response == null) return null;
+  const text = [request == null ? '' : `Request: ${request}`, response == null ? '' : `Response: ${response}`]
+    .filter(Boolean)
+    .join('\n');
+  return text.length <= 500 ? text : `${text.slice(0, 497)}…`;
+}
+
+const INTERNAL_TRACE_NAMES = new Set([
+  'rlm_review',
+  'l3_halo_review',
+  'ail_judge_backfill',
+  'ail_companion_planner',
+  'ail_memory_distiller',
+]);
+
+function isInternalTraceInfo(trace: RestTraceInfo): boolean {
+  const tags = trace.tags ?? {};
+  const metadata = trace.trace_metadata ?? {};
+  const traceName = tags['mlflow.traceName'] ?? '';
+  if (INTERNAL_TRACE_NAMES.has(traceName)) return true;
+  if ((tags['ail.internal'] ?? '').trim().toLowerCase() === 'true') return true;
+  return Boolean(metadata['ail.l3.subject_trace_id']);
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -352,6 +374,7 @@ async function runRestDimensions(
   const worklist: unknown[] = [];
   let scanned = 0;
   for (const t of traces) {
+    if (isInternalTraceInfo(t)) continue;
     scanned += 1;
     const bare = t.trace_id;
     const location = locationOf(t.trace_location);
@@ -367,7 +390,7 @@ async function runRestDimensions(
       worklist.push({
         trace_id: `trace:/${location}/${bare}`,
         request_time: t.request_time ?? null,
-        preview: previewOf(t.request_preview),
+        preview: previewOf(t.request_preview, t.response_preview),
         labeled,
       });
     }

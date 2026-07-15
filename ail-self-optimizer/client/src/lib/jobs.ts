@@ -144,16 +144,6 @@ export const UNTRACKED_OPTIMIZERS: readonly UntrackedOptimizer[] = [
     detail: 'Runs inside the controller, not as its own tracked job — no run ledger records it yet.',
   },
   {
-    key: 'rlm-halo',
-    name: 'RLM-HALO',
-    detail: 'No tracked job records its runs today.',
-  },
-  {
-    key: 'memalign',
-    name: 'MemAlign judge alignment',
-    detail: 'Alignment happens outside the tracked-job path; its runs are not recorded yet.',
-  },
-  {
     key: 'asset-gen',
     name: 'Asset generation',
     detail: 'Not wired to a tracked job — no run history to show.',

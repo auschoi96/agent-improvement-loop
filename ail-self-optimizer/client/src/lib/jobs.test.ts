@@ -80,12 +80,11 @@ describe('outcomeTone — applied is a win, rejected is neutral (never an error)
 });
 
 describe('UNTRACKED_OPTIMIZERS — the explicit not-tracked set', () => {
-  it('names GEPA / RLM / MemAlign / asset-gen so the page can state they are not tracked', () => {
+  it('only names optimizer work that still lacks its own tracked job', () => {
     const blob = UNTRACKED_OPTIMIZERS.map((o) => `${o.key} ${o.name}`.toLowerCase()).join(' ');
     expect(blob).toMatch(/gepa/);
-    expect(blob).toMatch(/rlm/);
-    expect(blob).toMatch(/memalign/);
     expect(blob).toMatch(/asset/);
-    expect(UNTRACKED_OPTIMIZERS.length).toBeGreaterThanOrEqual(4);
+    expect(blob).not.toMatch(/rlm/);
+    expect(blob).not.toMatch(/memalign/);
   });
 });

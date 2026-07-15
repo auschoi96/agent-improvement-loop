@@ -99,7 +99,7 @@ class _FakeExperimentClient:
     def get_experiment_by_name(self, name):  # type: ignore[no-untyped-def]
         return self.by_name.get(name)
 
-    def create_experiment(self, name):  # type: ignore[no-untyped-def]
+    def create_experiment(self, name, *, trace_location=None):  # type: ignore[no-untyped-def]
         self.created.append(name)
         return self.create_returns
 
@@ -300,14 +300,14 @@ def test_fresh_experiment_validates() -> None:
     assert v.reasons == []
 
 
-def test_non_fresh_experiment_with_traces_is_rejected() -> None:
+def test_populated_unclaimed_experiment_is_accepted() -> None:
     client = _FakeExperimentClient(
         by_id={"exp-1": ExperimentInfo("exp-1", "/Users/a/agent")}, traces={"exp-1": 7}
     )
     v = validate_experiment("exp-1", client=client, claimed_experiment_ids={})
-    assert v.fresh is False
+    assert v.fresh is True
     assert v.trace_count == 7
-    assert any("trace" in r for r in v.reasons)
+    assert v.reasons == []
 
 
 def test_already_registered_experiment_is_rejected() -> None:

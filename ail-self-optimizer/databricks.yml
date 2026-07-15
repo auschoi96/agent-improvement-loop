@@ -20,11 +20,38 @@ variables:
       the `apply-job` app resource below, and from there into the app's
       AIL_APPLY_JOB_ID env var via app.yaml's `valueFrom: apply-job`.
     default: ''
+  onboarding_job_id:
+    description: Numeric job id of the pre-deployed ail-onboarding-service job.
+    default: ''
+  l0_job_id:
+    description: Numeric job id of ail-l0-publish-scheduled.
+    default: ''
+  rlm_job_id:
+    description: Numeric job id of ail-continuous-rlm-scheduled.
+    default: ''
+  judge_backfill_job_id:
+    description: Numeric job id of ail-judge-backfill.
+    default: ''
+  auto_align_job_id:
+    description: Numeric job id of ail-auto-align.
+    default: ''
+  memory_job_id:
+    description: Numeric job id of ail-advisory-memory-distiller.
+    default: ''
   catalog:
     description: Unity Catalog catalog that holds the L0/app write-path tables.
     default: ''
   schema:
     description: Schema within catalog that holds the L0/app write-path tables.
+    default: ''
+  trace_schema:
+    description: Unity Catalog schema used by Traces-in-Unity-Catalog experiments.
+    default: mlflow_traces
+  label_floor:
+    description: Human labels required before MemAlign may trust a judge.
+    default: '20'
+  default_target_workspace:
+    description: Optional local repo path used by Quick Connect for companion execution.
     default: ''
 
 resources:
@@ -61,6 +88,30 @@ resources:
           job:
             id: ${var.apply_job_id}
             permission: CAN_MANAGE_RUN
+        - name: onboarding-job
+          job:
+            id: ${var.onboarding_job_id}
+            permission: CAN_MANAGE_RUN
+        - name: l0-job
+          job:
+            id: ${var.l0_job_id}
+            permission: CAN_VIEW
+        - name: rlm-job
+          job:
+            id: ${var.rlm_job_id}
+            permission: CAN_VIEW
+        - name: judge-backfill-job
+          job:
+            id: ${var.judge_backfill_job_id}
+            permission: CAN_VIEW
+        - name: auto-align-job
+          job:
+            id: ${var.auto_align_job_id}
+            permission: CAN_VIEW
+        - name: memory-job
+          job:
+            id: ${var.memory_job_id}
+            permission: CAN_VIEW
 
 targets:
   default:

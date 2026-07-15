@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 from collections.abc import Callable, Iterable
 from enum import StrEnum
@@ -64,6 +65,7 @@ from ail.onboarding.experiment import (
     ExperimentAccessError,
     ExperimentClient,
     ExperimentPermissionError,
+    UcTraceLocation,
     build_experiment_client,
 )
 from ail.onboarding.experiment import create_experiment as create_experiment_probe
@@ -99,6 +101,7 @@ __all__ = [
     "SuggestedTarget",
     "RequirementsPreviewResult",
     "RequirementsConfirmResult",
+    "BootstrapResult",
     "ErrorResult",
     "compiled_goal_to_goal_config",
     "register_agent",
@@ -168,6 +171,7 @@ class CreationResult(_Contract):
     name: str = ""
     experiment_url: str = ""
     tracing_hint: str = ""
+    annotations_table: str = ""
     actor: str = ""
     error: str | None = None
     prerequisite: str | None = None
@@ -277,6 +281,20 @@ class ErrorResult(_Contract):
     error: str
 
 
+class BootstrapResult(_Contract):
+    outcome: OnboardingOutcome
+    agent_name: str = ""
+    experiment_id: str = ""
+    reviewer_experiment_id: str = ""
+    annotations_table: str = ""
+    experiment_url: str = ""
+    tracing_hint: str = ""
+    authored_judges: list[str] = Field(default_factory=list)
+    goal_config: dict[str, Any] | None = None
+    actor: str = ""
+    error: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Pure orchestration (injected clients → unit-testable, no live write)
 # ---------------------------------------------------------------------------
@@ -326,6 +344,7 @@ def register_agent(
     schema: str = DEFAULT_SCHEMA,
     generated_at: str | None = None,
     goal_config: dict[str, Any] | None = None,
+    reviewer_experiment_id: str | None = None,
     annotations_table: str | None = None,
     target_workspace: str | None = None,
 ) -> RegisterResult:
@@ -365,10 +384,17 @@ def register_agent(
         return _register_refused(name, exp, goal_keys, actor, "an agent name is required")
     if not exp:
         return _register_refused(name, exp, goal_keys, actor, "an experiment id is required")
-    try:
-        judge_config = build_judge_config(goal_keys)
-    except (UnknownGoalError, ValueError) as exc:
-        return _register_refused(name, exp, goal_keys, actor, str(exc))
+    if goal_keys:
+        try:
+            judge_config = build_judge_config(goal_keys)
+        except (UnknownGoalError, ValueError) as exc:
+            return _register_refused(name, exp, goal_keys, actor, str(exc))
+    elif goal_config:
+        judge_config = {"source": "free_form_requirements"}
+    else:
+        return _register_refused(
+            name, exp, goal_keys, actor, "select a goal or confirm free-form requirements"
+        )
 
     if name in existing_agents:
         return _register_refused(
@@ -389,6 +415,7 @@ def register_agent(
     agent = Agent(
         agent_name=name,
         experiment_id=exp,
+        reviewer_experiment_id=reviewer_experiment_id,
         description=f"Registered via the onboarding wizard by {actor}; goals: {labels}.",
         judge_config=judge_config,
         goal_config=goal_config,
@@ -831,6 +858,9 @@ def run_create(
     actor: str,
     profile: str | None = None,
     experiment_client: ExperimentClient | None = None,
+    trace_catalog: str | None = None,
+    trace_schema: str | None = None,
+    trace_table_prefix: str | None = None,
 ) -> CreationResult:
     """Create a fresh experiment live (fail-closed; permission error is honest ERROR)."""
     if not actor.strip():
@@ -849,7 +879,11 @@ def run_create(
         )
     try:
         client = experiment_client or build_experiment_client(profile)
-        creation = create_experiment_probe(clean, client=client)
+        location = None
+        if trace_catalog and trace_schema:
+            prefix = _trace_table_prefix(trace_table_prefix or clean)
+            location = UcTraceLocation(trace_catalog, trace_schema, prefix)
+        creation = create_experiment_probe(clean, client=client, trace_location=location)
     except ExperimentPermissionError as exc:
         return CreationResult(
             outcome=OnboardingOutcome.ERROR,
@@ -870,8 +904,260 @@ def run_create(
         name=creation.name,
         experiment_url=_experiment_url(client, creation.experiment_id),
         tracing_hint=_tracing_hint(creation.experiment_id),
+        annotations_table=location.annotations_table if location else "",
         actor=actor,
     )
+
+
+def _ensure_bootstrap_experiment(
+    name: str,
+    *,
+    actor: str,
+    profile: str | None,
+    catalog: str,
+    trace_schema: str,
+    table_prefix: str,
+) -> CreationResult:
+    """Create the deterministic Quick Connect experiment, or resume a partial attempt."""
+    client = build_experiment_client(profile)
+    clean = name.strip()
+    target = clean
+    if not clean.startswith("/"):
+        home = client.workspace_home()
+        if not home:
+            return CreationResult(
+                outcome=OnboardingOutcome.ERROR,
+                name=clean,
+                actor=actor,
+                error="could not resolve the workspace home for Quick Connect",
+            )
+        target = f"{home.rstrip('/')}/{clean.strip('/')}"
+    try:
+        existing = client.get_experiment_by_name(target)
+    except ExperimentAccessError as exc:
+        return CreationResult(
+            outcome=OnboardingOutcome.ERROR, name=target, actor=actor, error=str(exc)
+        )
+    location = UcTraceLocation(catalog, trace_schema, table_prefix)
+    if existing is not None:
+        return CreationResult(
+            outcome=OnboardingOutcome.CREATED,
+            experiment_id=existing.experiment_id,
+            name=existing.name,
+            experiment_url=_experiment_url(client, existing.experiment_id),
+            tracing_hint=_tracing_hint(existing.experiment_id),
+            annotations_table=location.annotations_table,
+            actor=actor,
+        )
+    return run_create(
+        target,
+        actor=actor,
+        profile=profile,
+        experiment_client=client,
+        trace_catalog=catalog,
+        trace_schema=trace_schema,
+        trace_table_prefix=table_prefix,
+    )
+
+
+def _ensure_baseline_judges(
+    experiment_id: str, *, profile: str | None, warehouse_id: str | None = None
+) -> list[str]:
+    """Ensure the full trace-native baseline judge suite and matching label targets."""
+    import mlflow
+    from mlflow.genai.label_schemas import (
+        InputCategorical,
+        InputNumeric,
+        create_label_schema,
+        get_label_schema,
+    )
+    from mlflow.utils.databricks_utils import is_databricks_uri
+
+    from ail.judges.registration import (
+        _configure_databricks,
+        create_aligned_scorer,
+        list_registered_scorers,
+    )
+    from ail.judges.scorers import DEFAULT_SCORERS
+
+    _configure_databricks(profile=profile, tracking_uri="databricks", registry_uri="databricks-uc")
+    mlflow.set_experiment(experiment_id=experiment_id)
+    if warehouse_id:
+        mlflow.set_experiment_tag("mlflow.monitoring.sqlWarehouseId", warehouse_id)
+    schema_scope = {} if is_databricks_uri(mlflow.get_tracking_uri()) else {
+        "experiment_id": experiment_id
+    }
+    existing = {scorer.name for scorer in list_registered_scorers(experiment_id, profile=profile)}
+    ensured: list[str] = []
+    for name, spec in DEFAULT_SCORERS.items():
+        try:
+            get_label_schema(name, **schema_scope)
+        except Exception:  # noqa: BLE001 - absent schemas are created below
+            label_input: Any
+            if name in {"correctness", "groundedness"}:
+                label_input = InputCategorical(options=["yes", "no"])
+            else:
+                label_input = InputNumeric(min_value=1, max_value=5)
+            create_label_schema(
+                name=name,
+                type="feedback",
+                input=label_input,
+                instruction=(
+                    f"Review this trace for {name}. Record the verdict and cite the decisive "
+                    "request, tool result, or final-response evidence in the comment."
+                ),
+                enable_comment=True,
+                title=name.replace("_", " "),
+                **schema_scope,
+            )
+        if name not in existing:
+            create_aligned_scorer(
+                spec,
+                experiment_id=experiment_id,
+                sampling_rate=1.0,
+                profile=profile,
+            )
+        ensured.append(name)
+    return ensured
+
+
+def run_bootstrap(
+    *,
+    agent_name: str,
+    requirements_text: str,
+    actor: str,
+    target_workspace: str,
+    profile: str | None,
+    warehouse_id: str | None,
+    catalog: str,
+    schema: str,
+    trace_schema: str,
+) -> BootstrapResult:
+    name = agent_name.strip()
+    workspace = target_workspace.strip()
+    if not name or not requirements_text.strip() or not actor.strip() or not workspace:
+        return BootstrapResult(
+            outcome=OnboardingOutcome.ERROR,
+            agent_name=name,
+            actor=actor,
+            error=(
+                "agent_name, requirements_text, authenticated actor, and a local companion "
+                "target_workspace are required"
+            ),
+        )
+    prefix = _trace_table_prefix(name)
+    subject = _ensure_bootstrap_experiment(
+        f"{name}-traces",
+        actor=actor,
+        profile=profile,
+        catalog=catalog,
+        trace_schema=trace_schema,
+        table_prefix=prefix,
+    )
+    if subject.outcome != OnboardingOutcome.CREATED:
+        return BootstrapResult(
+            outcome=OnboardingOutcome.ERROR, agent_name=name, actor=actor, error=subject.error
+        )
+    reviewer = _ensure_bootstrap_experiment(
+        f"{name}-ail-internal",
+        actor=actor,
+        profile=profile,
+        catalog=catalog,
+        trace_schema=trace_schema,
+        table_prefix=f"{prefix}_internal",
+    )
+    if reviewer.outcome != OnboardingOutcome.CREATED:
+        return BootstrapResult(
+            outcome=OnboardingOutcome.ERROR, agent_name=name, actor=actor, error=reviewer.error
+        )
+    preview = run_preview_requirements(requirements_text, cohort=name, agent_name=name, actor=actor)
+    if not isinstance(preview, RequirementsPreviewResult) or preview.suggested_target is None:
+        return BootstrapResult(
+            outcome=OnboardingOutcome.ERROR,
+            agent_name=name,
+            actor=actor,
+            error=getattr(preview, "error", "requirements preview did not produce a target"),
+        )
+    confirmed = run_confirm_requirements(
+        requirements_text,
+        objective_target=preview.suggested_target.value,
+        experiment_id=subject.experiment_id,
+        agent_name=name,
+        cohort=name,
+        actor=actor,
+        profile=profile,
+        warehouse_id=warehouse_id,
+        catalog=catalog,
+        schema=schema,
+    )
+    if confirmed.outcome != OnboardingOutcome.REQUIREMENTS_CONFIRMED:
+        return BootstrapResult(
+            outcome=OnboardingOutcome.ERROR,
+            agent_name=name,
+            actor=actor,
+            error=confirmed.error or confirmed.refused_reason,
+        )
+    try:
+        baseline_judges = _ensure_baseline_judges(
+            subject.experiment_id, profile=profile, warehouse_id=warehouse_id
+        )
+    except Exception as exc:  # noqa: BLE001 - provisioning failure is an honest bootstrap error
+        return BootstrapResult(
+            outcome=OnboardingOutcome.ERROR,
+            agent_name=name,
+            actor=actor,
+            error=f"could not provision baseline judges: {type(exc).__name__}: {exc}",
+        )
+    metric_goal = {
+        "total_tokens": "token_efficiency",
+        "duration_seconds": "latency",
+        "total_usd": "cost",
+        "correctness": "accuracy",
+    }.get(confirmed.objective_metric, "accuracy")
+    registered = run_register(
+        agent_name=name,
+        experiment_id=subject.experiment_id,
+        reviewer_experiment_id=reviewer.experiment_id,
+        goal_keys=[metric_goal],
+        actor=actor,
+        profile=profile,
+        warehouse_id=warehouse_id,
+        catalog=catalog,
+        schema=schema,
+        goal_config=confirmed.goal_config,
+        annotations_table=subject.annotations_table,
+        target_workspace=workspace,
+    )
+    if registered.outcome != OnboardingOutcome.REGISTERED:
+        return BootstrapResult(
+            outcome=OnboardingOutcome.ERROR,
+            agent_name=name,
+            actor=actor,
+            error=registered.error or registered.refused_reason,
+        )
+    return BootstrapResult(
+        outcome=OnboardingOutcome.REGISTERED,
+        agent_name=name,
+        experiment_id=subject.experiment_id,
+        reviewer_experiment_id=reviewer.experiment_id,
+        annotations_table=subject.annotations_table,
+        experiment_url=subject.experiment_url,
+        tracing_hint=subject.tracing_hint,
+        authored_judges=list(dict.fromkeys([*confirmed.authored_judges, *baseline_judges])),
+        goal_config=confirmed.goal_config,
+        actor=actor,
+    )
+
+
+def _trace_table_prefix(value: str) -> str:
+    leaf = value.rstrip("/").rsplit("/", 1)[-1]
+    prefix = re.sub(r"[^a-z0-9_]+", "_", leaf.lower().replace("-", "_"))
+    prefix = prefix.strip("_")[:48]
+    if not prefix:
+        raise ValueError("a trace table prefix must contain at least one letter or number")
+    if prefix[0].isdigit():
+        prefix = f"agent_{prefix}"
+    return prefix
 
 
 def _experiment_url(client: ExperimentClient, experiment_id: str) -> str:
@@ -909,6 +1195,7 @@ def run_register(
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
     goal_config: dict[str, Any] | None = None,
+    reviewer_experiment_id: str | None = None,
     annotations_table: str | None = None,
     target_workspace: str | None = None,
 ) -> RegisterResult:
@@ -944,6 +1231,7 @@ def run_register(
         existing = load_registered_agents(
             client=client, warehouse_id=wh, catalog=catalog, schema=schema
         )
+        _ensure_baseline_judges(experiment_id.strip(), profile=profile, warehouse_id=wh)
         return register_agent(
             agent_name=agent_name,
             experiment_id=experiment_id,
@@ -955,6 +1243,7 @@ def run_register(
             catalog=catalog,
             schema=schema,
             goal_config=goal_config,
+            reviewer_experiment_id=reviewer_experiment_id,
             annotations_table=annotations_table,
             target_workspace=target_workspace,
         )
@@ -1045,6 +1334,18 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
 
     if action == "requirements":
         return run_requirements(goal_keys or None)
+    if action == "bootstrap_agent":
+        return run_bootstrap(
+            agent_name=str(payload.get("agent_name") or ""),
+            requirements_text=str(payload.get("requirements_text") or ""),
+            actor=actor,
+            target_workspace=str(payload.get("target_workspace") or ""),
+            profile=profile,
+            warehouse_id=warehouse_id,
+            catalog=catalog,
+            schema=schema,
+            trace_schema=str(payload.get("trace_schema") or "mlflow_traces"),
+        )
     if action == "preview_requirements":
         return run_preview_requirements(
             str(payload.get("requirements_text") or ""),
@@ -1089,7 +1390,14 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
             schema=schema,
         )
     if action == "create_experiment":
-        return run_create(str(payload.get("name") or ""), actor=actor, profile=profile)
+        return run_create(
+            str(payload.get("name") or ""),
+            actor=actor,
+            profile=profile,
+            trace_catalog=str(payload.get("trace_catalog") or "") or None,
+            trace_schema=str(payload.get("trace_schema") or "") or None,
+            trace_table_prefix=str(payload.get("trace_table_prefix") or "") or None,
+        )
     if action == "register_agent":
         name = str(payload.get("agent_name") or "")
         exp = str(payload.get("experiment_id") or "")
@@ -1111,6 +1419,11 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
         )
         if tw_err is not None:
             return _register_refused(name, exp, goal_keys, actor, tw_err)
+        reviewer_experiment_id, re_err = _coerce_optional_str(
+            payload.get("reviewer_experiment_id"), "reviewer_experiment_id"
+        )
+        if re_err is not None:
+            return _register_refused(name, exp, goal_keys, actor, re_err)
         return run_register(
             agent_name=name,
             experiment_id=exp,
@@ -1121,6 +1434,7 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
             catalog=catalog,
             schema=schema,
             goal_config=goal_config,
+            reviewer_experiment_id=reviewer_experiment_id,
             annotations_table=annotations_table,
             target_workspace=target_workspace,
         )

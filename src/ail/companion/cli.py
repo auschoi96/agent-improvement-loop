@@ -199,9 +199,9 @@ def _poll_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--plan-every",
         type=int,
-        default=0,
+        default=1,
         metavar="ITERATIONS",
-        help="Run planner every N poll iterations; 0 disables planning in the loop.",
+        help="Run planner every N poll iterations (default 1); 0 explicitly disables planning.",
     )
     parser.add_argument(
         "--experiment",

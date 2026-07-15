@@ -129,7 +129,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         required=True,
         help="Databricks CLI profile to MINT a fresh static token from each cycle.",
     )
-    parser.add_argument("--experiment", required=True, help="MLflow experiment id.")
+    parser.add_argument(
+        "--experiment",
+        default=None,
+        help="Optional MLflow experiment override; omitted uses the UC agent registry.",
+    )
     parser.add_argument("--catalog", required=True, help="UC catalog for framework tables.")
     parser.add_argument("--schema", required=True, help="UC schema for framework tables.")
     parser.add_argument(
@@ -147,26 +151,36 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     # Lean pass-through to the poll loop; other knobs fall to their poll defaults/env.
     parser.add_argument("--warehouse-id", default=None, help="Monitoring SQL warehouse id.")
     parser.add_argument("--agent", default="claude_code", help="Agent name to poll for.")
+    parser.add_argument(
+        "--plan-every",
+        type=int,
+        default=1,
+        help="Run autonomous planning every N cycles (default 1; 0 disables).",
+    )
     args = parser.parse_args(argv)
     if args.interval_seconds < 0:
         parser.error("--interval-seconds must be >= 0")
     if args.max_cycles < 0:
         parser.error("--max-cycles must be >= 0")
+    if args.plan_every < 0:
+        parser.error("--plan-every must be >= 0")
     return args
 
 
 def _poll_passthrough(args: argparse.Namespace) -> list[str]:
     """Core poll flags forwarded each cycle. NEVER includes --profile."""
     argv = [
-        "--experiment",
-        args.experiment,
         "--catalog",
         args.catalog,
         "--schema",
         args.schema,
         "--agent",
         args.agent,
+        "--plan-every",
+        str(args.plan_every),
     ]
+    if args.experiment:
+        argv += ["--experiment", args.experiment]
     if args.warehouse_id:
         argv += ["--warehouse-id", args.warehouse_id]
     return argv
@@ -202,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     installed, previous = _install_sigterm(stop)
 
     print(
-        f"{_TAG} starting: profile={args.profile} experiment={args.experiment} "
+        f"{_TAG} starting: profile={args.profile} experiment={args.experiment or 'registry'} "
         f"catalog={args.catalog} schema={args.schema} interval={args.interval_seconds}s "
         f"max_cycles={args.max_cycles or 'unbounded'}"
     )

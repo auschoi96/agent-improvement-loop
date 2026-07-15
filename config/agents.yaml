@@ -18,6 +18,14 @@
 #     target_workspace: /path/to/your/agent/repo
 agents:
   - agent_name: claude_code
-    experiment_id: "660599403165942"
+    experiment_id: "1301765275062543"
+    reviewer_experiment_id: "1301765275062544"
     description: Claude Code CLI sessions (the reference agent).
-    # target_workspace: not configured yet (executor lane L7b-2 not wired)
+    goal_config:
+      objective_metric: total_tokens
+      goal_direction: minimize
+      goal_target: -0.30
+      goal_target_kind: relative
+      guardrail_judge: []
+    annotations_table: austin_choi_omni_agent_catalog.mlflow_traces.claude_code_otel_annotations
+    target_workspace: /Users/austin.choi/PycharmProjects2/agent-improvement-loop

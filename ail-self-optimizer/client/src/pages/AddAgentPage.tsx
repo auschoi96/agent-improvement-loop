@@ -24,11 +24,18 @@ export function AddAgentPage() {
   return (
     <div className="space-y-6">
       <PageHeader />
-      {!showAdvanced && <QuickConnectPanel onAdvanced={() => setShowAdvanced(true)} />}
+      {!showAdvanced && (
+        <QuickConnectPanel
+          onAdvanced={() => setShowAdvanced(true)}
+          onRegistered={(name) => {
+            registeredName.current = name;
+            reloadAgents();
+          }}
+        />
+      )}
       {!showAdvanced && (
         <p className="text-sm text-muted-foreground">
-          Already have MLflow traces? Use advanced setup to connect an existing experiment and enable governed
-          evaluation.
+          Already have MLflow or OTEL traces? Use advanced setup to connect the existing experiment and include its history.
         </p>
       )}
       {showAdvanced && (

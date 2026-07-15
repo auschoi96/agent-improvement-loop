@@ -8,7 +8,15 @@ import { WorkspaceClient } from '@databricks/sdk-experimental';
 // approve/reject decision) and `ail-l0-publish-scheduled` (scheduled L0 publish).
 // GEPA / RLM-HALO / MemAlign / asset-generation do NOT run as tracked jobs yet, so
 // they are intentionally absent here and surfaced client-side as "not tracked".
-export const REGISTERED_JOB_NAMES = ['ail-apply-service', 'ail-l0-publish-scheduled'] as const;
+export const REGISTERED_JOB_NAMES = [
+  'ail-apply-service',
+  'ail-l0-publish-scheduled',
+  'ail-continuous-rlm-scheduled',
+  'ail-judge-backfill',
+  'ail-auto-align',
+  'ail-advisory-memory-distiller',
+  'ail-onboarding-service',
+] as const;
 
 // Default number of recent runs to list per job. Bounded below 25 because the Jobs
 // listRuns API requires 0 < limit < 25.

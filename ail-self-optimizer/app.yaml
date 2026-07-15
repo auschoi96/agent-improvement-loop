@@ -6,6 +6,12 @@ env:
     value: ${var.catalog}
   - name: AIL_SCHEMA
     value: ${var.schema}
+  - name: AIL_TRACE_CATALOG
+    value: ${var.catalog}
+  - name: AIL_TRACE_SCHEMA
+    value: ${var.trace_schema}
+  - name: AIL_DEFAULT_TARGET_WORKSPACE
+    value: ${var.default_target_workspace}
   - name: AIL_APPLY_CATALOG
     value: ${var.catalog}
   - name: AIL_APPLY_SCHEMA
@@ -21,6 +27,10 @@ env:
   # stays workspace-agnostic. Mirrors DATABRICKS_WAREHOUSE_ID <- sql-warehouse.
   - name: AIL_APPLY_JOB_ID
     valueFrom: apply-job
+  - name: AIL_ONBOARDING_TRANSPORT
+    value: job
+  - name: AIL_ONBOARDING_JOB_ID
+    valueFrom: onboarding-job
   # Select the Node-native labeling transport (docs/LABELING_UI.md). Generic
   # literal, correct for every deployment: the Node-only deployed image can't
   # spawn the Python labeling engine, so the labeling routes talk to the
@@ -30,6 +40,8 @@ env:
   # SQL warehouse for the v4 UC tracing endpoints.
   - name: AIL_LABELING_TRANSPORT
     value: rest
+  - name: AIL_LABEL_FLOOR
+    value: ${var.label_floor}
   # Optional: the label floor (ail.readiness.ReadinessThresholds.quality_min_labels)
   # relayed to the deployed transport so the labeling panel shows the "N / floor"
   # target. Two-tier: the NUMBER lives in Python — never authored in TS/YAML. Left

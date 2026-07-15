@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
@@ -29,11 +30,11 @@ from ail.l3.reviewer import (
     ASSETS_FEEDBACK_NAME,
     GUIDELINE_FEEDBACK_PREFIX,
     OVERALL_FEEDBACK_NAME,
-    REVIEW_SPAN_NAME,
     review_trace,
 )
 from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
 from ail.l3.selection import TraceSelection, select_traces_to_review
+from ail.trace_policy import is_internal_trace
 
 __all__ = [
     "ContinuousRlmRunReport",
@@ -70,6 +71,7 @@ class ContinuousRlmRunReport:
     sample_rate: float
     max_reviews: int
     outcomes: list[TraceReviewOutcome]
+    max_workers: int = 1
 
 
 def has_rlm_assessment(trace: NormalizedTrace) -> bool:
@@ -85,21 +87,14 @@ def has_rlm_assessment(trace: NormalizedTrace) -> bool:
     assessments = getattr(info, "assessments", None) if info is not None else None
     for assessment in list(assessments or []):
         name = str(getattr(assessment, "name", "") or "")
-        if _is_rlm_assessment_name(name):
+        if _is_successful_rlm_assessment_name(name):
             return True
     return False
 
 
 def is_rlm_reviewer_trace(trace: NormalizedTrace) -> bool:
     """Whether ``trace`` is HALO's own reviewer trace, not a subject trace."""
-    if trace.metadata.get("ail.l3.subject_trace_id"):
-        return True
-    for span in trace.spans:
-        if span.name == REVIEW_SPAN_NAME:
-            return True
-        if any(str(key).startswith("ail.l3.") for key in span.attributes):
-            return True
-    return False
+    return is_internal_trace(trace)
 
 
 def sample_trace_id(trace_id: str, sample_rate: float) -> bool:
@@ -119,7 +114,7 @@ def select_unreviewed_traces(
     max_reviews: int,
     sample_rate: float,
     min_tokens: int | None = None,
-    status: TraceStatus | None = TraceStatus.OK,
+    status: TraceStatus | None = None,
     retry_failed: bool = False,
 ) -> tuple[list[TraceSelection], int, int, int]:
     """Choose the bounded, sampled, not-yet-reviewed subset for this firing.
@@ -138,27 +133,49 @@ def select_unreviewed_traces(
         )
 
     unreviewed: list[NormalizedTrace] = []
+    failed_retries: list[NormalizedTrace] = []
     n_already_reviewed = 0
     n_reviewer_traces_skipped = 0
     for trace in traces:
-        if has_rlm_assessment(trace) and not (retry_failed and has_rlm_failure_marker(trace)):
+        if has_rlm_assessment(trace):
             n_already_reviewed += 1
+        elif has_rlm_failure_marker(trace):
+            if retry_failed:
+                failed_retries.append(trace)
+            else:
+                n_already_reviewed += 1
         elif is_rlm_reviewer_trace(trace):
             n_reviewer_traces_skipped += 1
         else:
             unreviewed.append(trace)
 
     sampled: list[NormalizedTrace] = []
+    sampled_retries: list[NormalizedTrace] = []
     n_sampled_out = 0
     for trace in unreviewed:
         if sample_trace_id(trace.trace_id, sample_rate):
             sampled.append(trace)
         else:
             n_sampled_out += 1
+    for trace in failed_retries:
+        if sample_trace_id(trace.trace_id, sample_rate):
+            sampled_retries.append(trace)
+        else:
+            n_sampled_out += 1
 
     selections = select_traces_to_review(
         sampled, top_n=max_reviews, min_tokens=min_tokens, status=status
     )
+    remaining = max_reviews - len(selections)
+    if remaining:
+        selections.extend(
+            select_traces_to_review(
+                sampled_retries,
+                top_n=remaining,
+                min_tokens=min_tokens,
+                status=status,
+            )
+        )
     return (selections, n_already_reviewed, n_reviewer_traces_skipped, n_sampled_out)
 
 
@@ -172,6 +189,39 @@ def has_rlm_failure_marker(trace: NormalizedTrace) -> bool:
     )
 
 
+def _halo_sandbox_class() -> type:
+    from engine.sandbox.sandbox import Sandbox
+
+    return Sandbox
+
+
+def _prepare_halo_sandbox() -> None:
+    """Resolve HALO's optional Pyodide sandbox once before worker threads start.
+
+    HALO deliberately drops ``run_code`` when its sandbox is unavailable, but a
+    failed resolution is not cached upstream. Without this preflight, concurrent
+    reviews race the same wheel-cache ``.part`` files and each repeats the optional
+    download. Cache the unavailable result for this job process; a later scheduled
+    firing gets a fresh process and can try again.
+    """
+    try:
+        sandbox_class = _halo_sandbox_class()
+        sandbox = sandbox_class.get()
+    except (ImportError, ModuleNotFoundError):
+        return
+    if sandbox is None:
+        sandbox_class.get = classmethod(lambda cls: None)
+
+
+def _disable_halo_sandbox() -> None:
+    """Disable HALO's optional ``run_code`` tool without probing Pyodide."""
+    try:
+        sandbox_class = _halo_sandbox_class()
+    except (ImportError, ModuleNotFoundError):
+        return
+    sandbox_class.get = classmethod(lambda cls: None)
+
+
 def run_continuous_rlm(
     experiment_id: str,
     *,
@@ -183,7 +233,7 @@ def run_continuous_rlm(
     max_reviews: int = 2,
     sample_rate: float = 0.10,
     min_tokens: int | None = 50_000,
-    status: TraceStatus | None = TraceStatus.OK,
+    status: TraceStatus | None = None,
     rubric: ReviewRubric = DEFAULT_RUBRIC,
     attach: bool = True,
     base_url: str | None = None,
@@ -194,6 +244,8 @@ def run_continuous_rlm(
     reasoning_effort: str | None = None,
     use_responses_api: bool | None = None,
     retry_failed: bool = False,
+    max_workers: int = 4,
+    enable_code_sandbox: bool = True,
 ) -> ContinuousRlmRunReport:
     """Run one bounded RLM pass over the most recent trace candidates.
 
@@ -206,6 +258,8 @@ def run_continuous_rlm(
         raise ValueError("--sample-rate must be between 0 and 1")
     if max_reviews < 1:
         raise ValueError("--max-reviews must be at least 1")
+    if max_workers < 1:
+        raise ValueError("--max-workers must be at least 1")
     if sql_warehouse_id:
         os.environ[TRACING_WAREHOUSE_ENV] = sql_warehouse_id
 
@@ -229,12 +283,17 @@ def run_continuous_rlm(
         retry_failed=retry_failed,
     )
 
+    if selections:
+        if enable_code_sandbox:
+            _prepare_halo_sandbox()
+        else:
+            _disable_halo_sandbox()
+
     extra: dict[str, object] = {}
     if max_turns is not None:
         extra["max_turns"] = max_turns
 
-    outcomes: list[TraceReviewOutcome] = []
-    for selection in selections:
+    def _review_one(selection: TraceSelection) -> TraceReviewOutcome:
         try:
             verdict: HaloReviewVerdict = review_trace(
                 selection.trace_id,
@@ -266,27 +325,28 @@ def run_continuous_rlm(
                     marker_note = (
                         f" (failure-marker attach failed: {type(mark_exc).__name__}: {mark_exc})"
                     )
-            outcomes.append(
-                TraceReviewOutcome(
-                    trace_id=selection.trace_id,
-                    status="review_failed",
-                    total_tokens=selection.total_tokens,
-                    error=f"{error}{marker_note}",
-                )
-            )
-            continue
-
-        outcomes.append(
-            TraceReviewOutcome(
+            return TraceReviewOutcome(
                 trace_id=selection.trace_id,
-                status="reviewed",
-                reviewer_trace_id=verdict.reviewer_trace_id,
+                status="review_failed",
                 total_tokens=selection.total_tokens,
-                token_efficiency=verdict.token_efficiency,
-                token_waste_score=verdict.token_waste_score,
-                n_recommended_assets=len(verdict.recommended_assets),
+                error=f"{error}{marker_note}",
             )
+        return TraceReviewOutcome(
+            trace_id=selection.trace_id,
+            status="reviewed",
+            reviewer_trace_id=verdict.reviewer_trace_id,
+            total_tokens=selection.total_tokens,
+            token_efficiency=verdict.token_efficiency,
+            token_waste_score=verdict.token_waste_score,
+            n_recommended_assets=len(verdict.recommended_assets),
         )
+
+    outcomes: list[TraceReviewOutcome] = []
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(selections) or 1)) as pool:
+        futures = [pool.submit(_review_one, selection) for selection in selections]
+        for future in as_completed(futures):
+            outcomes.append(future.result())
+    outcomes.sort(key=lambda outcome: outcome.trace_id)
 
     n_reviewed = sum(1 for o in outcomes if o.status == "reviewed")
     return ContinuousRlmRunReport(
@@ -301,6 +361,7 @@ def run_continuous_rlm(
         n_failed=len(outcomes) - n_reviewed,
         sample_rate=sample_rate,
         max_reviews=max_reviews,
+        max_workers=max_workers,
         outcomes=outcomes,
     )
 
@@ -314,6 +375,12 @@ def _is_rlm_assessment_name(name: str) -> bool:
         ASSETS_FEEDBACK_NAME,
         REVIEW_FAILED_FEEDBACK_NAME,
     } or name.startswith(GUIDELINE_FEEDBACK_PREFIX)
+
+
+def _is_successful_rlm_assessment_name(name: str) -> bool:
+    return name in {OVERALL_FEEDBACK_NAME, ASSETS_FEEDBACK_NAME} or (
+        name.startswith(GUIDELINE_FEEDBACK_PREFIX) and name != REVIEW_FAILED_FEEDBACK_NAME
+    )
 
 
 def _mark_review_failed(trace_id: str, *, error: str, judge_model: str) -> None:

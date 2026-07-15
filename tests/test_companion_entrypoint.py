@@ -141,9 +141,15 @@ def test_prove_returns_nonzero_for_blocked_or_errored(
 
 
 def _poll_args(extra: list[str]) -> argparse.Namespace:
+    planning = [] if "--plan-every" in extra else ["--plan-every", "0"]
     return companion._poll_parser().parse_args(
-        ["--warehouse-id", "wh", "--volume-root", "/Volumes/c/s/v"] + extra
+        ["--warehouse-id", "wh", "--volume-root", "/Volumes/c/s/v", *planning] + extra
     )
+
+
+def test_poll_planning_is_enabled_by_default() -> None:
+    args = companion._poll_parser().parse_args(["--warehouse-id", "wh"])
+    assert args.plan_every == 1
 
 
 def test_executor_argv_registry_is_optional() -> None:
@@ -254,7 +260,17 @@ def test_poll_verify_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
     code = companion.main(
-        ["poll", "--warehouse-id", "wh", "--volume-root", "/Volumes/c/s/v", "--max-iterations", "2"]
+        [
+            "poll",
+            "--warehouse-id",
+            "wh",
+            "--volume-root",
+            "/Volumes/c/s/v",
+            "--max-iterations",
+            "2",
+            "--plan-every",
+            "0",
+        ]
     )
 
     assert code == 0
@@ -282,6 +298,8 @@ def test_poll_runs_verify_tick_when_enabled(monkeypatch: pytest.MonkeyPatch) -> 
             "0",
             "--verify-every",
             "1",
+            "--plan-every",
+            "0",
         ]
     )
 
@@ -310,6 +328,8 @@ def test_poll_no_pending_work_is_clean_noop(monkeypatch: pytest.MonkeyPatch) -> 
             "/Volumes/c/s/v",
             "--max-iterations",
             "1",
+            "--plan-every",
+            "0",
         ]
     )
 
@@ -359,6 +379,8 @@ def test_poll_real_executor_arg_construction_reaches_real_run_access(
             "/Volumes/c/s/v",
             "--max-iterations",
             "1",
+            "--plan-every",
+            "0",
         ]
     )
 

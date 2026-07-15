@@ -744,6 +744,9 @@ def _review_trace_context(attributes: dict[str, Any]) -> Iterator[str]:
     import mlflow
 
     with mlflow.start_span(name=REVIEW_SPAN_NAME, span_type="AGENT", attributes=attributes) as span:
+        mlflow.update_current_trace(
+            tags={"ail.internal": "true", "mlflow.traceName": REVIEW_SPAN_NAME}
+        )
         yield span.trace_id
 
 

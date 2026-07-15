@@ -131,9 +131,7 @@ class TestScorerFactory:
         assert judge.name == "correctness"
         # Constrained categorical, not a bare str: the judge can only emit yes/no.
         assert judge.feedback_value_type == Literal["yes", "no"]
-        # The guardrail rubric compares output against the expected result.
-        assert "{{ outputs }}" in judge.instructions
-        assert "{{ expectations }}" in judge.instructions
+        assert "{{ trace }}" in judge.instructions
 
     def test_modularity_is_bounded_graded_scale(self) -> None:
         judge = make_modularity_judge(model="openai:/gpt-4.1-mini")
@@ -143,13 +141,13 @@ class TestScorerFactory:
         # The bounded Literal would lose make_judge's default mean; aggregations
         # are restored so the graded scale still rolls up across traces.
         assert judge.aggregations == ["mean", "median", "p90"]
-        assert "{{ outputs }}" in judge.instructions
+        assert "{{ trace }}" in judge.instructions
 
     def test_groundedness_checks_context(self) -> None:
         judge = make_groundedness_judge(model="openai:/gpt-4.1-mini")
         assert judge.name == "groundedness"
         assert judge.feedback_value_type == Literal["yes", "no"]
-        assert "{{ inputs }}" in judge.instructions
+        assert "{{ trace }}" in judge.instructions
 
     def test_make_scorer_overrides(self) -> None:
         judge = make_scorer(
@@ -234,14 +232,9 @@ class TestTokenEfficiencyJudge:
     def test_in_default_set(self) -> None:
         assert DEFAULT_SCORERS["token_efficiency"] is TOKEN_EFFICIENCY
 
-    def test_rubric_reads_l0_summary_not_raw_trace(self) -> None:
-        # Large-trace-safe: the judge reasons over inputs/outputs/expectations
-        # (a small L0 summary), never {{ trace }} (900K-token traces blow context).
+    def test_rubric_is_trace_native_for_memalign(self) -> None:
         ins = make_token_efficiency_judge(model="openai:/gpt-4.1-mini").instructions
-        assert "{{ inputs }}" in ins
-        assert "{{ outputs }}" in ins
-        assert "{{ expectations }}" in ins
-        assert "{{ trace }}" not in ins
+        assert "{{ trace }}" in ins
 
     def test_rubric_is_quality_conditioned_anti_gaming(self) -> None:
         # The rubric must explicitly refuse to reward "fewer tokens by doing less".

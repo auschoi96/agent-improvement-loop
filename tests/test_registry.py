@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from ail.cohorts import TAG_AGENT
 from ail.registry import (
     CLAUDE_CODE_EXPERIMENT_ID,
+    CLAUDE_CODE_REVIEWER_EXPERIMENT_ID,
     DEFAULT_REGISTRY,
     Agent,
     AgentRegistry,
@@ -20,7 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_default_registry_seeds_claude_code() -> None:
     agent = DEFAULT_REGISTRY.get("claude_code")
-    assert agent.experiment_id == CLAUDE_CODE_EXPERIMENT_ID == "660599403165942"
+    assert agent.experiment_id == CLAUDE_CODE_EXPERIMENT_ID == "1301765275062543"
+    assert agent.reviewer_experiment_id == CLAUDE_CODE_REVIEWER_EXPERIMENT_ID
     assert DEFAULT_REGISTRY.names() == ["claude_code"]
     assert len(DEFAULT_REGISTRY) == 1
     assert [a.agent_name for a in DEFAULT_REGISTRY] == ["claude_code"]
@@ -49,10 +50,9 @@ def test_unknown_field_is_rejected() -> None:
 
 def test_agent_target_workspace_absent_is_none() -> None:
     # Optional at the model level: "not configured yet" is a clean None (a registry entry
-    # is valid before the executor is wired). The seed agent leaves it unset.
+    # is valid before the executor is wired).
     agent = Agent(agent_name="x", experiment_id="1")
     assert agent.target_workspace is None
-    assert DEFAULT_REGISTRY.get("claude_code").target_workspace is None
 
 
 def test_agent_target_workspace_present_is_carried() -> None:
@@ -83,8 +83,6 @@ def test_agent_goal_config_and_annotations_table_absent_are_none() -> None:
     agent = Agent(agent_name="x", experiment_id="1")
     assert agent.goal_config is None
     assert agent.annotations_table is None
-    assert DEFAULT_REGISTRY.get("claude_code").goal_config is None
-    assert DEFAULT_REGISTRY.get("claude_code").annotations_table is None
 
 
 def test_agent_goal_config_and_annotations_table_are_carried() -> None:
@@ -126,12 +124,11 @@ def test_agent_annotations_table_typo_is_loud() -> None:
         )
 
 
-def test_agent_cohort_uses_agent_tag_by_default() -> None:
+def test_agent_cohort_uses_whole_dedicated_experiment_by_default() -> None:
     cohort = DEFAULT_REGISTRY.get("claude_code").cohort()
     assert cohort.name == "claude_code"
-    # The cohort selects traces tagged ail.agent = claude_code.
-    flt = cohort.to_mlflow_filter()
-    assert flt == f"tags.`{TAG_AGENT}` = 'claude_code'"
+    assert cohort.tag_filter.clauses == ()
+    assert cohort.to_mlflow_filter() is None
 
 
 def test_agent_cohort_uses_tag_filter_when_set() -> None:

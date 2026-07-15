@@ -428,18 +428,26 @@ def create_matching_label_schema(
     configured workspace). Pass ``overwrite=True`` to replace an existing schema of
     this name.
     """
-    from mlflow.genai.label_schemas import create_label_schema
+    import mlflow
+    from mlflow.genai.label_schemas import InputCategorical, create_label_schema
+    from mlflow.utils.databricks_utils import is_databricks_uri
 
     display = _display_name(judge_name)
+    label_input = _label_input(scale)
+    schema_experiment_id = experiment_id
+    if is_databricks_uri(mlflow.get_tracking_uri()):
+        schema_experiment_id = None
+        if scale == "pass_fail":
+            label_input = InputCategorical(options=["pass", "fail"])
     return create_label_schema(
         name=judge_name,
         type="feedback",
-        input=_label_input(scale),
+        input=label_input,
         instruction=instruction or _default_label_instruction(display, scale),
         title=title or display,
         enable_comment=enable_comment,
         overwrite=overwrite,
-        experiment_id=experiment_id,
+        experiment_id=schema_experiment_id,
     )
 
 

@@ -36,7 +36,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ail.cohorts import TAG_AGENT, Cohort
+from ail.cohorts import Cohort, TagFilter
 
 __all__ = [
     "TAG_AGENT_VERSION",
@@ -44,12 +44,14 @@ __all__ = [
     "AgentRegistry",
     "DEFAULT_REGISTRY",
     "CLAUDE_CODE_EXPERIMENT_ID",
+    "CLAUDE_CODE_REVIEWER_EXPERIMENT_ID",
     "load_registry",
 ]
 
 #: The current Claude Code agent's dedicated MLflow experiment (the reference
 #: experiment this framework was built against).
-CLAUDE_CODE_EXPERIMENT_ID = "660599403165942"
+CLAUDE_CODE_EXPERIMENT_ID = "1301765275062543"
+CLAUDE_CODE_REVIEWER_EXPERIMENT_ID = "1301765275062544"
 
 #: Conventional tag key naming which *version* of an agent emitted a trace
 #: (e.g. ``ail.agent_version = v1-token-efficiency-skill``). Versions are the unit
@@ -105,6 +107,7 @@ class Agent(_Config):
 
     agent_name: str = Field(min_length=1)
     experiment_id: str = Field(min_length=1)
+    reviewer_experiment_id: str | None = None
     description: str = ""
     judge_config: dict[str, Any] | None = None
     goal_config: dict[str, Any] | None = None
@@ -116,13 +119,13 @@ class Agent(_Config):
         """The :class:`~ail.cohorts.Cohort` selecting this agent's traces.
 
         Uses :attr:`tag_filter` when set (AND'd equality clauses), otherwise the
-        ``ail.agent = <agent_name>`` convention. The cohort is identity only — a
-        downstream readiness/metrics step applies it to actual traces; an empty
-        match is the legitimate *collecting* state, not an error.
+        whole dedicated experiment. The cohort is identity only — a downstream
+        readiness/metrics step applies it to actual traces; an empty match is the
+        legitimate *collecting* state, not an error.
         """
         if self.tag_filter:
             return Cohort.from_tags(self.agent_name, dict(self.tag_filter))
-        return Cohort.from_tag(self.agent_name, TAG_AGENT, self.agent_name)
+        return Cohort(name=self.agent_name, tag_filter=TagFilter())
 
 
 class AgentRegistry(_Config):
@@ -170,7 +173,20 @@ DEFAULT_REGISTRY = AgentRegistry(
         Agent(
             agent_name="claude_code",
             experiment_id=CLAUDE_CODE_EXPERIMENT_ID,
+            reviewer_experiment_id=CLAUDE_CODE_REVIEWER_EXPERIMENT_ID,
             description="Claude Code CLI sessions (the reference agent).",
+            goal_config={
+                "objective_metric": "total_tokens",
+                "goal_direction": "minimize",
+                "goal_target": -0.30,
+                "goal_target_kind": "relative",
+                "guardrail_judge": [],
+            },
+            annotations_table=(
+                "austin_choi_omni_agent_catalog.mlflow_traces."
+                "claude_code_otel_annotations"
+            ),
+            target_workspace="/Users/austin.choi/PycharmProjects2/agent-improvement-loop",
         )
     ]
 )

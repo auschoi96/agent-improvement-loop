@@ -58,7 +58,8 @@ import argparse
 import os
 from functools import partial
 
-from ail.goals.compiler import CompiledGoal
+from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
+from ail.goals.compiler import CompiledGoal, GoalCompileError
 from ail.jobs import optimization_cycle as oc
 from ail.jobs.multi_agent import resolve_registered_agent
 from ail.jobs.publish_job import resolve_job_auth
@@ -283,7 +284,46 @@ def load_persisted_goal(args: argparse.Namespace) -> CompiledGoal | None:
         return None
 
 
-def resolve_goal(args: argparse.Namespace) -> tuple[CompiledGoal, str]:
+def _goal_from_registry(agent: Agent) -> CompiledGoal | None:
+    """Build the confirmed goal persisted on the registry row, if complete."""
+    config = agent.goal_config or {}
+    objective = str(config.get("objective_metric") or "").strip()
+    if not objective:
+        return None
+    from ail.goals.compiler import GoalTarget, Guardrail
+
+    raw_guardrails = config.get("guardrail_judge") or []
+    if isinstance(raw_guardrails, str):
+        raw_guardrails = [raw_guardrails]
+    guardrails: list[Guardrail] = []
+    for raw in raw_guardrails:
+        name, _, threshold = str(raw).partition(":")
+        if name.strip():
+            guardrails.append(
+                Guardrail(
+                    name=name.strip(),
+                    kind="judge",
+                    threshold=float(threshold) if threshold.strip() else None,
+                )
+            )
+    try:
+        return CompiledGoal(
+            objective_metric=objective,
+            direction=str(config.get("goal_direction") or "minimize"),
+            target=GoalTarget(
+                value=float(config.get("goal_target", -0.30)),
+                kind=str(config.get("goal_target_kind") or "relative"),
+            ),
+            guardrails=tuple(guardrails),
+            cohort=agent.agent_name,
+        ).confirm()
+    except (GoalCompileError, TypeError, ValueError):
+        return None
+
+
+def resolve_goal(
+    args: argparse.Namespace, *, agent: Agent | None = None
+) -> tuple[CompiledGoal, str]:
     """Resolve the goal the cycle runs, preferring the confirmed intake goal.
 
     Returns ``(goal, source)`` where ``source`` is ``"persisted-intake"`` when a
@@ -295,6 +335,10 @@ def resolve_goal(args: argparse.Namespace) -> tuple[CompiledGoal, str]:
     persisted = load_persisted_goal(args)
     if persisted is not None and persisted.human_confirmed:
         return persisted, "persisted-intake"
+    if agent is not None:
+        registered = _goal_from_registry(agent)
+        if registered is not None:
+            return registered, "uc-registry"
     return oc._build_goal(args), "cli-args"
 
 
@@ -352,6 +396,8 @@ def run(args: argparse.Namespace) -> int:
     **nothing** (it never clears the agent's slice on an unknown state, and never
     fabricates a proposal or a guessed experiment).
     """
+    if args.warehouse_id:
+        os.environ[TRACING_WAREHOUSE_ENV] = args.warehouse_id
     try:
         agent, experiment_source = resolve_planner_agent(args)
     except KeyError as exc:
@@ -361,7 +407,7 @@ def run(args: argparse.Namespace) -> int:
     # so a registry-resolved experiment (when --experiment was omitted) is what the cycle
     # actually runs against — not the None it started as.
     args.experiment = agent.experiment_id
-    goal, goal_source = resolve_goal(args)
+    goal, goal_source = resolve_goal(args, agent=agent)
 
     planner: Planner = (
         partial(agent_planner, model=args.planner_model) if args.planner_model else agent_planner

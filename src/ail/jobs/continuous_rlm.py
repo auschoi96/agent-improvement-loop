@@ -192,11 +192,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--max-reviews", type=int, default=2)
+    parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--sample-rate", type=float, default=0.10)
     parser.add_argument("--min-tokens", type=int, default=50_000)
     parser.add_argument("--reviewer-experiment", default="")
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument(
+        "--code-sandbox",
+        choices=["off", "auto"],
+        default="off",
+        help="HALO run_code sandbox mode. Scheduled serverless default is off because "
+        "trace-navigation tools provide the required evidence and Pyodide preparation "
+        "can block the batch; auto preserves HALO's normal local/manual behavior.",
+    )
     # goal-steering (same knobs reused by the local companion planner). Empty --objective-metric
     # => the default five-guideline rubric (no goal). The goal is used only to steer
     # the read-only review, so there is no confirmation gate.
@@ -247,6 +256,13 @@ def _run_rlm_for(
     marker all live in :func:`run_continuous_rlm` unchanged and are per-experiment, so
     one agent's pass never touches another's.
     """
+    if not reviewer_experiment:
+        print(
+            "[ail.jobs.continuous_rlm] reviewer_experiment_id is required; "
+            "refusing to emit framework traces into the subject experiment",
+            file=sys.stderr,
+        )
+        return 2
     rubric = _build_rubric(knobs)
     # Normalize the effort input HERE (the CLI/job boundary): empty / 'none' / 'auto'
     # mean "no override, auto-resolve" and must become None rather than a literal effort
@@ -272,6 +288,8 @@ def _run_rlm_for(
         temperature=args.temperature,
         reasoning_effort=reasoning_effort,
         retry_failed=True,
+        max_workers=args.max_workers,
+        enable_code_sandbox=args.code_sandbox == "auto",
     )
     print(
         "[ail.jobs.continuous_rlm] "
@@ -327,11 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_rlm_for(
             args,
             experiment=agent.experiment_id,
-            # The reviewer's own traces land in (and are skipped from) the agent's OWN
-            # experiment. In registry mode the global --reviewer-experiment is ignored
-            # (defense-in-depth: never let a global binding leak across agents; the yml
-            # already drops it).
-            reviewer_experiment=agent.experiment_id,
+            reviewer_experiment=agent.reviewer_experiment_id,
             # The agent's OWN goal_config is the SOLE goal source — no fallback to the
             # global args, so no cross-agent objective leak.
             knobs=_knobs_from_goal_config(agent.goal_config, cohort=agent.agent_name),

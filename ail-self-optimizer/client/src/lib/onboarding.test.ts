@@ -63,7 +63,7 @@ describe('stepValidation — fail-closed per step', () => {
 
   it('register step needs a non-empty agent name', () => {
     expect(canAdvance(stateAt('register', { agentName: '   ' }))).toBe(false);
-    expect(canAdvance(stateAt('register', { agentName: 'my_agent' }))).toBe(true);
+    expect(canAdvance(stateAt('register', { agentName: 'my_agent', reviewerExperimentId: 'review-exp' }))).toBe(true);
   });
 });
 

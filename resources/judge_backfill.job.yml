@@ -1,0 +1,41 @@
+resources:
+  jobs:
+    judge_backfill:
+      name: ail-judge-backfill
+      description: >-
+        Repairs MLflow judge coverage across every registered agent. Each firing scans
+        the full subject experiment, skips framework-internal traces and successful
+        existing assessments, evaluates only missing judge/trace pairs, and logs its
+        own model traces in the agent's isolated reviewer experiment.
+      tags:
+        project: agent-improvement-loop
+        tier: L2
+        managed_by: dab
+      schedule:
+        quartz_cron_expression: ${var.judge_backfill_cron}
+        timezone_id: ${var.schedule_timezone}
+        pause_status: ${var.judge_backfill_pause_status}
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      tasks:
+        - task_key: judge_backfill
+          environment_key: serverless
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-judge-backfill
+            named_parameters:
+              warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              max-evaluations: ${var.judge_backfill_max_evaluations}
+              max-workers: ${var.judge_backfill_max_workers}
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              - ../dist/*.whl
+              - databricks-agents>=1.11,<2

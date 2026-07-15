@@ -45,6 +45,8 @@ declare module "@databricks/appkit-ui/react" {
           /** @sqlType STRING */
           experiment_id: string;
           /** @sqlType STRING */
+          reviewer_experiment_id: string;
+          /** @sqlType STRING */
           description: string;
         }>;
       };

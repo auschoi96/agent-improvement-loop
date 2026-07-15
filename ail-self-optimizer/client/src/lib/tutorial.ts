@@ -109,12 +109,12 @@ export const TUTORIAL_STEPS: readonly TutorialStep[] = [
     title: 'Connect, don’t upload',
     tagline: 'The system improves only what it can measure',
     body: [
-      'There is no “upload your agent” button. You point the loop at the MLflow experiment your agent already logs to — via native autolog or OpenTelemetry — and it reads those traces read-only.',
+      'There is no “upload your agent” button. The onboarding wizard connects a new or empty MLflow experiment; it does not currently accept a populated existing experiment because that would mix prior traces into a new agent cohort. The loop reads traces via native autolog or OpenTelemetry.',
       'The optimizer improves only what it can measure, and it can only measure what has been traced. Give each agent its own experiment: that is how each gets its own judges and its own scoring.',
     ],
     points: [
       'Option 1 — native autolog (Claude Code, OpenAI, LangChain, DSPy, Codex).',
-      'Option 2 — OpenTelemetry: export live, or import a backlog.',
+      'Option 2 — OpenTelemetry: export live, or import a backlog through an MLflow-supported workflow; the current AIL UI does not upload OTEL files.',
       '0 traces → 0 trustworthy optimization. Until enough data exists the loop says “collecting — not ready yet” instead of a green number that isn’t real.',
     ],
   },

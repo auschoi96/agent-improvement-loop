@@ -108,13 +108,17 @@ queueing, and idempotency so it never re-reviews handled traces.
 |---|---|---|
 | `continuous_rlm_judge_model` | `databricks-gpt-5-5-pro` | HALO judge for the standalone job (most powerful viable) |
 | `continuous_rlm_reasoning_effort` | `''` (auto) | explicit effort override; empty / `none` / `auto` ⇒ auto-resolve (→ `xhigh`) |
-| `continuous_rlm_cron` | `0 0 */6 * * ?` | schedule (every 6h) |
+| `continuous_rlm_cron` | `0 */5 * * * ?` | schedule (every 5m) |
 | `continuous_rlm_pause_status` | `UNPAUSED` | `PAUSED` ⇒ deployed-but-dormant |
+| `continuous_rlm_timeout_seconds` | `7200` | hard bound per batch; queued firings continue unassessed traces |
 
-It reuses the shared `rlm_*` sampling knobs and the shared goal vars (`objective_metric`
-etc.), so by default it reviews toward the same user goal the local companion planner
-targets. Idempotency (`has_rlm_assessment`) keeps it from double-reviewing traces that
-already carry RLM feedback.
+It reuses the shared `rlm_*` sampling knobs. Registry mode reads each agent's own goal
+from `agent_registry`, so reviews target the same goal as the companion without leaking
+one agent's objective into another. Idempotency (`has_rlm_assessment`) prevents duplicate
+successful reviews; never-attempted traces are selected before failed retries. Scheduled
+serverless runs set `--code-sandbox=off`: HALO retains its trace-navigation and subagent
+tools but skips the optional Pyodide probe that is unavailable on this runtime. Manual
+runs can pass `--code-sandbox=auto` to restore HALO's normal sandbox discovery.
 
 ## Live smoke test
 

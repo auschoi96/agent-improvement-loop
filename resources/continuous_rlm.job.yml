@@ -25,7 +25,7 @@ resources:
       # one warehouse grant) with the other jobs. That identity needs CAN_USE on the
       # trace-store warehouse and read/write on the MLflow trace store.
 
-      # Scheduled cadence (default every 6h). This is deliberately a schedule, NOT a
+      # Scheduled cadence (default every five minutes). This is deliberately a schedule, NOT a
       # table_update trigger: the trace store is a VIEW (cc_trace_unified /
       # cc_trace_metadata), not a Delta table, so trace-arrival triggering is infeasible
       # (the reason the original standalone RLM trigger job was retired). Override
@@ -35,9 +35,12 @@ resources:
         timezone_id: ${var.schedule_timezone}
         pause_status: ${var.continuous_rlm_pause_status}
 
-      # Idempotent (already-reviewed traces are skipped; failed reviews are marked and
-      # never retried unboundedly). HALO is expensive; never overlap runs.
+      # Idempotent (successfully reviewed traces are skipped; never-attempted traces are
+      # processed before failed retries). HALO is expensive; never overlap runs. Queue
+      # scheduled firings so arrivals observed during a long batch are not dropped, and
+      # bound each batch so a hung reviewer cannot starve the queue forever.
       max_concurrent_runs: 1
+      timeout_seconds: ${var.continuous_rlm_timeout_seconds}
       queue:
         enabled: true
 
@@ -65,9 +68,14 @@ resources:
               # RLM sampling knobs (the existing ail.l3.continuous scheme; shared vars).
               max-results: ${var.rlm_max_results}
               max-reviews: ${var.rlm_max_reviews_per_run}
+              max-workers: ${var.rlm_max_workers}
               sample-rate: ${var.rlm_sample_rate}
               min-tokens: ${var.rlm_min_tokens}
               max-turns: ${var.rlm_max_turns}
+              # Pyodide run_code is optional. Serverless wheel-cache preparation is
+              # unavailable/slow here; keep HALO's trace-navigation + subagent tools
+              # and skip the sandbox probe so every firing starts reviewing promptly.
+              code-sandbox: 'off'
               # NO global goal-steering vars here. Registry mode steers each agent ONLY
               # by its OWN goal_config in agent_registry (an agent with none uses the
               # neutral default rubric — no goal). Passing a global objective-metric

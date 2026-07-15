@@ -60,7 +60,7 @@ from ail.judges.auto_align import (
     auto_align_scorers,
 )
 from ail.judges.labeling import DEFAULT_ANCHOR_FRACTION
-from ail.judges.registration import DEFAULT_SAMPLING_RATE
+from ail.judges.registration import DEFAULT_SAMPLING_RATE, list_registered_scorers
 from ail.judges.scorers import DEFAULT_SCORERS, ScorerSpec
 from ail.registry import Agent
 
@@ -241,6 +241,46 @@ def _resolve_scorers(names: str) -> dict[str, ScorerSpec]:
     return {n: DEFAULT_SCORERS[n] for n in wanted}
 
 
+def _registered_scorers_for(
+    experiment: str, requested: str, builtins: dict[str, ScorerSpec]
+) -> dict[str, ScorerSpec]:
+    """Add user-authored registered judges when ``--judges`` did not restrict the run."""
+    if requested.strip():
+        return builtins
+    resolved = dict(builtins)
+    try:
+        registered = list_registered_scorers(experiment)
+    except Exception as exc:  # noqa: BLE001 - discovery must not block built-in alignment
+        print(
+            "[ail.jobs.auto_align_job] could not discover registered scorers for "
+            f"experiment={experiment}; continuing with built-ins: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return resolved
+    for scorer in registered:
+        name = str(getattr(scorer, "name", "") or "")
+        if not name or name in resolved:
+            continue
+        instructions = str(getattr(scorer, "instructions", "") or "")
+        feedback_type = getattr(scorer, "feedback_value_type", None)
+        if "{{ trace }}" not in instructions or feedback_type is None:
+            print(
+                "[ail.jobs.auto_align_job] skipping non-trace or untyped registered "
+                f"scorer {name!r}"
+            )
+            continue
+        aggregations = getattr(scorer, "aggregations", None)
+        resolved[name] = ScorerSpec(
+            name=name,
+            instructions=instructions,
+            feedback_value_type=feedback_type,
+            description=str(getattr(scorer, "description", "") or name),
+            aggregations=tuple(aggregations) if aggregations else None,
+            auto_alignable=True,
+        )
+    return resolved
+
+
 def _align_for(
     args: argparse.Namespace,
     *,
@@ -261,9 +301,10 @@ def _align_for(
     so downstream MLflow config must NOT re-add a profile (which would re-open the
     v4-store per-request OAuth fallback — see :mod:`ail.jobs.publish_job`).
     """
+    active_scorers = _registered_scorers_for(experiment, args.judges, scorers)
     report = auto_align_scorers(
         experiment,
-        scorers=scorers,
+        scorers=active_scorers,
         config=config,
         optimizer=optimizer,
         model=args.model or None,

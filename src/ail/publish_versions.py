@@ -523,6 +523,7 @@ def build_phase2_version_bundle(
 REGISTRY_COLUMNS: list[str] = [
     "agent_name",
     "experiment_id",
+    "reviewer_experiment_id",
     "description",
     "judge_config_json",
     "tag_filter_json",
@@ -598,6 +599,7 @@ def _registry_row(agent: Agent, *, generated_at: str | None) -> list[Any]:
     return [
         agent.agent_name,
         agent.experiment_id,
+        agent.reviewer_experiment_id,
         agent.description,
         json.dumps(agent.judge_config) if agent.judge_config is not None else None,
         json.dumps(agent.tag_filter) if agent.tag_filter is not None else None,
@@ -703,6 +705,7 @@ def _ddl(catalog: str, schema: str) -> list[str]:
         f"""CREATE TABLE IF NOT EXISTS {fqn}.{REGISTRY_TABLE} (
             agent_name STRING,
             experiment_id STRING,
+            reviewer_experiment_id STRING,
             description STRING,
             judge_config_json STRING,
             tag_filter_json STRING,
@@ -870,6 +873,7 @@ def load_registered_agents_full(
             Agent(
                 agent_name=str(name),
                 experiment_id=str(exp),
+                reviewer_experiment_id=_str_or_none(row.get("reviewer_experiment_id")),
                 description="" if description is None else str(description),
                 judge_config=_json_or_none(row.get("judge_config_json")),
                 goal_config=_json_or_none(row.get("goal_config_json")),

@@ -1,8 +1,11 @@
 # Quick connect any agent
 
 The fastest way to use agent-improvement-loop is to wrap the callable that runs your
-agent. The wrapper records the agent run in MLflow when MLflow is installed and leaves
+agent. The wrapper records a root agent run in MLflow when MLflow is installed and leaves
 evaluation and optimization to the Databricks control plane.
+It does not automatically instrument every nested model/tool call inside an
+arbitrary callable; use the framework's native MLflow or OTEL integration when
+you need detailed child spans and token/tool accounting.
 
 ## Python
 
