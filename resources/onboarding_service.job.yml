@@ -13,8 +13,6 @@ resources:
       parameters:
         - name: request_id
           default: ''
-        - name: payload_base64
-          default: ''
       tasks:
         - task_key: onboard
           environment_key: serverless
@@ -23,7 +21,6 @@ resources:
             entry_point: ail-onboarding-job
             named_parameters:
               request-id: '{{job.parameters.request_id}}'
-              payload-base64: '{{job.parameters.payload_base64}}'
               warehouse-id: ${var.warehouse_id}
               catalog: ${var.catalog}
               schema: ${var.schema}
@@ -35,6 +32,7 @@ resources:
               # RLM job WAKES on the new agent's traces (its body already reviews every
               # registered agent). Best-effort: a reconcile failure never fails onboarding.
               rlm-job-id: ${resources.jobs.continuous_rlm.id}
+              judge-backfill-job-id: ${resources.jobs.judge_backfill.id}
               token-secret-scope: ${var.token_secret_scope}
               token-secret-key: ${var.token_secret_key}
       environments:
@@ -43,4 +41,4 @@ resources:
             environment_version: '3'
             dependencies:
               - ../dist/*.whl
-              - databricks-agents>=1.11,<2
+              - databricks-agents==1.11.0

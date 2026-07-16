@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from databricks.sdk.service.sql import StatementState
 
 from ail.onboarding.experiment import (
@@ -251,6 +253,22 @@ def test_requirements_surface_the_real_floors() -> None:
     assert accuracy.requires_labels is True
     assert any(gate.name == GateName.HUMAN_LABELS.value for gate in accuracy.gates)
     assert "20" in accuracy.summary
+
+
+def test_app_goal_catalog_artifact_matches_python_source_of_truth() -> None:
+    artifact = (
+        Path(__file__).parents[1] / "ail-self-optimizer/server/plugins/onboarding/goal-catalog.json"
+    )
+    assert json.loads(artifact.read_text()) == build_requirements([]).model_dump(mode="json")
+
+
+def test_app_label_floor_artifact_matches_python_source_of_truth() -> None:
+    app_config = yaml.safe_load(
+        (Path(__file__).parents[1] / "ail-self-optimizer/app.yaml").read_text()
+    )
+    env = {entry["name"]: entry.get("value") for entry in app_config["env"]}
+
+    assert int(env["AIL_LABEL_FLOOR"]) == build_requirements([]).thresholds.quality_min_labels
 
 
 def test_deterministic_goal_needs_traces_not_labels() -> None:
@@ -957,6 +975,12 @@ def test_confirm_authors_then_persists_with_human_target() -> None:
         log.append(("author", name))
         return object()
 
+    def _register_code_scorers(experiment_id: str, names: list[str]) -> list[str]:
+        assert experiment_id == "exp-1"
+        assert names == ["duration_seconds"]
+        order.append("register_code_scorers")
+        return names
+
     result = run_confirm_requirements(
         "correctness matters most; never hallucinate a tool call; keep latency low",
         objective_target=0.25,  # a maximize objective => positive relative target
@@ -966,14 +990,16 @@ def test_confirm_authors_then_persists_with_human_target() -> None:
         llm=_mock_llm(_THREE_DIMS),
         author=_author,
         persist=_persist,
+        deterministic_registrar=_register_code_scorers,
     )
     assert result.outcome is OnboardingOutcome.REQUIREMENTS_CONFIRMED
     assert result.objective_metric == "no_hallucinated_tool_calls"
     assert result.objective_target == 0.25
     # both quality dimensions authored (in plan order), then the goal persisted.
     assert result.authored_judges == ["no_hallucinated_tool_calls", "response_conciseness"]
+    assert result.registered_code_scorers == ["duration_seconds"]
     assert result.persisted is True
-    assert order == ["author", "author", "persist"]
+    assert order == ["register_code_scorers", "author", "author", "persist"]
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
@@ -1107,6 +1133,7 @@ def test_confirm_surfaces_goal_config_that_steers_the_rlm() -> None:
         llm=_mock_llm(_THREE_DIMS),
         author=_spy_author([]),
         persist=lambda _g: None,
+        deterministic_registrar=lambda _experiment_id, names: names,
     )
     assert result.outcome is OnboardingOutcome.REQUIREMENTS_CONFIRMED
     # The confirmed goal is surfaced in the registry goal_config shape...

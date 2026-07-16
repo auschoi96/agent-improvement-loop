@@ -233,6 +233,40 @@ def grant_warehouse_can_use(client: Any, warehouse_id: str, sp_id: str) -> None:
     )
 
 
+def grant_framework_schema_access(
+    client: Any, *, catalog: str, schema: str, sp_id: str
+) -> None:
+    """Merge the minimum UC privileges required by the App and framework jobs.
+
+    The dedicated framework schema contains only AIL-owned tables. ``SELECT`` is
+    required by the app/readers, ``MODIFY`` by governed request/event writers, and
+    ``CREATE_TABLE`` by idempotent writer/bootstrap DDL. The catalog/schema use
+    grants are explicit so this works even when account-wide inheritance is absent.
+    """
+    from databricks.sdk.service.catalog import PermissionsChange, Privilege, SecurableType
+
+    client.grants.update(
+        SecurableType.CATALOG,
+        catalog,
+        changes=[PermissionsChange(principal=sp_id, add=[Privilege.USE_CATALOG])],
+    )
+    client.grants.update(
+        SecurableType.SCHEMA,
+        f"{catalog}.{schema}",
+        changes=[
+            PermissionsChange(
+                principal=sp_id,
+                add=[
+                    Privilege.USE_SCHEMA,
+                    Privilege.SELECT,
+                    Privilege.MODIFY,
+                    Privilege.CREATE_TABLE,
+                ],
+            )
+        ],
+    )
+
+
 def bootstrap(
     *,
     experiment_id: str,
@@ -256,10 +290,9 @@ def bootstrap(
         warehouse_id: Existing warehouse to use. Required unless
             ``create_warehouse`` is true, so reusable deploys cannot accidentally
             create or fall back to a reference workspace.
-        framework_sp_id: Single framework SP to grant ``CAN_USE``; blank/``None``
-            => skip the grant (the app SP is already granted via the app's
-            resource declaration, and a job running as the deploying identity
-            needs no extra grant).
+        framework_sp_id: Single framework SP to grant warehouse ``CAN_USE`` and
+            least-privilege access to the dedicated UC schema; blank/``None``
+            skips both grants for a human/dev deployment.
         warehouse_name, cluster_size, auto_stop_mins: serverless-warehouse spec
             used only on the create path.
         catalog, schema: Unity Catalog location of the app's tables; the
@@ -323,8 +356,11 @@ def bootstrap(
 
     granted: str | None = None
     if framework_sp_id and framework_sp_id.strip():
-        grant_warehouse_can_use(client, resolved_id, framework_sp_id.strip())
         granted = framework_sp_id.strip()
+        grant_warehouse_can_use(client, resolved_id, granted)
+        grant_framework_schema_access(
+            client, catalog=catalog.strip(), schema=schema.strip(), sp_id=granted
+        )
 
     # set_env=False: this is a deploy-time bootstrap, not the in-process trace
     # read, so the persistent experiment tag is what matters — do not mutate the

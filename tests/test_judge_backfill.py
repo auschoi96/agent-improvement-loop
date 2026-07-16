@@ -155,6 +155,39 @@ def test_backfill_skips_internal_and_covered_pairs_then_evaluates_missing(
     assert report.n_failed == 0
 
 
+def test_discovered_backfill_scorers_exclude_custom_code_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ail.judges import registration
+
+    source = _Source([_trace("one")])
+    monkeypatch.setattr(backfill, "_configure_mlflow", lambda **_: None)
+    monkeypatch.setattr(
+        registration,
+        "list_registered_scorers",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(name="correctness", kind="instructions"),
+            SimpleNamespace(name="duration_seconds", kind="decorator"),
+        ],
+    )
+    evaluated: list[str] = []
+
+    def evaluate(trace: NormalizedTrace, scorer: Any) -> backfill.JudgeBackfillOutcome:
+        evaluated.append(scorer.name)
+        return backfill.JudgeBackfillOutcome(trace.trace_id, scorer.name, "evaluated")
+
+    monkeypatch.setattr(backfill, "_evaluate_one", evaluate)
+    backfill.run_judge_backfill(
+        "subject-exp",
+        reviewer_experiment_id="reviewer-exp",
+        source=source,
+        max_evaluations=10,
+        max_workers=1,
+    )
+
+    assert evaluated == ["correctness"]
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

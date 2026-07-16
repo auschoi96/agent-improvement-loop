@@ -93,7 +93,7 @@ describe('selectLabelingBridge', () => {
 
 type CreateCall = { location: string; traceId: string; body: unknown };
 interface FakeRestOpts {
-  scorers?: Array<{ name?: string }> | Error;
+  scorers?: Array<{ name?: string; serialized_scorer?: string }> | Error;
   traces?: Array<Record<string, unknown>> | Error;
   created?: { assessment_id?: string } | Error;
 }
@@ -147,7 +147,13 @@ const LABEL: LabelingAction = {
 interface DimResult {
   outcome: string;
   label_floor?: number;
-  dimensions?: Array<{ name: string; labels_so_far: number; label_floor?: number; remaining?: number; complete?: boolean }>;
+  dimensions?: Array<{
+    name: string;
+    labels_so_far: number;
+    label_floor?: number;
+    remaining?: number;
+    complete?: boolean;
+  }>;
   traces?: Array<{ trace_id: string; labeled: Record<string, boolean> }>;
   scanned?: number;
   error?: string;
@@ -182,6 +188,28 @@ describe('restLabelingBridge — dimensions (read) from judges + scanned traces'
     expect(traces[0]?.trace_id).toBe('trace:/cat.sch.pfx/tid1');
     expect(traces[0]?.labeled).toEqual({ correctness: true, modularity: false });
     expect(res.scanned).toBe(2);
+  });
+
+  it('excludes deterministic custom-code scorers from human labeling dimensions', async () => {
+    const fake = fakeRestClient({
+      scorers: [
+        { name: 'accuracy_and_correctness' },
+        {
+          name: 'duration_seconds',
+          serialized_scorer: JSON.stringify({
+            original_func_name: 'duration_seconds_scorer',
+            call_source: 'return 1.0',
+          }),
+        },
+      ],
+      traces: [traceInfo('tid1', [])],
+    });
+    const bridge = restLabelingBridge({ warehouseId: 'wh-1', clientFactory: () => fake.client });
+    const res = (await bridge(DIMS)) as DimResult;
+
+    expect(res.outcome).toBe('dimensions');
+    expect(res.dimensions?.map((dimension) => dimension.name)).toEqual(['accuracy_and_correctness']);
+    expect(res.traces?.[0]?.labeled).toEqual({ accuracy_and_correctness: false });
   });
 
   it('two-tier: with no floor relayed, omits label_floor entirely (never a hardcoded number)', async () => {
@@ -319,6 +347,36 @@ describe('restLabelingBridge — label (write) is name-matched, HUMAN, server-se
     expect(res.outcome).toBe('refused');
     expect(res.refused_reason).toMatch(/not a registered judge/);
     expect(fake.calls.createAssessment).toHaveLength(0);
+  });
+
+  it('appends an alignment event only after MLflow confirms the HUMAN assessment', async () => {
+    const fake = fakeRestClient({ scorers: [{ name: 'correctness' }], created: { assessment_id: 'a-1' } });
+    const events: unknown[] = [];
+    const bridge = restLabelingBridge({
+      warehouseId: 'wh-1',
+      clientFactory: () => fake.client,
+      eventSink: (event) => {
+        events.push(event);
+        return Promise.resolve();
+      },
+    });
+    const res = (await bridge(LABEL)) as WriteResult;
+    expect(res.outcome).toBe('labeled');
+    expect(events).toEqual([
+      expect.objectContaining({ experimentId: LABEL.experiment_id, assessmentId: 'a-1', judgeName: LABEL.name }),
+    ]);
+  });
+
+  it('keeps a confirmed label successful when event append defers to daily recovery', async () => {
+    const fake = fakeRestClient({ scorers: [{ name: 'correctness' }], created: { assessment_id: 'a-1' } });
+    const bridge = restLabelingBridge({
+      warehouseId: 'wh-1',
+      clientFactory: () => fake.client,
+      eventSink: () => Promise.reject(new Error('warehouse starting')),
+    });
+    const res = (await bridge(LABEL)) as WriteResult & { event_warning?: string };
+    expect(res.outcome).toBe('labeled');
+    expect(res.event_warning).toMatch(/daily|deferred|wake-up/i);
   });
 
   it('FAIL-CLOSED: a write with no returned assessment_id is an honest error, never a fabricated label', async () => {

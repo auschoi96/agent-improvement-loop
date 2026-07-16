@@ -18,8 +18,8 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "mlflow>=3.14,<4",
-    "databricks-sdk>=0.20",
+    "mlflow==3.14.*",
+    "databricks-sdk==0.120.*",
     # The L0 metrics output contract is a typed, stable, JSON-serializable schema
     # a downstream UI reads. pydantic v2 is the contract surface (already an
     # mlflow transitive dep; pinned here to make the dependency explicit).
@@ -44,6 +44,7 @@ ail-onboarding-job = "ail.jobs.onboarding_job:main"
 # warehouse, grant CAN_USE to the single framework SP, and tag the experiment with
 # the monitoring warehouse. Run as a workspace admin (see docs/DEPLOY.md).
 ail-bootstrap-grants = "ail.jobs.bootstrap_grants:main"
+ail-validate-run-as = "ail.jobs.validate_run_as:main"
 # Onboarding preflight: `ail-readiness <experiment_id>` prints, per data gate, how
 # far the experiment is from each readiness unlock. Reuses ail.readiness; prints no
 # fabricated "ready" and exits non-zero only on trace-store access failure.
@@ -117,13 +118,13 @@ ail-memory-distiller = "ail.memory.distiller:main"
 [project.optional-dependencies]
 # The Claude Code adapter drives the Claude Agent SDK. Optional so the ingest
 # seam + MLflow source install without pulling an agent runtime.
-claude = ["claude-agent-sdk>=0.1.39"]
+claude = ["claude-agent-sdk==0.2.114"]
 # Scheduled-scorer registration (src/ail/judges/registration.py) calls the
 # public mlflow.genai.scorers API, but that delegates to databricks-agents for a
 # Databricks backend. Optional + lazy so the core library (ingest, L0 metrics,
 # ground truth, judge construction) installs without this heavy dependency
 # (boto3/tiktoken/...); only operators registering scorers need it.
-agents = ["databricks-agents>=1.11,<2"]
+agents = ["databricks-agents==1.11.0"]
 # L3 recursive trace reviewer (src/ail/l3/) ADOPTS HALO (context-labs/halo, MIT)
 # as a dependency — the trace-specialized Recursive LM that reviews arbitrarily
 # large traces (this corpus reaches 943K tokens) without exceeding any single
@@ -131,7 +132,7 @@ agents = ["databricks-agents>=1.11,<2"]
 # importable without it (HALO pulls openai-agents, a pinned deno binary,
 # pandas/numpy); only L3 review needs it. HALO is a DEPENDENCY, never vendored —
 # see PROVENANCE.md / NOTICE.
-l3 = ["halo-engine>=0.1.26,<0.2"]
+l3 = ["halo-engine==0.1.27"]
 # MemAlign judge alignment (src/ail/judges/alignment.py) drives MLflow's
 # MemAlignOptimizer, which requires the dspy optimizer backend ("DSPy library is
 # required but not installed" without it). Optional + lazy-imported (inside
@@ -139,7 +140,7 @@ l3 = ["halo-engine>=0.1.26,<0.2"]
 # and CI run without dspy; only the judge-alignment cadence needs it. Lower bound
 # is the version verified end-to-end (import + build_memalign_optimizer); <4 caps
 # the major to guard against a future dspy API break under MLflow's MemAlign.
-align = ["dspy>=3.2.1,<4"]
+align = ["dspy==3.2.1"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

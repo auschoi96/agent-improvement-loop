@@ -1,18 +1,30 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { SidebarInset, SidebarProvider } from '@databricks/appkit-ui/react';
 import { AgentProvider } from './context/AgentContext';
 import { AppSidebar } from './shell/AppSidebar';
 import { TopBar } from './shell/TopBar';
-import { OverviewPage } from './pages/OverviewPage';
-import { ComparePage } from './pages/ComparePage';
-import { ApprovalsPage } from './pages/ApprovalsPage';
-import { LabelingPage } from './pages/LabelingPage';
-import { ActivityPage } from './pages/ActivityPage';
-import { LineagePage } from './pages/LineagePage';
-import { AddAgentPage } from './pages/AddAgentPage';
-import { HowItWorksPage } from './pages/HowItWorksPage';
 import { DEFAULT_PATH } from './lib/navigation';
 import { LiveRefreshBoundary } from './shell/LiveRefreshBoundary';
+
+const OverviewPage = lazy(() => import('./pages/OverviewPage').then((module) => ({ default: module.OverviewPage })));
+const ComparePage = lazy(() => import('./pages/ComparePage').then((module) => ({ default: module.ComparePage })));
+const ApprovalsPage = lazy(() => import('./pages/ApprovalsPage').then((module) => ({ default: module.ApprovalsPage })));
+const LabelingPage = lazy(() => import('./pages/LabelingPage').then((module) => ({ default: module.LabelingPage })));
+const ActivityPage = lazy(() => import('./pages/ActivityPage').then((module) => ({ default: module.ActivityPage })));
+const LineagePage = lazy(() => import('./pages/LineagePage').then((module) => ({ default: module.LineagePage })));
+const AddAgentPage = lazy(() => import('./pages/AddAgentPage').then((module) => ({ default: module.AddAgentPage })));
+const HowItWorksPage = lazy(() =>
+  import('./pages/HowItWorksPage').then((module) => ({ default: module.HowItWorksPage }))
+);
+
+function PageLoading() {
+  return (
+    <div className="rounded-md border p-6 text-sm text-muted-foreground" role="status" aria-live="polite">
+      Loading this view…
+    </div>
+  );
+}
 
 // The app shell: a left Sidebar (primary IA, active state from the route), a persistent
 // top bar (agent/experiment "project switcher" + global actions + honesty note), and a
@@ -30,18 +42,55 @@ export default function App() {
           <SidebarInset>
             <TopBar />
             <div className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8">
-              <Routes>
-                <Route path="/" element={<Navigate to={DEFAULT_PATH} replace />} />
-                <Route path="/overview" element={<LiveRefreshBoundary><OverviewPage /></LiveRefreshBoundary>} />
-                <Route path="/compare" element={<LiveRefreshBoundary><ComparePage /></LiveRefreshBoundary>} />
-                <Route path="/approvals" element={<LiveRefreshBoundary><ApprovalsPage /></LiveRefreshBoundary>} />
-                <Route path="/labeling" element={<LabelingPage />} />
-                <Route path="/activity" element={<LiveRefreshBoundary><ActivityPage /></LiveRefreshBoundary>} />
-                <Route path="/lineage" element={<LiveRefreshBoundary><LineagePage /></LiveRefreshBoundary>} />
-                <Route path="/add-agent" element={<AddAgentPage />} />
-                <Route path="/how-it-works" element={<HowItWorksPage />} />
-                <Route path="*" element={<Navigate to={DEFAULT_PATH} replace />} />
-              </Routes>
+              <Suspense fallback={<PageLoading />}>
+                <Routes>
+                  <Route path="/" element={<Navigate to={DEFAULT_PATH} replace />} />
+                  <Route
+                    path="/overview"
+                    element={
+                      <LiveRefreshBoundary>
+                        <OverviewPage />
+                      </LiveRefreshBoundary>
+                    }
+                  />
+                  <Route
+                    path="/compare"
+                    element={
+                      <LiveRefreshBoundary>
+                        <ComparePage />
+                      </LiveRefreshBoundary>
+                    }
+                  />
+                  <Route
+                    path="/approvals"
+                    element={
+                      <LiveRefreshBoundary>
+                        <ApprovalsPage />
+                      </LiveRefreshBoundary>
+                    }
+                  />
+                  <Route path="/labeling" element={<LabelingPage />} />
+                  <Route
+                    path="/activity"
+                    element={
+                      <LiveRefreshBoundary>
+                        <ActivityPage />
+                      </LiveRefreshBoundary>
+                    }
+                  />
+                  <Route
+                    path="/lineage"
+                    element={
+                      <LiveRefreshBoundary>
+                        <LineagePage />
+                      </LiveRefreshBoundary>
+                    }
+                  />
+                  <Route path="/add-agent" element={<AddAgentPage />} />
+                  <Route path="/how-it-works" element={<HowItWorksPage />} />
+                  <Route path="*" element={<Navigate to={DEFAULT_PATH} replace />} />
+                </Routes>
+              </Suspense>
             </div>
           </SidebarInset>
         </SidebarProvider>

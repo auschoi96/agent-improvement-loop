@@ -1,0 +1,165 @@
+{
+  "outcome": "requirements",
+  "thresholds": {
+    "baseline_min_traces": 10,
+    "prove_min_traces": 50,
+    "quality_min_labels": 20,
+    "scored_coverage_floor": 0.5
+  },
+  "catalog": [
+    {
+      "key": "token_efficiency",
+      "label": "Token efficiency",
+      "objective_metric": "total_tokens",
+      "scorer": "deterministic L0 (total_tokens) + optional judge (token_efficiency)",
+      "scorer_kind": "hybrid",
+      "requires_quality": false,
+      "guardrail_judges": [],
+      "optional_quality_judge": "token_efficiency",
+      "description": "Deterministic L0 token-reduction objective, correctness held. Hybrid: you may also enable the quality-per-token judge (needs labels).",
+      "requires_labels": false,
+      "gates": [
+        {
+          "name": "trace_baseline",
+          "label": "Traces to baseline",
+          "needed": "need 10 more trace(s) to baseline (have 0, need 10)",
+          "threshold": 10.0
+        },
+        {
+          "name": "trace_prove",
+          "label": "Traces to prove an improvement",
+          "needed": "need 50 more trace(s) for statistical power to prove improvement (have 0, need 50)",
+          "threshold": 50.0
+        },
+        {
+          "name": "frozen_suite",
+          "label": "Frozen Task Suite present",
+          "needed": "no frozen Task Suite to compare against",
+          "threshold": null
+        }
+      ],
+      "summary": "Needs traces to baseline (≥10), traces to prove an improvement (≥50), frozen task suite present."
+    },
+    {
+      "key": "latency",
+      "label": "Latency",
+      "objective_metric": "duration_seconds",
+      "scorer": "deterministic L0 (duration_seconds)",
+      "scorer_kind": "deterministic_l0",
+      "requires_quality": false,
+      "guardrail_judges": [],
+      "optional_quality_judge": null,
+      "description": "Deterministic L0 duration — measured exactly from the trace, no judge (a judge cannot measure latency better than the number).",
+      "requires_labels": false,
+      "gates": [
+        {
+          "name": "trace_baseline",
+          "label": "Traces to baseline",
+          "needed": "need 10 more trace(s) to baseline (have 0, need 10)",
+          "threshold": 10.0
+        },
+        {
+          "name": "trace_prove",
+          "label": "Traces to prove an improvement",
+          "needed": "need 50 more trace(s) for statistical power to prove improvement (have 0, need 50)",
+          "threshold": 50.0
+        },
+        {
+          "name": "frozen_suite",
+          "label": "Frozen Task Suite present",
+          "needed": "no frozen Task Suite to compare against",
+          "threshold": null
+        }
+      ],
+      "summary": "Needs traces to baseline (≥10), traces to prove an improvement (≥50), frozen task suite present."
+    },
+    {
+      "key": "accuracy",
+      "label": "Accuracy",
+      "objective_metric": "correctness",
+      "scorer": "MemAlign judge (correctness)",
+      "scorer_kind": "memalign_judge",
+      "requires_quality": true,
+      "guardrail_judges": ["correctness"],
+      "optional_quality_judge": null,
+      "description": "A human-calibrated MemAlign-aligned judge (correctness). Needs human labels to align the judge before any accuracy claim is trusted.",
+      "requires_labels": true,
+      "gates": [
+        {
+          "name": "trace_baseline",
+          "label": "Traces to baseline",
+          "needed": "need 10 more trace(s) to baseline (have 0, need 10)",
+          "threshold": 10.0
+        },
+        {
+          "name": "trace_prove",
+          "label": "Traces to prove an improvement",
+          "needed": "need 50 more trace(s) for statistical power to prove improvement (have 0, need 50)",
+          "threshold": 50.0
+        },
+        {
+          "name": "frozen_suite",
+          "label": "Frozen Task Suite present",
+          "needed": "no frozen Task Suite to compare against",
+          "threshold": null
+        },
+        {
+          "name": "human_labels",
+          "label": "Human labels to align the judge",
+          "needed": "need 20 more human label(s) to calibrate the judge (have 0, need 20)",
+          "threshold": 20.0
+        },
+        {
+          "name": "judge_trusted",
+          "label": "Judge measured & trusted",
+          "needed": "no measurement for required judge(s) correctness",
+          "threshold": null
+        },
+        {
+          "name": "scored_coverage",
+          "label": "Scored-coverage floor",
+          "needed": "scored-coverage 0% below floor 50%",
+          "threshold": 0.5
+        }
+      ],
+      "summary": "Needs traces to baseline (≥10), traces to prove an improvement (≥50), frozen task suite present, human labels to align the judge (≥20), judge measured & trusted, scored-coverage floor (≥50%)."
+    },
+    {
+      "key": "cost",
+      "label": "Cost",
+      "objective_metric": "total_usd",
+      "scorer": "deterministic L0 (total_usd)",
+      "scorer_kind": "deterministic_l0",
+      "requires_quality": false,
+      "guardrail_judges": [],
+      "optional_quality_judge": null,
+      "description": "Deterministic L0 estimated cost — measured from tokens, no judge (a judge cannot measure cost better than the number).",
+      "requires_labels": false,
+      "gates": [
+        {
+          "name": "trace_baseline",
+          "label": "Traces to baseline",
+          "needed": "need 10 more trace(s) to baseline (have 0, need 10)",
+          "threshold": 10.0
+        },
+        {
+          "name": "trace_prove",
+          "label": "Traces to prove an improvement",
+          "needed": "need 50 more trace(s) for statistical power to prove improvement (have 0, need 50)",
+          "threshold": 50.0
+        },
+        {
+          "name": "frozen_suite",
+          "label": "Frozen Task Suite present",
+          "needed": "no frozen Task Suite to compare against",
+          "threshold": null
+        }
+      ],
+      "summary": "Needs traces to baseline (≥10), traces to prove an improvement (≥50), frozen task suite present."
+    }
+  ],
+  "selected": [],
+  "union_gates": [],
+  "requires_labels": false,
+  "summary": ""
+}

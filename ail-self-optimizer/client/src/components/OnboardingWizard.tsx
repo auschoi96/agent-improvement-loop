@@ -99,7 +99,8 @@ export function OnboardingWizard({
   // on another serverless onboarding job or briefly shows the previous selection.
   useEffect(() => {
     let live = true;
-    postOnboardingJson<RequirementsResponse>(API.requirements, requirementsBody([]))
+    const controller = new AbortController();
+    postOnboardingJson<RequirementsResponse>(API.requirements, requirementsBody([]), { signal: controller.signal })
       .then(({ ok, status, body }) => {
         if (!live) return;
         if (!ok || body.outcome === 'error') {
@@ -111,9 +112,10 @@ export function OnboardingWizard({
         setReqError(null);
         setRequirements(body);
       })
-      .catch(() => live && setReqError('Network error loading goal requirements.'));
+      .catch(() => live && !controller.signal.aborted && setReqError('Network error loading goal requirements.'));
     return () => {
       live = false;
+      controller.abort();
     };
   }, []);
 
@@ -816,7 +818,7 @@ function RequirementsPlanPanel({
           {view.judgesToAuthor.join(', ') || 'none'}
         </div>
         <div>
-          <span className="text-foreground font-medium">Deterministic metrics:</span>{' '}
+          <span className="text-foreground font-medium">MLflow code scorers to register:</span>{' '}
           {view.deterministicMetrics.join(', ') || 'none'}
         </div>
       </div>

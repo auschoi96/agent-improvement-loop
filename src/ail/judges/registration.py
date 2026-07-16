@@ -63,6 +63,7 @@ __all__ = [
     "DEFAULT_SAMPLING_RATE",
     "ALIGNED_TAG_PREFIX",
     "ScorerRegistration",
+    "is_code_scorer",
     "create_aligned_scorer",
     "register_prealigned_scorer",
     "register_scorers",
@@ -80,6 +81,19 @@ DEFAULT_SAMPLING_RATE = 1.0
 #: :class:`~ail.judges.contract.AlignmentReport` and (queryably, best-effort) as
 #: an experiment tag ``ail.judge.<name>.aligned = "true" | "false"``.
 ALIGNED_TAG_PREFIX = "ail.judge."
+
+
+def is_code_scorer(scorer: object) -> bool:
+    """Whether a registered MLflow scorer is a custom ``@scorer`` function.
+
+    Code scorers are first-class production monitors, but they are not LLM judges:
+    they need no human label schema, MemAlign pass, or AIL judge backfill. Keeping
+    this distinction centralized prevents the Labeling page from asking people to
+    label exact latency/token/tool/cost measurements.
+    """
+    kind = getattr(scorer, "kind", None)
+    value = getattr(kind, "value", kind)
+    return str(value or "").strip().lower() == "decorator"
 
 
 def _require_databricks_agents() -> None:

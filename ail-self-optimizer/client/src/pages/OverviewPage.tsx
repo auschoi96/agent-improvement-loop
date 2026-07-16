@@ -7,7 +7,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-  DataTable,
+  Skeleton,
   Tabs,
   TabsContent,
   TabsList,
@@ -19,14 +19,14 @@ import { RequireAgent } from '../shell/RequireAgent';
 import { PanelBoundary } from '../shell/PanelBoundary';
 import { CorpusKpis } from '../components/CorpusKpis';
 import { BRAND_ACCENT } from '../lib/theme';
-import { useLiveRefreshRevision } from '../shell/live-refresh-context';
+import { RefreshableAnalyticsQuery } from '../components/RefreshableAnalyticsQuery';
+import { StableDataTable } from '../components/StableDataTable';
 
 // Overview — the L0 leaderboard, re-homed from the old single-scroll App. Headline
 // KPIs stay pinned at the top; the deeper diagnostics move into tabs so the surface no
 // longer dumps everything into one long scroll. Every panel keeps its exact query,
 // parameters, and ESTIMATE labeling — only the layout changed.
 function OverviewBody({ experimentId }: { experimentId: string }) {
-  const refreshRevision = useLiveRefreshRevision();
   // Memoize the shared :experiment_id binding so the per-agent queries don't refetch on
   // every render (AppKit parameter guidance).
   const expParams = useMemo(() => ({ experiment_id: sql.string(experimentId) }), [experimentId]);
@@ -34,7 +34,7 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
   return (
     <div className="space-y-6">
       <PanelBoundary title="Corpus summary failed to load">
-        <CorpusKpis key={`corpus-${refreshRevision}`} experimentId={experimentId} />
+        <CorpusKpis experimentId={experimentId} />
       </PanelBoundary>
 
       <Tabs defaultValue="tail" className="space-y-4">
@@ -52,15 +52,29 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
                 <CardDescription>Largest 15 sessions; the tail is where token spend lives.</CardDescription>
               </CardHeader>
               <CardContent>
-                <BarChart
-                  key={`session-token-bars-${refreshRevision}`}
-                  queryKey="session_token_bars"
-                  parameters={expParams}
-                  xKey="trace"
-                  yKey="total_tokens"
-                  colors={[BRAND_ACCENT]}
-                  height={320}
-                />
+                <RefreshableAnalyticsQuery queryKey="session_token_bars" parameters={expParams}>
+                  {({ data, loading, refreshing, error }) => (
+                    <div className="space-y-2">
+                      <div className="flex justify-end">
+                        {refreshing && <Badge variant="outline">Refreshing…</Badge>}
+                        {error && data && <Badge variant="outline">Refresh failed; showing prior data</Badge>}
+                      </div>
+                      {loading ? (
+                        <Skeleton className="h-80 w-full" />
+                      ) : error && !data ? (
+                        <p className="text-sm text-destructive">Error: {error}</p>
+                      ) : (
+                        <BarChart
+                          data={data ?? []}
+                          xKey="trace"
+                          yKey="total_tokens"
+                          colors={[BRAND_ACCENT]}
+                          height={320}
+                        />
+                      )}
+                    </div>
+                  )}
+                </RefreshableAnalyticsQuery>
               </CardContent>
             </Card>
 
@@ -75,8 +89,7 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <DataTable
-                  key={`high-token-sessions-${refreshRevision}`}
+                <StableDataTable
                   queryKey="high_token_sessions"
                   parameters={expParams}
                   filterColumn="model"
@@ -99,7 +112,7 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
                   <CardTitle>By model</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <DataTable key={`by-model-${refreshRevision}`} queryKey="by_model" parameters={expParams} />
+                  <StableDataTable queryKey="by_model" parameters={expParams} />
                 </CardContent>
               </Card>
               <Card className="shadow-sm">
@@ -107,7 +120,7 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
                   <CardTitle>By producer</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <DataTable key={`by-producer-${refreshRevision}`} queryKey="by_producer" parameters={expParams} />
+                  <StableDataTable queryKey="by_producer" parameters={expParams} />
                 </CardContent>
               </Card>
             </div>
@@ -128,12 +141,7 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <DataTable
-                    key={`tool-waste-shell-${refreshRevision}`}
-                    queryKey="tool_waste_shell"
-                    parameters={expParams}
-                    pageSize={10}
-                  />
+                  <StableDataTable queryKey="tool_waste_shell" parameters={expParams} pageSize={10} />
                 </CardContent>
               </Card>
               <Card className="shadow-sm">
@@ -142,12 +150,7 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
                   <CardDescription>Same file path read or edited repeatedly within a trace.</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <DataTable
-                    key={`tool-waste-files-${refreshRevision}`}
-                    queryKey="tool_waste_files"
-                    parameters={expParams}
-                    pageSize={10}
-                  />
+                  <StableDataTable queryKey="tool_waste_files" parameters={expParams} pageSize={10} />
                 </CardContent>
               </Card>
             </div>

@@ -464,6 +464,21 @@ class TestRunActionDispatch:
 
 
 class TestLiveWiringFailClosed:
+    def test_registered_dimensions_exclude_custom_code_scorers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ail.judges import registration
+
+        monkeypatch.setattr(
+            registration,
+            "list_registered_scorers",
+            lambda *_args, **_kwargs: [
+                SimpleNamespace(name="accuracy_and_correctness", kind="instructions"),
+                SimpleNamespace(name="duration_seconds", kind="decorator"),
+            ],
+        )
+        assert service._registered_judge_names("exp1", None) == ["accuracy_and_correctness"]
+
     def test_run_dimensions_requires_an_experiment_id(self) -> None:
         result = run_dimensions("   ")
         assert isinstance(result, ErrorResult)

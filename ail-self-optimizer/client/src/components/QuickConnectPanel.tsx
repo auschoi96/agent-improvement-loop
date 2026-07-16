@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -38,11 +38,24 @@ export function QuickConnectPanel({
   const [targetWorkspace, setTargetWorkspace] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<BootstrapResponse | null>(null);
+  const setupController = useRef<AbortController | null>(null);
+  const copyTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      setupController.current?.abort();
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    },
+    []
+  );
 
   const experimentId = result?.experiment_id;
   const snippet = `from ail import improve\n\nagent = improve(\n    name=${JSON.stringify(name || 'my-agent')},\n    run=my_agent,\n    objective=${JSON.stringify(objective)},${experimentId ? `\n    experiment_id=${JSON.stringify(experimentId)},` : ''}\n)\nresult = agent.run(task)`;
 
   async function setup() {
+    setupController.current?.abort();
+    const controller = new AbortController();
+    setupController.current = controller;
     setBusy(true);
     setResult(null);
     try {
@@ -52,21 +65,29 @@ export function QuickConnectPanel({
           agent_name: name.trim(),
           requirements_text: objective.trim(),
           ...(targetWorkspace.trim() ? { target_workspace: targetWorkspace.trim() } : {}),
-        }
+        },
+        { signal: controller.signal }
       );
+      if (controller.signal.aborted) return;
       setResult(body);
       if (ok && body.outcome === 'registered' && body.agent_name) onRegistered(body.agent_name);
     } catch {
+      if (controller.signal.aborted) return;
       setResult({ outcome: 'error', error: 'Network error while setting up the agent.' });
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
+      if (setupController.current === controller) setupController.current = null;
     }
   }
 
   async function copySnippet() {
     await navigator.clipboard?.writeText(snippet);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => {
+      copyTimer.current = null;
+      setCopied(false);
+    }, 1800);
   }
 
   return (
@@ -142,7 +163,7 @@ export function QuickConnectPanel({
                 {(result.authored_judges ?? []).join(', ') || 'none required'}.
               </>
             ) : (
-              result.error ?? 'Setup failed.'
+              (result.error ?? 'Setup failed.')
             )}
           </div>
         )}

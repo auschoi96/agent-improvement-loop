@@ -92,7 +92,8 @@ function RegisteredJobRuns() {
   // unavailable state rather than a fabricated run.
   useEffect(() => {
     let live = true;
-    fetch(ACTIVITY_ENDPOINT)
+    const controller = new AbortController();
+    fetch(ACTIVITY_ENDPOINT, { signal: controller.signal })
       .then(async (res) => {
         const body = (await res.json().catch(() => null)) as JobsActivityResult | null;
         if (!live) return;
@@ -104,13 +105,15 @@ function RegisteredJobRuns() {
         setResult(body);
         setStatus('loaded');
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!live) return;
+        if (error instanceof DOMException && error.name === 'AbortError') return;
         setErrorText('Job activity is unavailable (network error).');
         setStatus('error');
       });
     return () => {
       live = false;
+      controller.abort();
     };
   }, []);
 

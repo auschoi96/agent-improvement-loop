@@ -436,6 +436,15 @@ def create_matching_label_schema(
     label_input = _label_input(scale)
     schema_experiment_id = experiment_id
     if is_databricks_uri(mlflow.get_tracking_uri()):
+        # MLflow's Databricks label-schema path rejects ``experiment_id`` as a
+        # direct ``create_label_schema`` argument, then resolves the Review App
+        # from the *active* experiment internally.  Keep the caller's explicit
+        # target authoritative by activating it before taking that path.  Without
+        # this, app/job callers (which have no ambient notebook experiment) fail
+        # with "Please provide an experiment_id or run this code within an active
+        # experiment" even though onboarding supplied a validated experiment id.
+        if experiment_id:
+            mlflow.set_experiment(experiment_id=experiment_id)
         schema_experiment_id = None
         if scale == "pass_fail":
             label_input = InputCategorical(options=["pass", "fail"])

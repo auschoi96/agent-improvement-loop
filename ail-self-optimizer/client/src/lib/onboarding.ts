@@ -106,6 +106,7 @@ export interface RegisterResponse {
   agent_name?: string;
   experiment_id?: string;
   goals?: string[];
+  registered_code_scorers?: string[];
   refused_reason?: string | null;
   error?: string | null;
 }
@@ -160,6 +161,7 @@ export interface RequirementsConfirmResponse {
   objective_metric?: string;
   objective_target?: number | null;
   authored_judges?: string[];
+  registered_code_scorers?: string[];
   persisted?: boolean;
   // The confirmed goal, serialized by Python to the registry `goal_config` shape (the
   // keys the continuous-RLM lane reads). The wizard threads this onto the register
@@ -433,7 +435,7 @@ export function registerMessage(resp: RegisterResponse): ToneMessage {
     case 'registered':
       return {
         tone: 'success',
-        text: `Registered "${resp.agent_name}" — it now appears in the agent switcher.`,
+        text: `Registered "${resp.agent_name}" — it now appears in the agent switcher. MLflow code scorers: ${(resp.registered_code_scorers ?? []).join(', ') || 'none'}.`,
       };
     case 'refused':
       return {
@@ -597,8 +599,12 @@ export function confirmRequirementsMessage(resp: RequirementsConfirmResponse): T
   switch (resp.outcome) {
     case 'requirements_confirmed': {
       const judges = (resp.authored_judges ?? []).join(', ') || 'none';
+      const codeScorers = (resp.registered_code_scorers ?? []).join(', ') || 'none';
       const persisted = resp.persisted ? 'and the goal was persisted to the loop' : 'but the goal was NOT persisted';
-      return { tone: 'success', text: `Authored judges: ${judges} — ${persisted}.` };
+      return {
+        tone: 'success',
+        text: `Authored LLM judges: ${judges}. Registered MLflow code scorers: ${codeScorers} — ${persisted}.`,
+      };
     }
     case 'refused':
       return { tone: 'error', text: `Not confirmed — ${resp.refused_reason ?? 'a fail-closed check blocked it'}.` };

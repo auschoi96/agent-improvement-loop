@@ -26,7 +26,8 @@ reimplementing any:
 * ``confirm_requirements`` — re-derive the same plan from the requirements text,
   apply the human's explicit ``objective_target``, and **reuse**
   :func:`ail.requirements.execute_plan` to author the judges (via the existing
-  :func:`ail.judges.author_judge` path) and persist the confirmed goal (via
+  :func:`ail.judges.author_judge` path), register the exact dimensions as MLflow
+  custom code scorers, and persist the confirmed goal (via
   :func:`ail.requirements.compiled_goal_persister`). Fail-closed: ``execute_plan``
   refuses unless the plan is confirmed *and* the goal is ``human_confirmed``.
 
@@ -185,6 +186,7 @@ class RegisterResult(_Contract):
     experiment_id: str
     goals: list[str] = Field(default_factory=list)
     judge_config: dict[str, Any] | None = None
+    registered_code_scorers: list[str] = Field(default_factory=list)
     actor: str = ""
     refused_reason: str | None = None
     error: str | None = None
@@ -262,6 +264,7 @@ class RequirementsConfirmResult(_Contract):
     objective_metric: str = ""
     objective_target: float | None = None
     authored_judges: list[str] = Field(default_factory=list)
+    registered_code_scorers: list[str] = Field(default_factory=list)
     persisted: bool = False
     #: The confirmed goal serialized to the registry ``goal_config`` shape (the keys
     #: :func:`ail.jobs.continuous_rlm._knobs_from_goal_config` reads). The wizard threads
@@ -657,6 +660,7 @@ def run_confirm_requirements(
     llm: GoalProposerLLM | None = None,
     author: JudgeAuthor | None = None,
     persist: Callable[[CompiledGoal], None] | None = None,
+    deterministic_registrar: Callable[[str, list[str]], list[str]] | None = None,
     known_judges: Iterable[str] = (),
 ) -> RequirementsConfirmResult:
     """CONFIRM a free-form requirements intake — author judges + persist the goal.
@@ -665,8 +669,9 @@ def run_confirm_requirements(
     text + LLM), applies the human's explicit ``objective_target`` via
     :meth:`RequirementsPlan.confirm`, then **reuses** :func:`ail.requirements.execute_plan`
     to author one ``{{trace}}`` judge per quality dimension (via the existing
-    :func:`ail.judges.author_judge` path — ``author=None`` uses it) and persist the
-    confirmed goal (``persist=None`` builds the per-agent
+    :func:`ail.judges.author_judge` path — ``author=None`` uses it), register one
+    self-contained MLflow custom code scorer per deterministic dimension, and
+    persist the confirmed goal (``persist=None`` builds the per-agent
     :func:`ail.requirements.compiled_goal_persister`; tests inject spies).
 
     Fail-closed:
@@ -758,6 +763,18 @@ def run_confirm_requirements(
         proposer = llm if llm is not None else _default_databricks_proposer()
         plan = plan_requirements(text, resolved_cohort, llm=proposer, known_judges=known_judges)
         confirmed = plan.confirm(objective_target=objective_target)
+        metric_names = [d.metric for d in confirmed.deterministic_metrics if d.metric]
+        if deterministic_registrar is None:
+            from ail.metrics.mlflow_scorers import register_deterministic_scorers
+
+            registered_code_scorers = register_deterministic_scorers(
+                experiment_id.strip(),
+                metric_names,
+                profile=profile,
+                warehouse_id=warehouse_id or os.environ.get("DATABRICKS_WAREHOUSE_ID"),
+            )
+        else:
+            registered_code_scorers = deterministic_registrar(experiment_id.strip(), metric_names)
         execution = execute_plan(
             confirmed, experiment_id=experiment_id.strip(), author=author, persist=persist_fn
         )
@@ -774,6 +791,7 @@ def run_confirm_requirements(
         objective_metric=execution.goal.objective_metric,
         objective_target=objective_target,
         authored_judges=list(execution.authored_names),
+        registered_code_scorers=registered_code_scorers,
         persisted=execution.persisted,
         # Surface the confirmed goal in the registry goal_config shape so the wizard can
         # thread it onto the register_agent payload (confirm → register → RLM steers).
@@ -990,9 +1008,9 @@ def _ensure_baseline_judges(
     mlflow.set_experiment(experiment_id=experiment_id)
     if warehouse_id:
         mlflow.set_experiment_tag("mlflow.monitoring.sqlWarehouseId", warehouse_id)
-    schema_scope = {} if is_databricks_uri(mlflow.get_tracking_uri()) else {
-        "experiment_id": experiment_id
-    }
+    schema_scope = (
+        {} if is_databricks_uri(mlflow.get_tracking_uri()) else {"experiment_id": experiment_id}
+    )
     existing = {scorer.name for scorer in list_registered_scorers(experiment_id, profile=profile)}
     ensured: list[str] = []
     for name, spec in DEFAULT_SCORERS.items():
@@ -1237,6 +1255,26 @@ def run_register(
         existing = load_registered_agents(
             client=client, warehouse_id=wh, catalog=catalog, schema=schema
         )
+        from ail.goals.allowlist import is_l0_metric
+        from ail.metrics.mlflow_scorers import register_deterministic_scorers
+
+        deterministic_metrics: list[str] = []
+        for key in goal_keys:
+            try:
+                objective = GOAL_CATALOG[GoalKey(key)].objective_metric
+            except (KeyError, ValueError):
+                continue
+            if is_l0_metric(objective):
+                deterministic_metrics.append(objective)
+        configured_objective = (goal_config or {}).get("objective_metric")
+        if isinstance(configured_objective, str) and is_l0_metric(configured_objective):
+            deterministic_metrics.append(configured_objective)
+        registered_code_scorers = register_deterministic_scorers(
+            experiment_id.strip(),
+            deterministic_metrics,
+            profile=profile,
+            warehouse_id=wh,
+        )
         _ensure_baseline_judges(experiment_id.strip(), profile=profile, warehouse_id=wh)
         result = register_agent(
             agent_name=agent_name,
@@ -1253,6 +1291,7 @@ def run_register(
             annotations_table=annotations_table,
             target_workspace=target_workspace,
         )
+        result = result.model_copy(update={"registered_code_scorers": registered_code_scorers})
         if result.outcome is OnboardingOutcome.REGISTERED:
             # Add this agent's own *_otel_spans table to the arrival-triggered RLM
             # job's watched-table list so the job WAKES on the new agent's traces
@@ -1286,28 +1325,12 @@ def _reconcile_rlm_trigger_after_register(
     experiment_id: str,
     annotations_table: str | None,
 ) -> None:
-    """Best-effort: add the just-registered agent's spans table to the RLM trigger.
+    """Best-effort: add the agent's spans table to arrival-driven job triggers.
 
-    Reads the RLM job id from ``AIL_RLM_JOB_ID`` (set by the onboarding job from the
-    ``rlm_job_id`` bundle var). Absent/blank/non-numeric => skip quietly: a deploy that
-    did not wire the id simply keeps today's behavior (the agent is registered and the
-    cron jobs cover it), never a crash. Any Jobs API failure is caught and logged, never
-    propagated — reconciling the trigger is an optimization on top of an already-durable
-    registration, not part of the registration's success contract.
+    Reads the RLM and judge-backfill job ids wired by the onboarding resource.
+    Absent/blank/non-numeric ids skip quietly. Any Jobs API failure is logged and
+    swallowed because the daily recovery sweep still covers durable registrations.
     """
-    raw = (os.environ.get("AIL_RLM_JOB_ID") or "").strip()
-    if not raw:
-        return
-    try:
-        rlm_job_id = int(raw)
-    except ValueError:
-        print(
-            f"[ail.onboarding] AIL_RLM_JOB_ID={raw!r} is not an int; "
-            "skipping RLM trigger reconcile (agent is registered).",
-            file=sys.stderr,
-        )
-        return
-
     from ail.jobs.rlm_trigger import reconcile_rlm_trigger_tables
 
     agent = Agent(
@@ -1315,26 +1338,44 @@ def _reconcile_rlm_trigger_after_register(
         experiment_id=experiment_id,
         annotations_table=annotations_table,
     )
-    try:
-        result = reconcile_rlm_trigger_tables(client, rlm_job_id=rlm_job_id, agents=[agent])
-    except Exception as exc:  # noqa: BLE001 - reconcile is best-effort; never fail the registration
-        print(
-            f"[ail.onboarding] RLM trigger reconcile failed for agent={agent_name} "
-            f"(agent IS registered; deploy heal will retry): {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return
-    if result.updated:
-        print(
-            f"[ail.onboarding] RLM trigger now watches {', '.join(result.added)} "
-            f"for agent={agent_name}"
-        )
-    elif result.underivable:
-        print(
-            f"[ail.onboarding] agent={agent_name} has no derivable spans table "
-            "(no annotations_table); RLM trigger unchanged.",
-            file=sys.stderr,
-        )
+    trigger_jobs = (
+        ("RLM", "AIL_RLM_JOB_ID"),
+        ("judge backfill", "AIL_JUDGE_BACKFILL_JOB_ID"),
+    )
+    for label, env_name in trigger_jobs:
+        raw = (os.environ.get(env_name) or "").strip()
+        if not raw:
+            continue
+        try:
+            job_id = int(raw)
+        except ValueError:
+            print(
+                f"[ail.onboarding] {env_name}={raw!r} is not an int; "
+                f"skipping {label} trigger reconcile (agent is registered).",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            result = reconcile_rlm_trigger_tables(client, rlm_job_id=job_id, agents=[agent])
+        except Exception as exc:  # noqa: BLE001 - reconcile is best-effort
+            print(
+                f"[ail.onboarding] {label} trigger reconcile failed for agent={agent_name} "
+                "(agent IS registered; daily recovery still covers it): "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if result.updated:
+            print(
+                f"[ail.onboarding] {label} trigger now watches {', '.join(result.added)} "
+                f"for agent={agent_name}"
+            )
+        elif result.underivable:
+            print(
+                f"[ail.onboarding] agent={agent_name} has no derivable spans table "
+                f"(no annotations_table); {label} trigger unchanged.",
+                file=sys.stderr,
+            )
 
 
 def _claimed_experiments(

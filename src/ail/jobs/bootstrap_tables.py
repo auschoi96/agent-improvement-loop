@@ -45,6 +45,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ail.events import ALIGNMENT_EVENTS_TABLE, MEMORY_EVENTS_TABLE
+from ail.events import _ddl as _events_ddl
+from ail.jobs.onboarding_job import (
+    ONBOARDING_REQUESTS_TABLE,
+    ONBOARDING_RESULTS_TABLE,
+)
+from ail.jobs.onboarding_job import (
+    _ddl as _onboarding_ddl,
+)
 from ail.loop.publish_proposals import PROPOSALS_TABLE
 from ail.loop.publish_proposals import _ddl as _proposals_ddl
 from ail.memory.schema import MEMORY_TABLE, WATERMARK_TABLE
@@ -83,6 +92,8 @@ _DDL_PRODUCERS: tuple[Callable[[str, str], list[str]], ...] = (
     _proposals_ddl,  # agent_proposed_actions
     _memory_ddl,  # agent_memory, agent_memory_watermark (framework, not app-read)
     _compiled_goal_ddl,  # agent_compiled_goals (framework: intake->loop goal bridge)
+    _onboarding_ddl,  # governed async onboarding request/result transport
+    _events_ddl,  # append-only wake-up events for align + memory jobs
 )
 
 #: The exact set of tables the deployed app's ``config/queries/*.sql`` SELECT
@@ -118,7 +129,17 @@ APP_QUERY_TABLES: frozenset[str] = frozenset(
 #: :data:`~ail.requirements.persistence.COMPILED_GOAL_TABLE` is the intake→loop goal
 #: bridge — written by the confirmed-intake step, read by the optimization loop's
 #: goal-load, never ``SELECT``ed by AppKit typegen, so it too is a framework table.
-FRAMEWORK_TABLES: frozenset[str] = frozenset({MEMORY_TABLE, WATERMARK_TABLE, COMPILED_GOAL_TABLE})
+FRAMEWORK_TABLES: frozenset[str] = frozenset(
+    {
+        MEMORY_TABLE,
+        WATERMARK_TABLE,
+        COMPILED_GOAL_TABLE,
+        ONBOARDING_REQUESTS_TABLE,
+        ONBOARDING_RESULTS_TABLE,
+        ALIGNMENT_EVENTS_TABLE,
+        MEMORY_EVENTS_TABLE,
+    }
+)
 
 
 #: The ONLY statement shapes the bootstrap is ever allowed to execute against a

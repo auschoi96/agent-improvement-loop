@@ -36,6 +36,7 @@ import os
 import sys
 from typing import Any
 
+from ail.events import append_memory_event
 from ail.jobs.multi_agent import (
     load_registered_agents,
     missing_registry_target,
@@ -343,6 +344,18 @@ def _run_rlm_for(
             file=sys.stderr,
         )
         return 1
+    # Emit even when this retry finds no work: a prior run may have attached RLM
+    # assessments and then failed its event append. The downstream distiller is
+    # watermarked, so duplicate wake-ups never duplicate memory.
+    if args.catalog and args.schema:
+        append_memory_event(
+            experiment_id=experiment,
+            source="continuous_rlm",
+            source_id=str(knobs["cohort"]),
+            warehouse_id=args.warehouse_id,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
     return 0
 
 

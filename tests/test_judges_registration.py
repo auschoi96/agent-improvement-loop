@@ -67,6 +67,12 @@ class _Trace:
         self.info = type("Info", (), {"trace_id": trace_id})()
 
 
+def test_code_scorer_classification_is_distinct_from_llm_judges() -> None:
+    assert reg.is_code_scorer(type("S", (), {"kind": "decorator"})())
+    assert reg.is_code_scorer(type("S", (), {"kind": type("Kind", (), {"value": "decorator"})()})())
+    assert not reg.is_code_scorer(type("S", (), {"kind": "instructions"})())
+
+
 @pytest.fixture
 def offline(monkeypatch: pytest.MonkeyPatch) -> dict[str, _FakeScorer]:
     """Neutralize the backend so registration runs offline; return built judges."""

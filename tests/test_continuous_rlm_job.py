@@ -16,6 +16,11 @@ import ail.jobs.continuous_rlm as job
 from ail.l3.rubric import DEFAULT_RUBRIC
 
 
+@pytest.fixture(autouse=True)
+def no_live_event_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(job, "append_memory_event", lambda **kwargs: "event-test")
+
+
 @pytest.fixture
 def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     calls: dict[str, Any] = {}

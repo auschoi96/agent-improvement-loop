@@ -11,10 +11,14 @@ resources:
         project: agent-improvement-loop
         tier: L2
         managed_by: dab
-      schedule:
-        quartz_cron_expression: ${var.judge_backfill_cron}
-        timezone_id: ${var.schedule_timezone}
+      trigger:
         pause_status: ${var.judge_backfill_pause_status}
+        table_update:
+          table_names:
+            - ${var.catalog}.${var.trace_schema}.${var.agent_name}_otel_spans
+          condition: ANY_UPDATED
+          min_time_between_triggers_seconds: 60
+          wait_after_last_change_seconds: 61
       max_concurrent_runs: 1
       queue:
         enabled: true
@@ -38,4 +42,4 @@ resources:
             environment_version: '3'
             dependencies:
               - ../dist/*.whl
-              - databricks-agents>=1.11,<2
+              - databricks-agents==1.11.0

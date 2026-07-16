@@ -42,12 +42,12 @@ l3 = [
 
 [package.metadata]
 requires-dist = [
-    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.39" },
-    { name = "databricks-agents", marker = "extra == 'agents'", specifier = ">=1.11,<2" },
-    { name = "databricks-sdk", specifier = ">=0.20" },
-    { name = "dspy", marker = "extra == 'align'", specifier = ">=3.2.1,<4" },
-    { name = "halo-engine", marker = "extra == 'l3'", specifier = ">=0.1.26,<0.2" },
-    { name = "mlflow", specifier = ">=3.14,<4" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = "==0.2.114" },
+    { name = "databricks-agents", marker = "extra == 'agents'", specifier = "==1.11.0" },
+    { name = "databricks-sdk", specifier = "==0.120.*" },
+    { name = "dspy", marker = "extra == 'align'", specifier = "==3.2.1" },
+    { name = "halo-engine", marker = "extra == 'l3'", specifier = "==0.1.27" },
+    { name = "mlflow", specifier = "==3.14.*" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -541,20 +541,20 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.2.110"
+version = "0.2.114"
 source = { registry = "https://pypi-proxy.cloud.databricks.com/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
     { name = "sniffio" },
 ]
-sdist = { url = "https://pypi-proxy.cloud.databricks.com/packages/bb/98/8fdab35ed9e1a36bc7afab4d390cc5002094a4950996c079da9aa4541cc4/claude_agent_sdk-0.2.110.tar.gz", hash = "sha256:538b548bac07a22f65686abab063a902ac76ba35989d0f073c942f96248e9fa3", upload-time = "2026-06-24T22:11:52.342Z" }
+sdist = { url = "https://pypi-proxy.cloud.databricks.com/packages/c6/f3/a74b32b52f3c0013e317afe27b44946b9bbceb16b53c2a8d9614bfc0e7ad/claude_agent_sdk-0.2.114.tar.gz", hash = "sha256:53263a25bddd52b354ba2975b348cc978493bf29cb21a8c74a1b92b06f88faa3", upload-time = "2026-07-08T21:35:01.546Z" }
 wheels = [
-    { url = "https://pypi-proxy.cloud.databricks.com/packages/aa/93/29d4fdaa13e69034faf8d3503df915b07c820e2c08e3d6a7515149cde5bb/claude_agent_sdk-0.2.110-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fed0e0f4804d9f9cff80ab7d1b44142ebd1046cdd29ca74caef4c92c35fff8d8", upload-time = "2026-06-24T22:11:55.612Z" },
-    { url = "https://pypi-proxy.cloud.databricks.com/packages/aa/03/b40bb673cd93cdc3928262c1be75fde34a7bed4bf2c2c20e04218e2005ea/claude_agent_sdk-0.2.110-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:62b23869d46cef6f6ff1d00ceaa5e846e2f1d297478421c835efb8fe99369d4f", upload-time = "2026-06-24T22:11:59.149Z" },
-    { url = "https://pypi-proxy.cloud.databricks.com/packages/f9/18/ab67cb5ce641333385bed55ed8e9665c00f7d30d1f6ab12f8463ddb7695f/claude_agent_sdk-0.2.110-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:324e49553c6303d6b267217dc2912652b97af2bc96503efd12095ae915b46b83", upload-time = "2026-06-24T22:12:03.25Z" },
-    { url = "https://pypi-proxy.cloud.databricks.com/packages/91/88/3627d7d14310cfec66977551263e219365244a906fc7ca1209fb0c3a6cec/claude_agent_sdk-0.2.110-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:56371dd7a2c66c0bd497dc0b3cab4193a228b196f600676393d69c0ecee37cfb", upload-time = "2026-06-24T22:12:07.183Z" },
-    { url = "https://pypi-proxy.cloud.databricks.com/packages/49/79/c9066c5c387d42c19a4b675ec1ff5219f8920cfda8ff8b527119fd69b774/claude_agent_sdk-0.2.110-py3-none-win_amd64.whl", hash = "sha256:4235d4de6d685a189c12612095ab192b759280ede1f3aed0c3e784d52c3555f9", upload-time = "2026-06-24T22:12:11.283Z" },
+    { url = "https://pypi-proxy.cloud.databricks.com/packages/ba/57/ded5a6e02940b73775e8235cc69c3f1f9aca15871b73951ea184f26b68b7/claude_agent_sdk-0.2.114-py3-none-macosx_11_0_arm64.whl", hash = "sha256:5170a7cf8e5f30cdd59d60505b82e444abd655e8391e92e8390b1d539c100550", upload-time = "2026-07-08T21:35:05.659Z" },
+    { url = "https://pypi-proxy.cloud.databricks.com/packages/ea/ee/646435d91960e83cf6989d70adc6e9b47295a1e93bb1c2d7be366c8786c8/claude_agent_sdk-0.2.114-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:42b76e889d8219cf741789205adc9306b62524af205080362eb75b1bc09aa10b", upload-time = "2026-07-08T21:35:10.367Z" },
+    { url = "https://pypi-proxy.cloud.databricks.com/packages/38/d0/f0c5ced2a1dcf28ad0da9643d81e535e9fa7c9cf70c09ae7573429e4bcdf/claude_agent_sdk-0.2.114-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:f583f04a8d7db22b5dc826c135225199e99c46092e563492aa2a13d52b81e8ed", upload-time = "2026-07-08T21:35:15.18Z" },
+    { url = "https://pypi-proxy.cloud.databricks.com/packages/1d/7a/2dc6f13a153187ec4ca0a2fd76e7e20cd3fb43d72eb8e01401fd4ab7a335/claude_agent_sdk-0.2.114-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:a3ec58cfff233c70782437a900fb152ef971b92887e03b03d218266285ad387a", upload-time = "2026-07-08T21:35:20.331Z" },
+    { url = "https://pypi-proxy.cloud.databricks.com/packages/c9/25/3cc0ea8ff94bdbc28cd0da69d4d6b4bd382b6f7d182b94351a313d59ceac/claude_agent_sdk-0.2.114-py3-none-win_amd64.whl", hash = "sha256:60096c88ead0ff7f05ae5cf90d7a75e47a02cbc16a97d0c813bc0409cbb0e334", upload-time = "2026-07-08T21:35:25.45Z" },
 ]
 
 [[package]]
@@ -1305,7 +1305,7 @@ name = "gunicorn"
 version = "26.0.0"
 source = { registry = "https://pypi-proxy.cloud.databricks.com/simple" }
 dependencies = [
-    { name = "packaging" },
+    { name = "packaging", marker = "python_full_version < '3.12' or python_full_version >= '3.15' or sys_platform != 'win32'" },
 ]
 sdist = { url = "https://pypi-proxy.cloud.databricks.com/packages/6d/b7/a4a3f632f823e432ce6bc65f62961b7980c898c77f075a2f7118cb3846fe/gunicorn-26.0.0.tar.gz", hash = "sha256:ca9346f85e3a4aeeb64d491045c16b9a35647abd37ea15efe53080eb8b090baf", upload-time = "2026-05-05T06:38:25.529Z" }
 wheels = [

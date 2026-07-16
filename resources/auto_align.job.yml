@@ -3,7 +3,7 @@ resources:
     auto_align:
       name: ail-auto-align
       description: >-
-        L2 — the auto-align trigger. On a schedule, per judged dimension: count the
+        L2 — the auto-align trigger. On each alignment event, per judged dimension: count the
         HUMAN-sourced labels named for the judge, and once at least
         ${var.auto_align_label_floor} exist AND new labels have accrued since the
         last alignment (a per-judge experiment-tag watermark), align the judge with
@@ -25,15 +25,16 @@ resources:
       # identity needs CAN_USE on the trace-store warehouse and read on the MLflow
       # trace store (labels + traces), plus registration rights for scheduled scorers.
 
-      # Scheduled cadence (default daily 06:00). Deliberately a schedule, not a
-      # table_update trigger: the trace store is a VIEW (cc_trace_unified /
-      # cc_trace_metadata), not a Delta table, so a table-update trigger is
-      # infeasible — the same reason the optimization cycle is scheduled. Override
-      # auto_align_pause_status to PAUSED to keep it deployed-but-dormant.
-      schedule:
-        quartz_cron_expression: ${var.auto_align_cron}
-        timezone_id: ${var.schedule_timezone}
+      # Every confirmed HUMAN label appends to the governed alignment_events table.
+      # The per-judge watermark makes duplicate/coalesced firings idempotent.
+      trigger:
         pause_status: ${var.auto_align_pause_status}
+        table_update:
+          table_names:
+            - ${var.catalog}.${var.schema}.alignment_events
+          condition: ANY_UPDATED
+          min_time_between_triggers_seconds: 61
+          wait_after_last_change_seconds: 61
 
       # Idempotent by construction: the per-judge watermark skips a run with no new
       # labels, and a promoted judge is only re-registered when it clears the floor
@@ -93,6 +94,6 @@ resources:
               # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
               - ../dist/*.whl
               # Scheduled-scorer registration backend (pyproject `agents` extra).
-              - databricks-agents>=1.11,<2
+              - databricks-agents==1.11.0
               # MemAlign optimizer backend (pyproject `align` extra).
-              - dspy>=3.2.1,<4
+              - dspy==3.2.1

@@ -78,6 +78,16 @@ describe('all onboarding routes are fail-closed authenticated', () => {
 });
 
 describe('handleRequirements — the goal catalog + gate facts come from the engine', () => {
+  it('serves the generated complete catalog without starting a serverless job', async () => {
+    const { bridge, calls } = recordingBridge();
+    const { res, captured } = fakeRes();
+    await handleRequirements(req(AUTH, { goals: [] }), res, bridge);
+    expect(calls).toHaveLength(0);
+    expect(captured.code).toBe(200);
+    expect(captured.body).toMatchObject({ outcome: 'requirements', requires_labels: false });
+    expect((captured.body as { catalog: unknown[] }).catalog).toHaveLength(4);
+  });
+
   it('passes the selected goals + authenticated actor to the engine', async () => {
     const { bridge, calls } = recordingBridge({ outcome: 'requirements', requires_labels: true });
     const { res, captured } = fakeRes();
@@ -142,11 +152,7 @@ describe('handleCreateExperiment — fail-closed create', () => {
   it('forwards explicit idempotent reuse only for internal reviewer provisioning', async () => {
     const { bridge, calls } = recordingBridge({ outcome: 'created', experiment_id: 'review-exp' });
     const { res, captured } = fakeRes();
-    await handleCreateExperiment(
-      req(AUTH, { name: 'agent-ail-internal', allow_existing: true }),
-      res,
-      bridge
-    );
+    await handleCreateExperiment(req(AUTH, { name: 'agent-ail-internal', allow_existing: true }), res, bridge);
     expect(calls[0]).toMatchObject({
       action: 'create_experiment',
       name: 'agent-ail-internal',

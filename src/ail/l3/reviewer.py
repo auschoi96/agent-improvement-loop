@@ -92,7 +92,7 @@ def _prepare_halo_otel_compatibility() -> None:
         # annotations during import; ``Any`` preserves the runtime contract.
         from typing import Any
 
-        otel_types._ExtendedAttributes = Mapping[str, Any]  # type: ignore[attr-defined]
+        otel_types._ExtendedAttributes = Mapping[str, Any]
 
 
 @contextmanager
@@ -123,7 +123,7 @@ def _databricks_responses_compatibility(enabled: bool) -> Iterator[None]:
             payload["input"] = _normalize_databricks_responses_input(items)
         return payload
 
-    OpenAIResponsesModel._build_response_create_kwargs = patched  # type: ignore[method-assign]
+    OpenAIResponsesModel._build_response_create_kwargs = patched
     original_compact = compactor_module.compact
 
     async def responses_compact(*, client: Any, compaction_model: Any, item: Any) -> str:
@@ -142,7 +142,7 @@ def _databricks_responses_compatibility(enabled: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        OpenAIResponsesModel._build_response_create_kwargs = original  # type: ignore[method-assign]
+        OpenAIResponsesModel._build_response_create_kwargs = original
         compactor_module.compact = original_compact
         agent_context_module.compact = original_compact
 

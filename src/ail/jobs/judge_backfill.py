@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 
+from ail.events import append_memory_event
 from ail.jobs.multi_agent import (
     load_registered_agents,
     missing_registry_target,
@@ -63,6 +64,18 @@ def _run_for(args: argparse.Namespace, agent: Agent) -> int:
                 f"[ail.judge_backfill] {outcome.trace_id} {outcome.judge_name}: {outcome.error}",
                 file=sys.stderr,
             )
+    # Emit even for an idempotent no-op. If a prior run wrote assessments but its
+    # event append failed, the Jobs retry can still wake memory after coverage is
+    # already complete. The memory watermark makes redundant events cheap.
+    if args.catalog and args.schema:
+        append_memory_event(
+            experiment_id=agent.experiment_id,
+            source="judge_backfill",
+            source_id=agent.agent_name,
+            warehouse_id=args.warehouse_id,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
     return 1 if report.n_failed else 0
 
 

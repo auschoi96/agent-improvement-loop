@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import os
 from functools import partial
+from typing import Literal
 
 from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
 from ail.goals.compiler import CompiledGoal, GoalCompileError
@@ -292,6 +293,23 @@ def _goal_from_registry(agent: Agent) -> CompiledGoal | None:
         return None
     from ail.goals.compiler import GoalTarget, Guardrail
 
+    raw_direction = str(config.get("goal_direction") or "minimize")
+    direction: Literal["minimize", "maximize"]
+    if raw_direction == "minimize":
+        direction = "minimize"
+    elif raw_direction == "maximize":
+        direction = "maximize"
+    else:
+        return None
+    raw_target_kind = str(config.get("goal_target_kind") or "relative")
+    target_kind: Literal["relative", "absolute"]
+    if raw_target_kind == "relative":
+        target_kind = "relative"
+    elif raw_target_kind == "absolute":
+        target_kind = "absolute"
+    else:
+        return None
+
     raw_guardrails = config.get("guardrail_judge") or []
     if isinstance(raw_guardrails, str):
         raw_guardrails = [raw_guardrails]
@@ -309,10 +327,10 @@ def _goal_from_registry(agent: Agent) -> CompiledGoal | None:
     try:
         return CompiledGoal(
             objective_metric=objective,
-            direction=str(config.get("goal_direction") or "minimize"),
+            direction=direction,
             target=GoalTarget(
                 value=float(config.get("goal_target", -0.30)),
-                kind=str(config.get("goal_target_kind") or "relative"),
+                kind=target_kind,
             ),
             guardrails=tuple(guardrails),
             cohort=agent.agent_name,

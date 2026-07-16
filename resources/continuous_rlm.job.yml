@@ -105,4 +105,4 @@ resources:
               # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
               - ../dist/*.whl
               # HALO is optional for the core package; the RLM reviewer needs it.
-              - halo-engine>=0.1.26,<0.2
+              - halo-engine==0.1.27

@@ -276,6 +276,29 @@ class TestCreateMatchingLabelSchema:
         assert call["enable_comment"] is True
         assert call["experiment_id"] == "exp1"
 
+    def test_databricks_schema_activates_the_explicit_experiment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        captured_label_schemas: list[dict[str, Any]],
+    ) -> None:
+        import mlflow
+
+        activated: list[str] = []
+        monkeypatch.setattr(mlflow, "get_tracking_uri", lambda: "databricks")
+        monkeypatch.setattr(
+            mlflow,
+            "set_experiment",
+            lambda *, experiment_id: activated.append(experiment_id),
+        )
+
+        create_matching_label_schema("answer_helpfulness", experiment_id="exp-validated")
+
+        assert activated == ["exp-validated"]
+        (call,) = captured_label_schemas
+        # MLflow's Databricks API rejects the direct argument and looks up the
+        # Review App from the active experiment, which we set immediately above.
+        assert call["experiment_id"] is None
+
     def test_pass_fail_schema_uses_passfail_input(
         self, captured_label_schemas: list[dict[str, Any]]
     ) -> None:

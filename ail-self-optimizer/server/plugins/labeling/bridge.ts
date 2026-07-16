@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { WorkspaceClient } from '@databricks/sdk-experimental';
 
@@ -181,6 +182,10 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 // over the WorkspaceClient + the SQL warehouse id and hides the async search-poll flow.
 interface RestScorer {
   name?: string;
+  // JSON-serialized MLflow scorer. Decorator/custom-code scorers carry an
+  // `original_func_name` + `call_source`; LLM judges do not. The deployed
+  // labeling bridge uses this to avoid asking humans to label exact metrics.
+  serialized_scorer?: string;
 }
 interface RestAssessmentSource {
   source_type?: string;
@@ -237,11 +242,9 @@ export interface RestBridgeOptions {
   warehouseId?: string;
   /**
    * The label floor to surface (env: AIL_LABEL_FLOOR). Two-tier: this is a RELAY of the
-   * Python `ail.readiness.ReadinessThresholds.quality_min_labels`, NEVER a number
-   * authored here. When unset the result omits it and the client renders a neutral
-   * `—` (see client/src/lib/labeling.ts) — an honest missing value, never a fabricated
-   * floor. Deployers may set it from the engine (`python -c "import ail.readiness as r;
-   * print(r.ReadinessThresholds().quality_min_labels)"`) to light up the target.
+   * Python `ail.readiness.ReadinessThresholds.quality_min_labels`, never a number
+   * authored here. The deployed app validates the materialized engine value at startup;
+   * an unset local transport omits it and the client renders a neutral `—`.
    */
   labelFloor?: number;
   /** Recent traces to scan for progress + worklist (mirrors the engine scan limit). */
@@ -254,6 +257,47 @@ export interface RestBridgeOptions {
   searchPollMs?: number;
   /** Injectable client factory (tests pass a fake; default builds a WorkspaceClient). */
   clientFactory?: () => LabelingRestClient;
+  /** Injectable append-only alignment event sink (default: UC statement execution). */
+  eventSink?: (event: AlignmentEvent) => Promise<void>;
+}
+
+interface AlignmentEvent {
+  eventId: string;
+  experimentId: string;
+  traceId: string;
+  judgeName: string;
+  actor: string;
+  assessmentId: string;
+}
+
+const sqlQuote = (value: string): string => `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+
+async function appendAlignmentEvent(event: AlignmentEvent): Promise<void> {
+  const warehouseId = process.env.DATABRICKS_WAREHOUSE_ID;
+  const catalog = process.env.AIL_CATALOG;
+  const schema = process.env.AIL_SCHEMA;
+  if (!warehouseId || !catalog || !schema) {
+    throw new Error('alignment event storage is not configured');
+  }
+  const fqn = `\`${catalog}\`.\`${schema}\`.\`alignment_events\``;
+  const statement =
+    `INSERT INTO ${fqn} (event_id, experiment_id, source, source_id, actor, created_at) VALUES (` +
+    `${sqlQuote(event.eventId)}, ${sqlQuote(event.experimentId)}, 'human_label', ` +
+    `${sqlQuote(`${event.assessmentId}:${event.judgeName}:${event.traceId}`)}, ${sqlQuote(event.actor)}, ` +
+    'CAST(current_timestamp() AS STRING))';
+  const workspace = new WorkspaceClient({});
+  // A zero-second wait returns as soon as the warehouse accepts the durable
+  // statement, keeping rapid-fire labeling responsive while the insert finishes
+  // server-side. Immediate rejection is still surfaced as a recovery warning.
+  const response = await workspace.statementExecution.executeStatement({
+    warehouse_id: warehouseId,
+    statement,
+    wait_timeout: '0s',
+  });
+  const state = response.status?.state;
+  if (state && !['PENDING', 'RUNNING', 'SUCCEEDED'].includes(state)) {
+    throw new Error(response.status?.error?.message ?? `alignment event insert ${state}`);
+  }
 }
 
 function parseLabelFloor(raw: string | undefined): number | undefined {
@@ -342,6 +386,22 @@ async function listJudgeNames(client: LabelingRestClient, experimentId: string):
   const scorers = await client.listScorers(experimentId);
   const names: string[] = [];
   for (const s of scorers) {
+    if (s.serialized_scorer) {
+      try {
+        const serialized = JSON.parse(s.serialized_scorer) as {
+          original_func_name?: unknown;
+          call_source?: unknown;
+        };
+        const isCodeScorer =
+          typeof serialized.original_func_name === 'string' &&
+          serialized.original_func_name.trim() !== '' &&
+          typeof serialized.call_source === 'string' &&
+          serialized.call_source.trim() !== '';
+        if (isCodeScorer) continue;
+      } catch {
+        throw new Error(`registered scorer ${JSON.stringify(s.name ?? '')} has invalid serialized_scorer JSON`);
+      }
+    }
     if (s.name && !names.includes(s.name)) names.push(s.name);
   }
   return names;
@@ -551,6 +611,7 @@ async function runRestLabel(client: LabelingRestClient, input: LabelingAction): 
     name,
     value: cleanValue(value),
     labeler,
+    assessment_id: created.assessment_id,
   };
 }
 
@@ -670,6 +731,7 @@ export function restLabelingBridge(options: RestBridgeOptions = {}): LabelingBri
       }
       return adaptWorkspaceClient(new WorkspaceClient({}), { warehouseId, searchTimeoutMs, searchPollMs });
     });
+  const eventSink = options.eventSink ?? appendAlignmentEvent;
 
   return async (input: LabelingAction): Promise<LabelingResult> => {
     // Fail-closed dependency check: the v4 UC tracing endpoints require a warehouse id.
@@ -697,7 +759,15 @@ export function restLabelingBridge(options: RestBridgeOptions = {}): LabelingBri
     } catch (err) {
       const guidance = `deployed labeling unavailable — ${errText(err)} Use the MLflow Traces UI to label.`;
       return input.action === 'label'
-        ? { outcome: 'error', experiment_id: input.experiment_id, trace_id: input.trace_id ?? '', name: input.name ?? '', value: input.value, labeler: input.actor, error: guidance }
+        ? {
+            outcome: 'error',
+            experiment_id: input.experiment_id,
+            trace_id: input.trace_id ?? '',
+            name: input.name ?? '',
+            value: input.value,
+            labeler: input.actor,
+            error: guidance,
+          }
         : { outcome: 'error', error: guidance };
     }
 
@@ -705,7 +775,24 @@ export function restLabelingBridge(options: RestBridgeOptions = {}): LabelingBri
       return runRestDimensions(client, input, { labelFloor, scanLimit, worklistLimit });
     }
     if (input.action === 'label') {
-      return runRestLabel(client, input);
+      const result = await runRestLabel(client, input);
+      if (result.outcome === 'labeled') {
+        try {
+          await eventSink({
+            eventId: randomUUID(),
+            experimentId: input.experiment_id,
+            traceId: input.trace_id ?? '',
+            judgeName: input.name ?? '',
+            actor: input.actor,
+            assessmentId: String(result.assessment_id),
+          });
+        } catch (error) {
+          // The HUMAN assessment is already durable and must remain an honest
+          // success. The daily recovery sweep will align it if event append failed.
+          return { ...result, event_warning: `alignment wake-up deferred: ${errText(error)}` };
+        }
+      }
+      return result;
     }
     return { outcome: 'error', error: `unknown labeling action ${JSON.stringify(input.action)}` };
   };

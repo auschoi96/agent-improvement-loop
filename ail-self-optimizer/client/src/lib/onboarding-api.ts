@@ -1,18 +1,33 @@
 interface PendingOnboardingResponse {
   outcome?: string;
   request_id?: string;
-  run_id?: number;
 }
 
 interface OnboardingRequestOptions {
   fetchJson?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   wait?: (durationMs: number) => Promise<void>;
   now?: () => number;
+  signal?: AbortSignal;
 }
 
 const STATUS_URL = '/api/onboarding/status';
 const POLL_INTERVAL_MS = 3_000;
 const POLL_TIMEOUT_MS = 15 * 60_000;
+
+function abortableWait(durationMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException('Request aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Request aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, durationMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
@@ -30,22 +45,22 @@ export async function postOnboardingJson<T>(
   options: OnboardingRequestOptions = {}
 ): Promise<{ ok: boolean; status: number; body: T }> {
   const fetchJson = options.fetchJson ?? fetch;
-  const wait = options.wait ?? ((durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)));
+  const wait = options.wait ?? ((durationMs) => abortableWait(durationMs, options.signal));
   const now = options.now ?? Date.now;
 
   let response = await fetchJson(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
   let parsed = await responseBody<T>(response);
 
-  if (!(response.ok && parsed.outcome === 'pending' && parsed.request_id && parsed.run_id != null)) {
+  if (!(response.ok && parsed.outcome === 'pending' && parsed.request_id)) {
     return { ok: response.ok, status: response.status, body: parsed };
   }
 
   const requestId = parsed.request_id;
-  const runId = parsed.run_id;
   const deadline = now() + POLL_TIMEOUT_MS;
 
   while (now() < deadline) {
@@ -55,10 +70,12 @@ export async function postOnboardingJson<T>(
       response = await fetchJson(STATUS_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request_id: requestId, run_id: runId }),
+        body: JSON.stringify({ request_id: requestId }),
+        signal: options.signal,
       });
       parsed = await responseBody<T>(response);
-    } catch {
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
       continue;
     }
 

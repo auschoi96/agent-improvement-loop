@@ -123,14 +123,8 @@ variables:
   continuous_rlm_pause_status:
     description: UNPAUSED (the trace-arrival trigger is live) or PAUSED (deployed-but-dormant).
     default: UNPAUSED
-  auto_align_cron:
-    description: >-
-      Quartz cron for the auto-align trigger. A schedule, not a trace-arrival
-      trigger: the trace store is a VIEW (no table_update possible). Default is
-      every five minutes so a newly completed human-label batch aligns promptly.
-    default: '0 2/5 * * * ?'
   auto_align_pause_status:
-    description: UNPAUSED (the auto-align schedule is live) or PAUSED (deployed-but-dormant).
+    description: UNPAUSED (alignment-event trigger is live) or PAUSED (deployed-but-dormant).
     default: UNPAUSED
   auto_align_label_floor:
     description: >-
@@ -162,11 +156,8 @@ variables:
       Comma-separated judge names to auto-align (empty => all built-in scorers).
       A judge with fewer than auto_align_label_floor labels simply skips.
     default: ''
-  judge_backfill_cron:
-    description: Five-minute judge coverage repair cadence.
-    default: '0 1/5 * * * ?'
   judge_backfill_pause_status:
-    description: UNPAUSED keeps missing judge assessments converging to full coverage.
+    description: UNPAUSED keeps trace-arrival judge coverage repair live.
     default: UNPAUSED
   judge_backfill_max_evaluations:
     description: Maximum missing judge/trace pairs evaluated per firing.
@@ -207,14 +198,15 @@ variables:
       guideline rows. Plain SDK loop (not HALO), so Opus is fine. Verified served on
       dais-demo.
     default: databricks-claude-opus-4-6
-  memory_distiller_cron:
-    description: >-
-      Quartz cron for the distiller schedule (sec min hour day-of-month month
-      day-of-week). Default every fifteen minutes after RLM/MLflow assessments land.
-    default: '0 7/15 * * * ?'
   memory_distiller_pause_status:
     description: >-
       UNPAUSED (the default) or PAUSED for an intentional maintenance window.
+    default: UNPAUSED
+  recovery_sweep_cron:
+    description: Daily recovery sweep for missed judge, alignment, and memory events.
+    default: '0 30 6 * * ?'
+  recovery_sweep_pause_status:
+    description: UNPAUSED keeps the idempotent daily recovery safety net live.
     default: UNPAUSED
   memory_max_turns:
     description: HALO-free Claude Agent SDK max turns per distiller firing (keeps a run bounded).
@@ -249,19 +241,15 @@ variables:
     description: >-
       Application (client) id of the SINGLE framework service principal that all
       framework jobs (this publish job + future scheduled scorers / L3 / MemAlign)
-      run as, so ONE warehouse grant covers everything. Empty (the default) => jobs
-      run as the deploying identity, which is what the verification deploy and the
-      default `dais_demo` target use. Set this AND deploy the `dais_demo_sp` target
-      to run every job as the SP. Reuse the ail-self-optimizer App's auto-provisioned
-      SP here so the App and the jobs share one identity and one grant (see
-      docs/DEPLOY.md).
-    default: ''
+      run as, so ONE warehouse grant covers everything. Production is pinned to the
+      ail-self-optimizer App's auto-provisioned SP; dev remains the deploying user.
+    default: 93c501c8-4bb9-4faf-81f2-ccdfdf5b4a7a
   job_run_as:
     description: >-
       run_as identity applied to every job in this bundle (bundle-level run_as is
       the single knob that covers the publish job AND any future jobs added to
       resources/). Defaults to the deploying user so the verification deploy needs
-      no service principal; the `dais_demo_sp` target overrides it with
+      no service principal; the `prod` target overrides it with
       ${var.framework_sp_id}.
     type: complex
     default:
@@ -277,17 +265,25 @@ targets:
   # given at deploy time (e.g. --profile dais-demo). The host is intentionally not
   # hardcoded so the same bundle deploys to any workspace.
   #
-  # `dais_demo` (default): jobs run as the deploying identity (job_run_as default).
-  # Use this for the admin verification deploy — no service principal required.
+  # Development/validation target: jobs run as the deploying identity.
   dais_demo:
     default: true
+    mode: development
 
-  # `dais_demo_sp`: identical workspace, but every job runs as the single framework
-  # service principal. Deploy turnkey with the SP id as a plain string var, e.g.
-  #   databricks bundle deploy -t dais_demo_sp --var framework_sp_id=<app-sp-id> --profile dais-demo
-  # (Deploying this target without framework_sp_id fails fast with
-  # "run_as section must specify exactly one identity" — that guard is intentional.)
+  # Explicit production target: every job runs as the App service principal.
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      job_run_as:
+        service_principal_name: ${var.framework_sp_id}
+
+  # Backward-compatible alias for existing operator commands.
   dais_demo_sp:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
       job_run_as:
         service_principal_name: ${var.framework_sp_id}

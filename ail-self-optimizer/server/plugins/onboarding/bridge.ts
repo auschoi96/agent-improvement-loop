@@ -148,6 +148,12 @@ interface RunStateLike {
   state_message?: string;
 }
 
+interface StatementResponse {
+  statement_id?: string;
+  status?: { state?: string; error?: { message?: string } };
+  result?: { data_array?: string[][] };
+}
+
 export interface OnboardingJobClient {
   runNow(req: {
     job_id: number;
@@ -159,21 +165,17 @@ export interface OnboardingJobClient {
     tasks?: Array<{ run_id?: number }>;
   }>;
   getRunOutput(req: { run_id: number }): Promise<{ logs?: string }>;
-  executeStatement(req: { warehouse_id: string; statement: string; wait_timeout?: string }): Promise<{
-    statement_id?: string;
-    status?: { state?: string; error?: { message?: string } };
-    result?: { data_array?: string[][] };
-  }>;
-  getStatement(req: { statement_id: string }): Promise<{
-    statement_id?: string;
-    status?: { state?: string; error?: { message?: string } };
-    result?: { data_array?: string[][] };
-  }>;
+  executeStatement(req: { warehouse_id: string; statement: string; wait_timeout?: string }): Promise<StatementResponse>;
+  getStatement(req: { statement_id: string }): Promise<StatementResponse>;
 }
 
 const TERMINAL_STATES = new Set(['TERMINATED', 'SKIPPED', 'INTERNAL_ERROR']);
+const ONBOARDING_REQUESTS_TABLE = 'agent_onboarding_requests';
+const ONBOARDING_RESULTS_TABLE = 'agent_onboarding_results';
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+const quote = (value: string): string => `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+
+export class OnboardingRequestAccessError extends Error {}
 
 function onboardingClient(): OnboardingJobClient {
   const workspace = new WorkspaceClient({});
@@ -202,6 +204,107 @@ function resultFromTaskLogs(logs: string | undefined): OnboardingResult | null {
   return null;
 }
 
+async function runStatement(
+  client: OnboardingJobClient,
+  warehouseId: string,
+  statement: string
+): Promise<StatementResponse> {
+  let response = await client.executeStatement({ warehouse_id: warehouseId, statement, wait_timeout: '50s' });
+  const deadline = Date.now() + 60_000;
+  while (response.status?.state === 'PENDING' || response.status?.state === 'RUNNING') {
+    if (Date.now() >= deadline || !response.statement_id) throw new Error('onboarding SQL statement timed out');
+    await wait(1_000);
+    response = await client.getStatement({ statement_id: response.statement_id });
+  }
+  if (response.status?.state !== 'SUCCEEDED') {
+    throw new Error(
+      response.status?.error?.message ?? `onboarding SQL statement ${response.status?.state ?? 'failed'}`
+    );
+  }
+  return response;
+}
+
+function tableFqn(catalog: string, schema: string, table: string): string {
+  return `\`${catalog}\`.\`${schema}\`.\`${table}\``;
+}
+
+async function persistOnboardingRequest(
+  client: OnboardingJobClient,
+  requestId: string,
+  input: OnboardingAction,
+  warehouseId: string,
+  catalog: string,
+  schema: string
+): Promise<void> {
+  const requests = tableFqn(catalog, schema, ONBOARDING_REQUESTS_TABLE);
+  await runStatement(client, warehouseId, `CREATE SCHEMA IF NOT EXISTS \`${catalog}\`.\`${schema}\``);
+  await runStatement(
+    client,
+    warehouseId,
+    `CREATE TABLE IF NOT EXISTS ${requests} (` +
+      'request_id STRING, actor STRING, payload_json STRING, run_id BIGINT, ' +
+      'created_at STRING, expires_at STRING, consumed_at STRING) USING DELTA'
+  );
+  // Payloads contain user-authored requirements and paths. Redact them after one
+  // day and remove old ownership metadata after seven days; results follow the
+  // same seven-day bounded retention in the job adapter.
+  await runStatement(
+    client,
+    warehouseId,
+    `UPDATE ${requests} SET payload_json = NULL ` +
+      'WHERE payload_json IS NOT NULL AND CAST(expires_at AS TIMESTAMP) <= current_timestamp()'
+  );
+  await runStatement(
+    client,
+    warehouseId,
+    `DELETE FROM ${requests} WHERE CAST(created_at AS TIMESTAMP) < current_timestamp() - INTERVAL 7 DAYS`
+  );
+  await runStatement(
+    client,
+    warehouseId,
+    `INSERT INTO ${requests} (request_id, actor, payload_json, run_id, created_at, expires_at, consumed_at) ` +
+      `VALUES (${quote(requestId)}, ${quote(input.actor)}, ${quote(JSON.stringify(input))}, NULL, ` +
+      'CAST(current_timestamp() AS STRING), CAST(current_timestamp() + INTERVAL 1 DAY AS STRING), NULL)'
+  );
+}
+
+async function updateOnboardingRequest(
+  client: OnboardingJobClient,
+  requestId: string,
+  warehouseId: string,
+  catalog: string,
+  schema: string,
+  runId: number | null
+): Promise<void> {
+  const requests = tableFqn(catalog, schema, ONBOARDING_REQUESTS_TABLE);
+  const update =
+    runId === null ? 'payload_json = NULL, consumed_at = CAST(current_timestamp() AS STRING)' : `run_id = ${runId}`;
+  await runStatement(client, warehouseId, `UPDATE ${requests} SET ${update} WHERE request_id = ${quote(requestId)}`);
+}
+
+async function ownedRunId(
+  client: OnboardingJobClient,
+  requestId: string,
+  actor: string,
+  warehouseId: string,
+  catalog: string,
+  schema: string
+): Promise<number> {
+  const requests = tableFqn(catalog, schema, ONBOARDING_REQUESTS_TABLE);
+  const response = await runStatement(
+    client,
+    warehouseId,
+    `SELECT run_id FROM ${requests} WHERE request_id = ${quote(requestId)} AND actor = ${quote(actor)} ` +
+      'AND CAST(expires_at AS TIMESTAMP) > current_timestamp() LIMIT 1'
+  );
+  const raw = response.result?.data_array?.[0]?.[0];
+  const runId = Number(raw);
+  if (!raw || !Number.isFinite(runId)) {
+    throw new OnboardingRequestAccessError('onboarding request was not found, expired, or is owned by another user');
+  }
+  return runId;
+}
+
 async function readOnboardingResult(
   client: OnboardingJobClient,
   requestId: string,
@@ -210,20 +313,16 @@ async function readOnboardingResult(
   schema: string
 ): Promise<string | null> {
   const statement =
-    `SELECT result_json FROM \`${catalog}\`.\`${schema}\`.agent_onboarding_results ` +
+    `SELECT result_json FROM ${tableFqn(catalog, schema, ONBOARDING_RESULTS_TABLE)} ` +
     `WHERE request_id = ${quote(requestId)} ORDER BY recorded_at DESC LIMIT 1`;
-  let response = await client.executeStatement({ warehouse_id: warehouseId, statement, wait_timeout: '50s' });
-  const deadline = Date.now() + 60_000;
-  while (response.status?.state === 'PENDING' || response.status?.state === 'RUNNING') {
-    if (Date.now() >= deadline || !response.statement_id) return null;
-    await wait(1_000);
-    response = await client.getStatement({ statement_id: response.statement_id });
-  }
-  if (response.status?.state !== 'SUCCEEDED') {
-    const message = response.status?.error?.message ?? `onboarding result read ${response.status?.state ?? 'failed'}`;
+  let response: StatementResponse;
+  try {
+    response = await runStatement(client, warehouseId, statement);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'onboarding result read failed';
     const normalized = message.toLowerCase();
     if (normalized.includes('table_or_view_not_found') || normalized.includes('does not exist')) return null;
-    throw new Error(message);
+    throw error;
   }
   return response.result?.data_array?.[0]?.[0] ?? null;
 }
@@ -239,29 +338,40 @@ export function jobTriggerOnboardingBridge(client: OnboardingJobClient = onboard
       throw new Error('DATABRICKS_WAREHOUSE_ID, AIL_CATALOG, and AIL_SCHEMA are required for onboarding');
     }
     const requestId = randomUUID();
-    const payload = Buffer.from(JSON.stringify(input), 'utf8').toString('base64');
-    const started = await client.runNow({
-      job_id: jobId,
-      job_parameters: { request_id: requestId, payload_base64: payload },
-      idempotency_token: createHash('sha256').update(requestId).digest('hex'),
-    });
-    if (started.run_id == null) throw new Error(`onboarding job ${jobId} returned no run id`);
-    return { outcome: 'pending', request_id: requestId, run_id: started.run_id };
+    await persistOnboardingRequest(client, requestId, input, warehouseId, catalog, schema);
+    let started: { run_id?: number };
+    try {
+      started = await client.runNow({
+        job_id: jobId,
+        job_parameters: { request_id: requestId },
+        idempotency_token: createHash('sha256').update(requestId).digest('hex'),
+      });
+    } catch (error) {
+      await updateOnboardingRequest(client, requestId, warehouseId, catalog, schema, null).catch(() => {});
+      throw error;
+    }
+    if (started.run_id == null) {
+      await updateOnboardingRequest(client, requestId, warehouseId, catalog, schema, null).catch(() => {});
+      throw new Error(`onboarding job ${jobId} returned no run id`);
+    }
+    await updateOnboardingRequest(client, requestId, warehouseId, catalog, schema, started.run_id);
+    return { outcome: 'pending', request_id: requestId };
   };
 }
 
 export async function readJobOnboardingStatus(
   requestId: string,
-  runId: number,
+  actor: string,
   client: OnboardingJobClient = onboardingClient()
 ): Promise<OnboardingResult> {
   const warehouseId = process.env.DATABRICKS_WAREHOUSE_ID;
   const catalog = process.env.AIL_CATALOG;
   const schema = process.env.AIL_SCHEMA;
-  if (!requestId || !Number.isFinite(runId)) throw new Error('request_id and run_id are required');
+  if (!requestId || !actor) throw new Error('request_id and actor are required');
   if (!warehouseId || !catalog || !schema) {
     throw new Error('DATABRICKS_WAREHOUSE_ID, AIL_CATALOG, and AIL_SCHEMA are required for onboarding');
   }
+  const runId = await ownedRunId(client, requestId, actor, warehouseId, catalog, schema);
   const json = await readOnboardingResult(client, requestId, warehouseId, catalog, schema);
   if (json) return JSON.parse(json) as OnboardingResult;
   const run = await client.getRun({ run_id: runId });
@@ -283,14 +393,14 @@ export async function readJobOnboardingStatus(
           // unavailable, preserve the bounded pending behavior and retry both paths.
         }
       }
-      return { outcome: 'pending', request_id: requestId, run_id: runId };
+      return { outcome: 'pending', request_id: requestId };
     }
     return {
       outcome: 'error',
       error: `onboarding job ended ${lifecycle}/${run.state?.result_state ?? '—'}: ${run.state?.state_message ?? ''}`,
     };
   }
-  return { outcome: 'pending', request_id: requestId, run_id: runId };
+  return { outcome: 'pending', request_id: requestId };
 }
 
 // Transport selection — the subprocess transport for this slice. Kept as a function

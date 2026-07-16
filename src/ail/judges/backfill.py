@@ -292,9 +292,13 @@ def run_judge_backfill(
 
         source = MLflowTraceSource(profile=profile)
     if scorers is None:
-        from ail.judges.registration import list_registered_scorers
+        from ail.judges.registration import is_code_scorer, list_registered_scorers
 
-        scorers = list_registered_scorers(experiment_id, profile=profile)
+        scorers = [
+            scorer
+            for scorer in list_registered_scorers(experiment_id, profile=profile)
+            if not is_code_scorer(scorer)
+        ]
 
     traces = list(
         source.iter_traces(

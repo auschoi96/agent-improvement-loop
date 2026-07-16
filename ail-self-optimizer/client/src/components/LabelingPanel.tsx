@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Card,
   CardContent,
@@ -76,12 +76,14 @@ function DimensionsView({
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     async function load() {
       try {
         const res = await fetch(DIMENSIONS_ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ experiment_id: experimentId }),
+          signal: controller.signal,
         });
         const body = (await res.json().catch(() => ({}))) as DimensionsResponse;
         if (cancelled) return;
@@ -109,6 +111,7 @@ function DimensionsView({
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [experimentId]);
 
@@ -220,6 +223,16 @@ function TraceRow({
   const [rationale, setRationale] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ tone: LabelTone; text: string } | null>(null);
+  const submitController = useRef<AbortController | null>(null);
+  const reloadTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      submitController.current?.abort();
+      if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
+    },
+    []
+  );
 
   const dim = dimensions.find((d) => d.name === selected);
 
@@ -244,12 +257,16 @@ function TraceRow({
       setMessage({ tone: 'error', text: err instanceof Error ? err.message : String(err) });
       return;
     }
+    submitController.current?.abort();
+    const controller = new AbortController();
+    submitController.current = controller;
     setBusy(true);
     try {
       const res = await fetch(LABEL_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
+        signal: controller.signal,
       });
       const body = (await res.json().catch(() => ({}))) as LabelResponse;
       if (!res.ok && !body.outcome) {
@@ -260,12 +277,14 @@ function TraceRow({
       setMessage(msg);
       if (body.outcome === 'labeled') {
         // Give the reader a beat to see the confirmation, then refetch progress.
-        setTimeout(onLabeled, 600);
+        reloadTimer.current = window.setTimeout(onLabeled, 600);
       }
     } catch (err) {
+      if (controller.signal.aborted) return;
       setMessage({ tone: 'error', text: err instanceof Error ? err.message : 'Network error.' });
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
+      if (submitController.current === controller) submitController.current = null;
     }
   }
 

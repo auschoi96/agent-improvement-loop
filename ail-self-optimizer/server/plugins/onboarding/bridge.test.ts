@@ -83,11 +83,13 @@ const jobClient = (overrides: Partial<OnboardingJobClient> = {}): OnboardingJobC
   runNow: vi.fn().mockResolvedValue({ run_id: 41 }),
   getRun: vi.fn().mockResolvedValue({ state: { life_cycle_state: 'RUNNING' } }),
   getRunOutput: vi.fn().mockResolvedValue({}),
-  executeStatement: vi.fn().mockResolvedValue({
-    statement_id: 'stmt-1',
-    status: { state: 'SUCCEEDED' },
-    result: { data_array: [] },
-  }),
+  executeStatement: vi.fn().mockImplementation(({ statement }: { statement: string }) =>
+    Promise.resolve({
+      statement_id: 'stmt-1',
+      status: { state: 'SUCCEEDED' },
+      result: { data_array: statement.startsWith('SELECT run_id') ? [['41']] : [] },
+    })
+  ),
   getStatement: vi.fn().mockRejectedValue(new Error('not expected')),
   ...overrides,
 });
@@ -100,21 +102,47 @@ const configureJobTransport = (): void => {
 };
 
 describe('job onboarding transport', () => {
-  it('submits once and returns immediately with poll identifiers', async () => {
+  it('stores the governed payload and submits only an opaque request id', async () => {
     configureJobTransport();
     let submitted: Parameters<OnboardingJobClient['runNow']>[0] | undefined;
     const runNow: OnboardingJobClient['runNow'] = (request) => {
       submitted = request;
       return Promise.resolve({ run_id: 41 });
     };
-    const client = jobClient({ runNow });
+    const statements: string[] = [];
+    const executeStatement: OnboardingJobClient['executeStatement'] = (request) => {
+      statements.push(request.statement);
+      return Promise.resolve({
+        statement_id: 'stmt-1',
+        status: { state: 'SUCCEEDED' },
+        result: { data_array: [] },
+      });
+    };
+    const client = jobClient({ runNow, executeStatement });
     const result = await jobTriggerOnboardingBridge(client)(INPUT);
-    expect(result).toMatchObject({ outcome: 'pending', run_id: 41 });
+    expect(result).toMatchObject({ outcome: 'pending' });
     expect(result.request_id).toEqual(expect.any(String));
     expect(submitted?.job_id).toBe(123);
-    expect(JSON.parse(Buffer.from(submitted?.job_parameters.payload_base64 ?? '', 'base64').toString('utf8'))).toEqual(
-      INPUT
+    expect(submitted?.job_parameters).toEqual({ request_id: result.request_id });
+    expect(statements.some((statement) => statement.includes('INSERT INTO') && statement.includes(INPUT.actor))).toBe(
+      true
     );
+    expect(statements.every((statement) => !statement.includes('payload_base64'))).toBe(true);
+  });
+
+  it('redacts the governed payload when Lakeflow returns no run id', async () => {
+    configureJobTransport();
+    const statements: string[] = [];
+    const client = jobClient({
+      runNow: vi.fn().mockResolvedValue({}),
+      executeStatement: vi.fn().mockImplementation(({ statement }: { statement: string }) => {
+        statements.push(statement);
+        return Promise.resolve({ status: { state: 'SUCCEEDED' }, result: { data_array: [] } });
+      }),
+    });
+
+    await expect(jobTriggerOnboardingBridge(client)(INPUT)).rejects.toThrow(/no run id/);
+    expect(statements.some((statement) => statement.includes('SET payload_json = NULL'))).toBe(true);
   });
 
   it('returns the persisted result before consulting run state', async () => {
@@ -122,12 +150,18 @@ describe('job onboarding transport', () => {
     const getRun = vi.fn().mockResolvedValue({ state: { life_cycle_state: 'RUNNING' } });
     const client = jobClient({
       getRun,
-      executeStatement: vi.fn().mockResolvedValue({
-        status: { state: 'SUCCEEDED' },
-        result: { data_array: [[JSON.stringify({ outcome: 'registered', agent_name: 'agent-a' })]] },
-      }),
+      executeStatement: vi.fn().mockImplementation(({ statement }: { statement: string }) =>
+        Promise.resolve({
+          status: { state: 'SUCCEEDED' },
+          result: {
+            data_array: statement.startsWith('SELECT run_id')
+              ? [['41']]
+              : [[JSON.stringify({ outcome: 'registered', agent_name: 'agent-a' })]],
+          },
+        })
+      ),
     });
-    await expect(readJobOnboardingStatus('request-1', 41, client)).resolves.toEqual({
+    await expect(readJobOnboardingStatus('request-1', INPUT.actor, client)).resolves.toEqual({
       outcome: 'registered',
       agent_name: 'agent-a',
     });
@@ -137,10 +171,9 @@ describe('job onboarding transport', () => {
   it('stays pending while active and through a successful result-table visibility race', async () => {
     configureJobTransport();
     const active = jobClient();
-    await expect(readJobOnboardingStatus('request-1', 41, active)).resolves.toMatchObject({
+    await expect(readJobOnboardingStatus('request-1', INPUT.actor, active)).resolves.toMatchObject({
       outcome: 'pending',
       request_id: 'request-1',
-      run_id: 41,
     });
 
     const terminal = jobClient({
@@ -148,10 +181,9 @@ describe('job onboarding transport', () => {
         state: { life_cycle_state: 'TERMINATED', result_state: 'SUCCESS' },
       }),
     });
-    await expect(readJobOnboardingStatus('request-1', 41, terminal)).resolves.toMatchObject({
+    await expect(readJobOnboardingStatus('request-1', INPUT.actor, terminal)).resolves.toMatchObject({
       outcome: 'pending',
       request_id: 'request-1',
-      run_id: 41,
     });
   });
 
@@ -167,7 +199,7 @@ describe('job onboarding transport', () => {
       }),
     });
 
-    await expect(readJobOnboardingStatus('request-1', 41, client)).resolves.toEqual({
+    await expect(readJobOnboardingStatus('request-1', INPUT.actor, client)).resolves.toEqual({
       outcome: 'validated',
       experiment_id: 'exp-1',
       fresh: true,
@@ -182,9 +214,20 @@ describe('job onboarding transport', () => {
       }),
     });
 
-    await expect(readJobOnboardingStatus('request-1', 41, terminal)).resolves.toEqual({
+    await expect(readJobOnboardingStatus('request-1', INPUT.actor, terminal)).resolves.toEqual({
       outcome: 'error',
       error: 'onboarding job ended INTERNAL_ERROR/FAILED: boom',
     });
+  });
+
+  it('refuses status access when the authenticated actor does not own the request', async () => {
+    configureJobTransport();
+    const getRun = vi.fn().mockResolvedValue({ state: { life_cycle_state: 'RUNNING' } });
+    const client = jobClient({
+      getRun,
+      executeStatement: vi.fn().mockResolvedValue({ status: { state: 'SUCCEEDED' }, result: { data_array: [] } }),
+    });
+    await expect(readJobOnboardingStatus('request-1', 'attacker@example.com', client)).rejects.toThrow(/owned/);
+    expect(getRun).not.toHaveBeenCalled();
   });
 });

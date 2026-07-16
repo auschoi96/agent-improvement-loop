@@ -28,14 +28,16 @@ resources:
       # the warehouse, READ on the trace-store annotations table, and CREATE/MODIFY on
       # the memory schema. Do NOT set a per-job run_as here.
 
-      # DAILY off-peak (08:30 UTC, after the 07:00 L0 publish). A schedule, not a
-      # trace-arrival trigger: the trace store is a VIEW, so table_update is infeasible
-      # (same reason as the RLM job). Shipped PAUSED by default — unpause explicitly at
-      # deploy (the schedule-footgun lesson): do NOT ship it UNPAUSED.
-      schedule:
-        quartz_cron_expression: ${var.memory_distiller_cron}
-        timezone_id: ${var.schedule_timezone}
+      # RLM and judge backfill append memory_events after assessments are durable.
+      # The distiller watermark makes repeated/coalesced wake-ups idempotent.
+      trigger:
         pause_status: ${var.memory_distiller_pause_status}
+        table_update:
+          table_names:
+            - ${var.catalog}.${var.schema}.memory_events
+          condition: ANY_UPDATED
+          min_time_between_triggers_seconds: 60
+          wait_after_last_change_seconds: 61
 
       # Idempotent (watermark skips already-processed feedback); the distill run holds
       # a single minted OAuth bearer with no refresh, so never overlap runs and keep
@@ -93,7 +95,7 @@ resources:
               # File-relative: ../ reaches the bundle root where `uv build` writes dist/.
               - ../dist/*.whl
               # The Claude Agent SDK drives the in-process distillation query() loop.
-              - claude-agent-sdk>=0.1.39
+              - claude-agent-sdk==0.2.114
               # nest_asyncio lets the SDK's asyncio loop run inside the job runtime
               # (same as the reference agent).
               - nest_asyncio

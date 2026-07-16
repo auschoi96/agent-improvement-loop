@@ -424,10 +424,12 @@ describe('previewRequirementsMessage / confirmRequirementsMessage — honest ver
     const msg = confirmRequirementsMessage({
       outcome: 'requirements_confirmed',
       authored_judges: ['no_hallucinated_tool_calls', 'response_conciseness'],
+      registered_code_scorers: ['duration_seconds', 'total_tool_calls'],
       persisted: true,
     });
     expect(msg.tone).toBe('success');
     expect(msg.text).toMatch(/no_hallucinated_tool_calls/);
+    expect(msg.text).toMatch(/duration_seconds/);
     expect(msg.text).toMatch(/persisted/);
   });
 

@@ -1,0 +1,93 @@
+resources:
+  jobs:
+    recovery_sweep:
+      name: ail-daily-recovery-sweep
+      description: >-
+        Idempotent safety net for missed table-update events. Once daily, repair
+        judge coverage, reconcile human-label alignment watermarks, and drain any
+        assessments not yet consumed by advisory memory.
+      tags:
+        project: agent-improvement-loop
+        tier: recovery
+        managed_by: dab
+      schedule:
+        quartz_cron_expression: ${var.recovery_sweep_cron}
+        timezone_id: ${var.schedule_timezone}
+        pause_status: ${var.recovery_sweep_pause_status}
+      max_concurrent_runs: 1
+      queue:
+        enabled: false
+      tasks:
+        - task_key: recover_judge_coverage
+          environment_key: judge
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-judge-backfill
+            named_parameters:
+              warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              max-evaluations: ${var.judge_backfill_max_evaluations}
+              max-workers: ${var.judge_backfill_max_workers}
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+
+        - task_key: recover_alignment
+          environment_key: alignment
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-auto-align
+            named_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              warehouse-id: ${var.warehouse_id}
+              judges: ${var.auto_align_judges}
+              label-floor: ${var.auto_align_label_floor}
+              agreement-floor: ${var.auto_align_agreement_floor}
+              min-anchor-samples: ${var.auto_align_min_anchor_samples}
+              numeric-tolerance: ${var.auto_align_numeric_tolerance}
+              sampling-rate: ${var.auto_align_sampling_rate}
+              model: ${var.auto_align_judge_model}
+              reflection-lm: ${var.auto_align_reflection_lm}
+              embedding-model: ${var.auto_align_embedding_model}
+              embedding-dim: ${var.auto_align_embedding_dim}
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+
+        - task_key: recover_memory
+          environment_key: memory
+          spark_python_task:
+            python_file: ../src/ail/jobs/memory_distiller.py
+            parameters:
+              - --warehouse-id=${var.warehouse_id}
+              - --catalog=${var.catalog}
+              - --schema=${var.schema}
+              - --model=${var.memory_distiller_model}
+              - --max-turns=${var.memory_max_turns}
+              - --max-assessments=${var.memory_max_assessments}
+              - --task-suite-version=${var.memory_task_suite_version}
+              - --groundtruth-root=${var.memory_groundtruth_root}
+              - --token-secret-scope=${var.token_secret_scope}
+              - --token-secret-key=${var.token_secret_key}
+
+      environments:
+        - environment_key: judge
+          spec:
+            environment_version: '3'
+            dependencies:
+              - ../dist/*.whl
+              - databricks-agents==1.11.0
+        - environment_key: alignment
+          spec:
+            environment_version: '3'
+            dependencies:
+              - ../dist/*.whl
+              - databricks-agents==1.11.0
+              - dspy==3.2.1
+        - environment_key: memory
+          spec:
+            environment_version: '3'
+            dependencies:
+              - ../dist/*.whl
+              - claude-agent-sdk==0.2.114
+              - nest_asyncio

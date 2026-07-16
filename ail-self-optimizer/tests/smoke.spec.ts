@@ -71,6 +71,29 @@ test('background agent polling keeps the active overview mounted', async ({ page
   expect(await originalTabList!.evaluate((node) => node.isConnected)).toBe(true);
 });
 
+test('scheduled refresh retains visible overview data and tab state for 65 seconds', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/overview?agent=claude_code');
+
+  const tracesLabel = page.getByText('Traces', { exact: true });
+  await expect(tracesLabel).toBeVisible({ timeout: 30_000 });
+  const tracesNode = await tracesLabel.elementHandle();
+  expect(tracesNode).not.toBeNull();
+
+  const toolWasteTab = page.getByRole('tab', { name: 'Tool waste' });
+  await toolWasteTab.click();
+  await expect(toolWasteTab).toHaveAttribute('aria-selected', 'true');
+
+  // Cross the production boundary's 60-second first refresh and leave enough
+  // time for the replacement queries to settle. Retained data and local tab state
+  // must stay mounted throughout the refresh cycle.
+  await page.waitForTimeout(65_000);
+
+  expect(await tracesNode!.evaluate((node) => node.isConnected)).toBe(true);
+  await expect(tracesLabel).toBeVisible();
+  await expect(toolWasteTab).toHaveAttribute('aria-selected', 'true');
+});
+
 test('switching the agent experiment replaces every experiment-scoped view', async ({ page }) => {
   test.setTimeout(180_000);
   await page.setExtraHTTPHeaders({ 'x-forwarded-email': 'smoke-test@databricks.com' });
@@ -91,6 +114,40 @@ test('switching the agent experiment replaces every experiment-scoped view', asy
       ],
     })}\n\n`;
     await route.fulfill({ status: 200, contentType: 'text/event-stream', body });
+  });
+
+  await page.route('**/api/analytics/query/version_comparisons', async (route) => {
+    const data =
+      selectedExperiment === legacyExperiment
+        ? [
+            {
+              baseline_version: 'v0-baseline-no-skill',
+              candidate_version: 'v1-token-efficiency-skill',
+              objective_metric: 'total_tokens',
+              status: 'READY_TO_PROVE',
+              readiness_tier: 'READY_TO_PROVE',
+              can_prove_improvement: true,
+              trace_count: 100,
+              frozen_suite_present: true,
+              n_promote: 1,
+              n_block: 0,
+              n_errored: 0,
+              correctness_held: true,
+              proof_source: 'frozen_suite',
+              headline_metric: 'total_tokens',
+              headline_baseline: 100,
+              headline_candidate: 80,
+              headline_delta_pct: -0.2,
+              headline_improved: true,
+              reasons: '',
+            },
+          ]
+        : [];
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: `data: ${JSON.stringify({ type: 'result', data })}\n\n`,
+    });
   });
 
   await page.addInitScript(() => {
@@ -157,6 +214,7 @@ test.beforeEach(async ({ page }) => {
   consoleErrors = [];
   pageErrors = [];
   failedRequests = [];
+  await page.setExtraHTTPHeaders({ 'x-forwarded-email': 'smoke-test@databricks.com' });
 
   testArtifactsDir = join(process.cwd(), '.smoke-test');
   mkdirSync(testArtifactsDir, { recursive: true });

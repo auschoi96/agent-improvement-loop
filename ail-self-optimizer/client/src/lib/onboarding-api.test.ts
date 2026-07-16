@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { postOnboardingJson } from './onboarding-api';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -9,10 +9,12 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe('postOnboardingJson', () => {
+  afterEach(() => vi.useRealTimers());
+
   it('recovers when a status poll has a transient network failure', async () => {
     const fetchJson = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ outcome: 'pending', request_id: 'req-1', run_id: 42 }))
+      .mockResolvedValueOnce(jsonResponse({ outcome: 'pending', request_id: 'req-1' }))
       .mockRejectedValueOnce(new TypeError('connection reset'))
       .mockResolvedValueOnce(
         jsonResponse({ outcome: 'validated', experiment_id: 'exp-1', name: 'existing', fresh: true })
@@ -33,14 +35,14 @@ describe('postOnboardingJson', () => {
     expect(fetchJson).toHaveBeenNthCalledWith(
       3,
       '/api/onboarding/status',
-      expect.objectContaining({ body: JSON.stringify({ request_id: 'req-1', run_id: 42 }) })
+      expect.objectContaining({ body: JSON.stringify({ request_id: 'req-1' }) })
     );
   });
 
   it('retries transient server errors but returns authentication failures', async () => {
     const fetchJson = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ outcome: 'pending', request_id: 'req-2', run_id: 43 }))
+      .mockResolvedValueOnce(jsonResponse({ outcome: 'pending', request_id: 'req-2' }))
       .mockResolvedValueOnce(jsonResponse({ outcome: 'error', error: 'temporarily unavailable' }, 503))
       .mockResolvedValueOnce(jsonResponse({ outcome: 'error', error: 'sign in' }, 401));
 
@@ -68,6 +70,22 @@ describe('postOnboardingJson', () => {
         { fetchJson, wait: () => Promise.resolve() }
       )
     ).rejects.toThrow('offline');
+    expect(fetchJson).toHaveBeenCalledOnce();
+  });
+
+  it('cancels the polling wait without issuing another status request', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetchJson = vi.fn().mockResolvedValueOnce(jsonResponse({ outcome: 'pending', request_id: 'req-abort' }));
+
+    const pending = postOnboardingJson(
+      '/api/onboarding/experiment/validate',
+      {},
+      { fetchJson, signal: controller.signal }
+    );
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect(fetchJson).toHaveBeenCalledOnce();
   });
 });

@@ -49,10 +49,12 @@ export function TutorialGuide({ onClose }: { onClose: () => void }) {
   // resolves the authenticated identity (a 401 simply falls to the neutral state).
   useEffect(() => {
     let live = true;
+    const controller = new AbortController();
     fetch(REQUIREMENTS_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requirementsBody([])),
+      signal: controller.signal,
     })
       .then(async (res) => {
         const body = (await res.json().catch(() => null)) as RequirementsResponse | null;
@@ -68,6 +70,7 @@ export function TutorialGuide({ onClose }: { onClose: () => void }) {
       });
     return () => {
       live = false;
+      controller.abort();
     };
   }, []);
 

@@ -1,6 +1,8 @@
 import { Plugin, toPlugin, type IAppRouter, type PluginManifest } from '@databricks/appkit';
 import manifest from './manifest.json';
+import cachedGoalCatalog from './goal-catalog.json';
 import {
+  OnboardingRequestAccessError,
   readJobOnboardingStatus,
   selectOnboardingBridge,
   type OnboardingAction,
@@ -114,7 +116,15 @@ export async function handleRequirements(
   const actor = readActor(req);
   if (!actor) return unauthorized(res);
   const body = (req.body ?? {}) as Record<string, unknown>;
-  await dispatch(res, bridge, { action: 'requirements', actor, goals: goalsField(body) });
+  const goals = goalsField(body);
+  if (goals.length === 0) {
+    // This artifact is generated from build_requirements([]) and drift-tested in
+    // Python. The Add Agent surface now opens immediately instead of starting a
+    // 40–70 second serverless job for deterministic catalog data.
+    res.status(200).json(cachedGoalCatalog);
+    return;
+  }
+  await dispatch(res, bridge, { action: 'requirements', actor, goals });
 }
 
 // Page 1: validate an experiment is fresh (empty of prior AIL state). Fail-closed —
@@ -264,19 +274,19 @@ export async function handleBootstrapAgent(
   });
 }
 
-export async function handleOnboardingStatus(
-  req: OnboardingHttpRequest,
-  res: OnboardingHttpResponse
-): Promise<void> {
+export async function handleOnboardingStatus(req: OnboardingHttpRequest, res: OnboardingHttpResponse): Promise<void> {
   const actor = readActor(req);
   if (!actor) return unauthorized(res);
   const body = (req.body ?? {}) as Record<string, unknown>;
   const requestId = stringField(body, 'request_id');
-  const runId = typeof body.run_id === 'number' ? body.run_id : Number(body.run_id);
-  if (!requestId || !Number.isFinite(runId)) return badRequest(res, 'request_id and run_id are required');
+  if (!requestId) return badRequest(res, 'request_id is required');
   try {
-    res.status(200).json(await readJobOnboardingStatus(requestId, runId));
+    res.status(200).json(await readJobOnboardingStatus(requestId, actor));
   } catch (err) {
+    if (err instanceof OnboardingRequestAccessError) {
+      res.status(404).json({ outcome: 'refused', refused_reason: err.message });
+      return;
+    }
     res.status(502).json({
       outcome: 'error',
       error: err instanceof Error ? err.message : 'onboarding status lookup failed',

@@ -12,6 +12,7 @@ These prove the three idempotent behaviours without any workspace access: the
 from __future__ import annotations
 
 import pytest
+from databricks.sdk.service.catalog import Privilege, SecurableType
 from databricks.sdk.service.sql import (
     CreateWarehouseRequestWarehouseType,
     StatementState,
@@ -27,6 +28,7 @@ from ail.jobs.bootstrap_grants import (
     REFERENCE_WORKSPACE_DEFAULTS,
     bootstrap,
     ensure_warehouse,
+    grant_framework_schema_access,
     grant_warehouse_can_use,
     main,
     validate_workspace_values,
@@ -106,14 +108,27 @@ class _FakeStatementExecutionAPI:
         return _FakeStatementResponse(statement_id, StatementState.SUCCEEDED)
 
 
+class _FakeGrantsAPI:
+    def __init__(self) -> None:
+        self.update_calls: list[tuple[object, str, list[object]]] = []
+
+    def update(
+        self, securable_type: object, full_name: str, *, changes: list[object]
+    ) -> object:
+        self.update_calls.append((securable_type, full_name, changes))
+        return object()
+
+
 class _FakeClient:
     def __init__(
         self,
         warehouses: _FakeWarehousesAPI,
         statement_execution: _FakeStatementExecutionAPI | None = None,
+        grants: _FakeGrantsAPI | None = None,
     ) -> None:
         self.warehouses = warehouses
         self.statement_execution = statement_execution or _FakeStatementExecutionAPI()
+        self.grants = grants or _FakeGrantsAPI()
 
 
 class _FakeMlflowClient:
@@ -178,6 +193,30 @@ def test_grant_uses_merge_update_with_can_use() -> None:
     assert entry.permission_level == WarehousePermissionLevel.CAN_USE
 
 
+def test_grant_schema_access_merges_only_required_framework_privileges() -> None:
+    grants = _FakeGrantsAPI()
+    grant_framework_schema_access(
+        _FakeClient(_FakeWarehousesAPI(), grants=grants),
+        catalog="cat",
+        schema="sch",
+        sp_id="sp-app-id",
+    )
+    assert [(kind, name) for kind, name, _ in grants.update_calls] == [
+        (SecurableType.CATALOG, "cat"),
+        (SecurableType.SCHEMA, "cat.sch"),
+    ]
+    catalog_change = grants.update_calls[0][2][0]
+    schema_change = grants.update_calls[1][2][0]
+    assert catalog_change.principal == "sp-app-id"
+    assert catalog_change.add == [Privilege.USE_CATALOG]
+    assert set(schema_change.add) == {
+        Privilege.USE_SCHEMA,
+        Privilege.SELECT,
+        Privilege.MODIFY,
+        Privilege.CREATE_TABLE,
+    }
+
+
 # -- bootstrap orchestration ----------------------------------------------
 
 
@@ -187,13 +226,14 @@ def test_bootstrap_creates_grants_and_tags(monkeypatch: pytest.MonkeyPatch) -> N
     stmts = _FakeStatementExecutionAPI()
     mlflow = _FakeMlflowClient()
 
+    grants = _FakeGrantsAPI()
     result = bootstrap(
         experiment_id="EXP-9",
         warehouse_id="wh-explicit",
         framework_sp_id="sp-9",
         catalog="prod_catalog",
         schema="prod_schema",
-        client=_FakeClient(api, statement_execution=stmts),
+        client=_FakeClient(api, statement_execution=stmts, grants=grants),
         mlflow_client=mlflow,
     )
 
@@ -212,6 +252,10 @@ def test_bootstrap_creates_grants_and_tags(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.tables_ensured  # the app-read table set was covered
     # grant landed on the explicit warehouse
     assert api.update_perm_calls[0][0] == "wh-explicit"
+    assert [(kind, name) for kind, name, _ in grants.update_calls] == [
+        (SecurableType.CATALOG, "prod_catalog"),
+        (SecurableType.SCHEMA, "prod_catalog.prod_schema"),
+    ]
     # monitoring tag set on the experiment with the resolved warehouse
     assert mlflow.tag_calls == [("EXP-9", MONITORING_WAREHOUSE_TAG, "wh-explicit")]
     assert result.monitoring is not None

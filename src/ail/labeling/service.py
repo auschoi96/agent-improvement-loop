@@ -556,10 +556,10 @@ def _registered_judge_names(experiment_id: str, profile: str | None) -> list[str
     when the registered set cannot be determined (backend missing, permission), so
     the caller fails closed rather than inventing dimensions.
     """
-    from ail.judges.registration import list_registered_scorers
+    from ail.judges.registration import is_code_scorer, list_registered_scorers
 
     scorers = list_registered_scorers(experiment_id, profile=profile)
-    return [s.name for s in scorers]
+    return [s.name for s in scorers if not is_code_scorer(s)]
 
 
 def _read_label_inputs(  # pragma: no cover - best-effort live MLflow read
