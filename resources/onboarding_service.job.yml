@@ -29,6 +29,12 @@ resources:
               schema: ${var.schema}
               trace-schema: ${var.trace_schema}
               goal-llm-endpoint: ${var.onboarding_goal_llm_endpoint}
+              # The arrival-triggered RLM job id, resolved from the sibling resource in
+              # this same bundle (no manual --var). A successful registration adds the
+              # new agent's *_otel_spans table to that job's table_update trigger so the
+              # RLM job WAKES on the new agent's traces (its body already reviews every
+              # registered agent). Best-effort: a reconcile failure never fails onboarding.
+              rlm-job-id: ${resources.jobs.continuous_rlm.id}
               token-secret-scope: ${var.token_secret_scope}
               token-secret-key: ${var.token_secret_key}
       environments:

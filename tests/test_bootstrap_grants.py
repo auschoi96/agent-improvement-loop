@@ -561,3 +561,128 @@ def test_main_create_warehouse_prints_resolved_id(
     out = capsys.readouterr().out
     assert "warehouse=printed-wh (created)" in out
     assert "warehouse_id=printed-wh" in out
+
+
+# -- deploy heal: reconcile the RLM trigger over the whole registry ---------
+
+
+class _HealTableUpdate:
+    def __init__(self, table_names: list[str]) -> None:
+        self.table_names = list(table_names)
+
+
+class _HealTrigger:
+    def __init__(self, table_names: list[str]) -> None:
+        self.table_update = _HealTableUpdate(table_names)
+
+
+class _HealSettings:
+    def __init__(self, table_names: list[str]) -> None:
+        self.trigger = _HealTrigger(table_names)
+
+
+class _HealJob:
+    def __init__(self, settings: object) -> None:
+        self.settings = settings
+
+
+class _HealJobsAPI:
+    def __init__(self, table_names: list[str]) -> None:
+        self._settings = _HealSettings(table_names)
+        self.update_calls: list[object] = []
+
+    def get(self, job_id: int) -> _HealJob:
+        return _HealJob(self._settings)
+
+    def update(self, job_id: int, *, new_settings: object) -> None:
+        self.update_calls.append((job_id, new_settings))
+
+
+class _ClientWithJobs(_FakeClient):
+    def __init__(self, warehouses: _FakeWarehousesAPI, jobs: _HealJobsAPI) -> None:
+        super().__init__(warehouses)
+        self.jobs = jobs
+
+
+def _seed_registry(monkeypatch: pytest.MonkeyPatch, agents: list[object]) -> None:
+    monkeypatch.setattr(
+        "ail.publish_versions.load_registered_agents_full",
+        lambda **_kwargs: agents,
+    )
+
+
+def test_bootstrap_heals_rlm_trigger_for_registered_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ail.registry import Agent
+
+    monkeypatch.delenv(TRACING_WAREHOUSE_ENV, raising=False)
+    _seed_registry(
+        monkeypatch,
+        [
+            Agent(
+                agent_name="claude_code",
+                experiment_id="e1",
+                annotations_table="cat.mlflow_traces.claude_code_otel_annotations",
+            ),
+            Agent(
+                agent_name="newbot",
+                experiment_id="e2",
+                annotations_table="cat.mlflow_traces.newbot_otel_annotations",
+            ),
+        ],
+    )
+    jobs = _HealJobsAPI(["cat.mlflow_traces.claude_code_otel_spans"])
+    client = _ClientWithJobs(_FakeWarehousesAPI(listing=[]), jobs)
+
+    result = bootstrap(
+        experiment_id="EXP-heal",
+        warehouse_id="wh-heal",
+        framework_sp_id=None,
+        catalog="cat",
+        schema="sch",
+        rlm_job_id=643188029858547,
+        client=client,
+        mlflow_client=_FakeMlflowClient(),
+    )
+
+    # The heal added ONLY the missing agent's spans table (add-only) and issued one update.
+    assert result.rlm_trigger_tables_added == ["cat.mlflow_traces.newbot_otel_spans"]
+    assert len(jobs.update_calls) == 1
+
+
+def test_bootstrap_skips_heal_when_no_rlm_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No rlm_job_id => the heal is a quiet no-op (never reads the registry, never writes).
+    def _boom(**_kwargs: object) -> object:
+        raise AssertionError("registry must not be read when rlm_job_id is None")
+
+    monkeypatch.setattr("ail.publish_versions.load_registered_agents_full", _boom)
+    result = bootstrap(
+        experiment_id="EXP-noheal",
+        warehouse_id="wh-noheal",
+        framework_sp_id=None,
+        catalog="cat",
+        schema="sch",
+        client=_FakeClient(_FakeWarehousesAPI(listing=[])),
+        mlflow_client=_FakeMlflowClient(),
+    )
+    assert result.rlm_trigger_tables_added == []
+
+
+def test_bootstrap_heal_is_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A registry read failure during the heal must not fail an otherwise-successful
+    # bootstrap (warehouse/tables/grants already succeeded).
+    def _boom(**_kwargs: object) -> object:
+        raise RuntimeError("warehouse down mid-heal")
+
+    monkeypatch.setattr("ail.publish_versions.load_registered_agents_full", _boom)
+    result = bootstrap(
+        experiment_id="EXP-soft",
+        warehouse_id="wh-soft",
+        framework_sp_id=None,
+        catalog="cat",
+        schema="sch",
+        rlm_job_id=1,
+        client=_FakeClient(_FakeWarehousesAPI(listing=[])),
+        mlflow_client=_FakeMlflowClient(),
+    )
+    assert result.rlm_trigger_tables_added == []
+    assert result.warehouse_id == "wh-soft"  # bootstrap still succeeded

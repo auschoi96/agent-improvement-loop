@@ -1119,3 +1119,112 @@ def test_confirm_surfaces_goal_config_that_steers_the_rlm() -> None:
     assert knobs["objective_metric"] == "no_hallucinated_tool_calls"
     assert knobs["goal_direction"] == "maximize"
     assert knobs["goal_target"] == 0.25
+
+
+# ---------------------------------------------------------------------------
+# RLM trigger reconcile after a successful registration
+# (ail.onboarding.service._reconcile_rlm_trigger_after_register). Onboarding adds
+# the new agent's *_otel_spans table to the arrival-triggered RLM job so it WAKES on
+# the new agent's traces — best-effort, never failing a successful registration.
+# ---------------------------------------------------------------------------
+
+
+class _FakeReconcileTableUpdate:
+    def __init__(self, table_names: list[str]) -> None:
+        self.table_names = list(table_names)
+
+
+class _FakeReconcileTrigger:
+    def __init__(self, table_names: list[str]) -> None:
+        self.table_update = _FakeReconcileTableUpdate(table_names)
+
+
+class _FakeReconcileSettings:
+    def __init__(self, table_names: list[str]) -> None:
+        self.trigger = _FakeReconcileTrigger(table_names)
+
+
+class _FakeReconcileJob:
+    def __init__(self, settings: Any) -> None:
+        self.settings = settings
+
+
+class _FakeReconcileJobsApi:
+    def __init__(self, table_names: list[str]) -> None:
+        self._settings = _FakeReconcileSettings(table_names)
+        self.update_calls: list[Any] = []
+
+    def get(self, job_id: int) -> Any:
+        return _FakeReconcileJob(self._settings)
+
+    def update(self, job_id: int, *, new_settings: Any) -> None:
+        self.update_calls.append((job_id, new_settings))
+
+
+class _FakeReconcileClient:
+    def __init__(self, table_names: list[str]) -> None:
+        self.jobs = _FakeReconcileJobsApi(table_names)
+
+
+def _reconcile(  # type: ignore[no-untyped-def]
+    client,
+    monkeypatch,
+    job_id_env,
+    annotations_table="cat.mlflow_traces.newbot_otel_annotations",
+):
+    from ail.onboarding.service import _reconcile_rlm_trigger_after_register
+
+    if job_id_env is None:
+        monkeypatch.delenv("AIL_RLM_JOB_ID", raising=False)
+    else:
+        monkeypatch.setenv("AIL_RLM_JOB_ID", job_id_env)
+    _reconcile_rlm_trigger_after_register(
+        client,
+        agent_name="newbot",
+        experiment_id="exp-newbot",
+        annotations_table=annotations_table,
+    )
+
+
+def test_reconcile_after_register_adds_spans_table(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = _FakeReconcileClient(["cat.mlflow_traces.claude_code_otel_spans"])
+    _reconcile(client, monkeypatch, "643188029858547")
+    assert len(client.jobs.update_calls) == 1
+    job_id, settings = client.jobs.update_calls[0]
+    assert job_id == 643188029858547
+    assert "cat.mlflow_traces.newbot_otel_spans" in settings.trigger.table_update.table_names
+
+
+def test_reconcile_after_register_skips_when_env_unset(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = _FakeReconcileClient(["cat.mlflow_traces.claude_code_otel_spans"])
+    _reconcile(client, monkeypatch, None)
+    assert client.jobs.update_calls == []  # no job id => quiet no-op, no write
+
+
+def test_reconcile_after_register_skips_on_non_int_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = _FakeReconcileClient([])
+    _reconcile(client, monkeypatch, "not-a-number")
+    assert client.jobs.update_calls == []
+
+
+def test_reconcile_after_register_is_fail_soft(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A Jobs API failure inside the reconcile must be swallowed — a successful
+    # registration is never undone by a best-effort trigger reconcile.
+    class _BoomJobs:
+        def get(self, job_id: int) -> Any:
+            raise RuntimeError("jobs api down")
+
+    class _BoomClient:
+        def __init__(self) -> None:
+            self.jobs = _BoomJobs()
+
+    monkeypatch.setenv("AIL_RLM_JOB_ID", "42")
+    from ail.onboarding.service import _reconcile_rlm_trigger_after_register
+
+    # Must not raise.
+    _reconcile_rlm_trigger_after_register(
+        _BoomClient(),
+        agent_name="newbot",
+        experiment_id="exp-newbot",
+        annotations_table="cat.mlflow_traces.newbot_otel_annotations",
+    )
