@@ -11,7 +11,7 @@
 
 The eval spine is already built: judges are authored via `ail.judges` (L1) with a
 `{{ trace }}` template and a label schema **whose name exactly matches the judge
-name**, and a scheduled auto-align (L2, `ail.judges.auto_align`) runs MemAlign once
+name**, and event-driven auto-align (L2, `ail.judges.auto_align`) runs MemAlign once
 enough HUMAN labels accrue. But MemAlign has nothing to align against until a human
 grades some traces. L4 is that input stage, moved into the app: a signed-in user
 labels traces along the dimensions that have **registered judges**, so L2's
@@ -102,7 +102,8 @@ fabricated `labeled` — and when a dependency can't be confirmed the message po
 user to the MLflow Traces UI. The written assessment's name equals the judge name and its
 source is `HUMAN` with the **authenticated** labeler (`x-forwarded-*`, never the body) as
 `source_id`. The label **floor** is not hardcoded in TS: it is relayed from the Python
-engine via `AIL_LABEL_FLOOR` (unset → the client renders a neutral `—`, never a fabricated
+engine via `AIL_LABEL_FLOOR` (the deployed app requires a validated value; an unset local
+transport still renders a neutral `—`, never a fabricated
 number). These are guarded in `server/plugins/labeling/bridge.test.ts`.
 
 ## Fail-closed / no fabrication

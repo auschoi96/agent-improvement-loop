@@ -91,16 +91,13 @@ idempotent skip of already-reviewed traces, the reviewer-trace skip, the per-run
 cap, and the fail-closed `rlm_review_failed` marker (a degenerate review is never
 recorded as a fake-good pass).
 
-## 3. Scheduled Databricks job
+## 3. Trace-arrival Databricks job
 
-`resources/continuous_rlm.job.yml` re-establishes the standalone RLM reviewer as a
-**scheduled** job (`ail-continuous-rlm` → `ail.jobs.continuous_rlm:main`). It is
-deliberately **scheduled, not trace-arrival-triggered**: the UC-backed trace store is a
-**VIEW** (`cc_trace_unified` / `cc_trace_metadata`), so a `table_update` trigger is
-infeasible — the reason the original trigger job was retired. It mirrors the sibling
-job resources (`l0_publish` / `auto_align`): serverless compute, the locally
-built `ail` wheel + `halo-engine`, bundle-level `run_as`, `max_concurrent_runs: 1` with
-queueing, and idempotency so it never re-reviews handled traces.
+`resources/continuous_rlm.job.yml` runs the standalone RLM reviewer when the
+underlying managed `*_otel_spans` Delta table changes. The unified trace surface is
+a view, but the spans table is trigger-eligible. Onboarding and deploy healing add
+each registered agent's spans table to the trigger. One non-queued run drains until
+quiet; idempotency prevents re-reviewing handled traces.
 
 `databricks.yml` variables (defaults):
 
@@ -108,14 +105,13 @@ queueing, and idempotency so it never re-reviews handled traces.
 |---|---|---|
 | `continuous_rlm_judge_model` | `databricks-gpt-5-5-pro` | HALO judge for the standalone job (most powerful viable) |
 | `continuous_rlm_reasoning_effort` | `''` (auto) | explicit effort override; empty / `none` / `auto` ⇒ auto-resolve (→ `xhigh`) |
-| `continuous_rlm_cron` | `0 */5 * * * ?` | schedule (every 5m) |
 | `continuous_rlm_pause_status` | `UNPAUSED` | `PAUSED` ⇒ deployed-but-dormant |
-| `continuous_rlm_timeout_seconds` | `7200` | hard bound per batch; queued firings continue unassessed traces |
+| `continuous_rlm_timeout_seconds` | `7200` | hard bound per drain; later updates recover remaining traces |
 
 It reuses the shared `rlm_*` sampling knobs. Registry mode reads each agent's own goal
 from `agent_registry`, so reviews target the same goal as the companion without leaking
 one agent's objective into another. Idempotency (`has_rlm_assessment`) prevents duplicate
-successful reviews; never-attempted traces are selected before failed retries. Scheduled
+successful reviews; never-attempted traces are selected before failed retries. Serverless
 serverless runs set `--code-sandbox=off`: HALO retains its trace-navigation and subagent
 tools but skips the optional Pyodide probe that is unavailable on this runtime. Manual
 runs can pass `--code-sandbox=auto` to restore HALO's normal sandbox discovery.

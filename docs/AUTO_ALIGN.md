@@ -104,16 +104,15 @@ promoting, or overwriting state. A read error is never silently downgraded to
 "never aligned" — doing so would re-align the same labels every run and drop the
 rollback bar (letting a regressed re-alignment get promoted).
 
-## Scheduled, not event-triggered
+## Event-triggered with daily recovery
 
-The v4 trace store tables are **views** (`cc_trace_unified` / `cc_trace_metadata`),
-not Delta tables, so a `table_update` trigger is infeasible — the same reason the
-other scheduled jobs (RLM, publish) run on a cron. `ail-auto-align` runs on a cron
-(`auto_align_cron`, default daily 06:00). It is **model-only**: it reads labeled
-traces and calls the reflection / embedding / judge models through the gateway; it
-has no SQL write path of its own. Like the other jobs it resolves an explicit
-bearer for the v4 trace store (`resolve_job_auth`) and exports the SQL warehouse
-(`MLFLOW_TRACING_SQL_WAREHOUSE_ID`) the read needs.
+The v4 trace read surface is a view and cannot itself drive a table-update trigger.
+After MLflow confirms a HUMAN assessment, the app therefore appends an immutable
+row to the governed `alignment_events` Delta table. `ail-auto-align` wakes from
+that table, while its existing per-judge watermark keeps duplicate/coalesced
+events idempotent. A daily recovery sweep scans all agents if an event append or
+trigger delivery was missed. The job still resolves an explicit trace-store bearer
+and exports `MLFLOW_TRACING_SQL_WAREHOUSE_ID` for the v4 read.
 
 The exit code is **non-zero only when a judge's cadence failed** (raised). A
 correct hold, rollback, or skip is a *successful* run — the job never prints a
@@ -137,7 +136,7 @@ report = auto_align_scorers(
 report.n_aligned, report.n_rolled_back, report.n_held_distrusted, report.n_skipped
 ```
 
-CLI / Job (`ail-auto-align`), and the scheduled bundle job:
+CLI / Job (`ail-auto-align`), and the event-driven bundle job:
 
 ```bash
 ail-auto-align \

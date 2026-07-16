@@ -386,7 +386,7 @@ queryable companion).
 
 ## Auto-align trigger — `ail.judges.auto_align`
 
-The pieces above are *driven* by the **auto-align trigger** — a scheduled
+The pieces above are *driven* by the **auto-align trigger** — an alignment-event
 Databricks job (`ail-auto-align`) that, per judged dimension, aligns the judge
 with MemAlign once enough human labels exist, re-aligns as more accrue, guards
 trust with the agreement floor, and rolls back a regression. It turns "a human

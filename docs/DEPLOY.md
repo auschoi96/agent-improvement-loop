@@ -148,23 +148,21 @@ The bundle exposes one knob, `run_as: ${var.job_run_as}`, that applies to
 **every** job in the bundle — the publish job today, and any job added under
 `resources/` tomorrow. It is driven by two variables:
 
-- `framework_sp_id` — the application (client) id of the single framework SP.
+- `framework_sp_id` — the application (client) id of the single framework SP;
+  the production target defaults to the `ail-self-optimizer` App SP.
 - `job_run_as` (complex) — defaults to `{user_name: ${workspace.current_user.userName}}`
-  (the deploying identity), overridden to the SP by the `dais_demo_sp` target.
+  (the deploying identity), overridden to the SP by the `prod` target.
 
 **Default target `dais_demo`** → jobs run as the deploying identity. Use this for
 the admin verification deploy; no SP needed.
 
-**Target `dais_demo_sp`** → jobs run as the SP. Turnkey via a plain string var:
+**Target `prod`** → jobs run as the App SP:
 
 ```bash
-databricks bundle deploy -t dais_demo_sp \
-  --var framework_sp_id=<FRAMEWORK_SP_ID> --profile dais-demo
+databricks bundle deploy -t prod --profile dais-demo
 ```
 
-> Deploying `dais_demo_sp` **without** `framework_sp_id` fails fast with
-> `run_as section must specify exactly one identity` — an intentional guard, not
-> a bug.
+`dais_demo_sp` remains as a backward-compatible production-mode alias.
 
 ### Make it literally one SP: reuse the App's SP
 
@@ -172,19 +170,19 @@ The cleanest single-SP setup reuses the **App's** auto-provisioned SP as
 `framework_sp_id`, because the App's SP cannot be reassigned and a job cannot
 reference it until it exists. So the turnkey order is:
 
-1. Run the **pre-app bootstrap** (§4 step 2) to provision/resolve the warehouse and
-   ensure the app's tables, then deploy the **app** bundle. This creates the app,
-   its SP, and (because the warehouse is declared with `permission: CAN_USE`)
-   **auto-grants** `CAN_USE` on the warehouse to that SP. (The table-ensure must
-   precede the app deploy so the build's typegen resolves — §3 callout.)
-2. Read the App SP's application id:
+1. Run the **pre-deploy bootstrap** (§4 step 2) to provision/resolve the warehouse
+   and ensure the query, request, and event tables. Then deploy the job bundle once
+   as the admin/deployer so the App's declared job resources have concrete IDs.
+2. Deploy the **app** with those job IDs. This creates the app, its SP, and (because
+   the warehouse is declared with `permission: CAN_USE`) auto-grants warehouse use.
+3. Read the App SP's application id:
    ```bash
    databricks apps get ail-self-optimizer -o json --profile dais-demo \
      | python3 -c "import sys,json; print(json.load(sys.stdin)['service_principal_client_id'])"
    ```
-3. Deploy the **job** bundle with that id as `framework_sp_id` (target
-   `dais_demo_sp`), and run the bootstrap (§3) with the same id. Now the app and
-   every job run as the **same** SP, covered by the **same** grant.
+4. Run the bootstrap with that ID to merge warehouse and dedicated-schema grants,
+   then deploy the job bundle with target `prod`. The app and every framework job
+   now run as the same SP.
 
 If you prefer a standalone SP (created once by an admin), pass its application id
 as `framework_sp_id` instead — the bootstrap then grants it (and the App's own SP
@@ -195,7 +193,7 @@ keeps its auto-grant; both have `CAN_USE`).
 ## 3. Warehouse tables, the grant, and the monitoring tag (bootstrap)
 
 `ail-bootstrap-grants` (module `ail.jobs.bootstrap_grants`) is **idempotent** and
-does four things in one run:
+does the following in one run:
 
 1. **Resolve the warehouse** — use `--warehouse-id`, or, only when explicitly
    requested, find-or-create by name with `--create-warehouse` (§1).
@@ -211,9 +209,10 @@ does four things in one run:
    loud** (raising, changing nothing) if a live column's type genuinely conflicts
    with the DDL. So both a fresh deploy and an **upgrade** deploy that adds columns
    converge the table to the current schema before the app build.
-3. **Grant `CAN_USE`** on the warehouse to `--framework-sp-id` via the warehouse
-   permissions API (`update_permissions`, a merge — it does not clobber the App
-   SP's auto-grant). Skipped if no SP is given.
+3. **Merge the framework SP grants** — `CAN_USE` on the warehouse plus
+   `USE_CATALOG`, `USE_SCHEMA`, `SELECT`, `MODIFY`, and `CREATE_TABLE` on the
+   dedicated AIL catalog/schema. Existing privileges are preserved. Skipped if no
+   SP is given.
 4. **Tag the experiment** with `mlflow.monitoring.sqlWarehouseId = <warehouse>`
    (reusing `ail.compare.monitoring.configure_monitoring_warehouse`) so MLflow's
    monitoring job fetches the v4 Unity Catalog traces the scheduled scorers score.
@@ -278,47 +277,55 @@ platform from the `permission: CAN_USE` declaration in
 ## 4. End-to-end turnkey sequence
 
 **Ordering is load-bearing:** the bootstrap's warehouse + **table-ensure** + tag
-(step 2) must run **before** the app is deployed/started (step 3), because the app
-build's typegen `DESCRIBE`s every query's table live and fails hard on a missing
-one (§3 callout). The bootstrap is idempotent, so it is run twice — once **before**
-the app for the tables (no SP grant yet, since the App SP does not exist), and once
-**after** to add the grant for the single framework SP.
+must run before either bundle is deployed. The app build typegen `DESCRIBE`s every
+query table, and the job bundle's table-update triggers reference the governed
+`alignment_events` and `memory_events` Delta tables; both deployments can fail on
+a clean workspace if those tables do not exist. The bootstrap is idempotent, so it
+is run again after the App creates its SP to merge that SP's warehouse and schema
+grants.
 
 ```bash
-# 1. (verification) deploy the job bundle as yourself — proves config is sound,
-#    and creates the apply job whose id the app needs (§7 step 1).
+# 1. Validate the job bundle without changing remote resources.
 databricks bundle validate -t dais_demo --profile dais-demo
-# --var catalog/schema are REQUIRED: they wire AIL_CATALOG/AIL_SCHEMA into every
-# job's env; the write path fails closed (loud error) if they are unset/empty.
-databricks bundle deploy   -t dais_demo --var catalog=<CATALOG> --var schema=<SCHEMA> --profile dais-demo
 
-# 2. BOOTSTRAP FIRST [ADMIN]: (explicit warehouse) + ensure the app's tables
-#    (empty) + tag experiment. No --framework-sp-id yet (the App SP is created in
-#    step 3). This is what lets step 3's app build typegen resolve on a clean
-#    workspace — with ZERO manual DDL.
-ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
+# 2. BOOTSTRAP FIRST [ADMIN], from this checked-out revision: create/reconcile all
+#    query, request, and event tables before a trigger or typegen references them.
+uv run ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
   --warehouse-id <WAREHOUSE_ID> \
   --catalog <CATALOG> --schema <SCHEMA> --profile dais-demo
 
-# 3. deploy the app (creates its SP + auto-grants CAN_USE on the warehouse). Its
-#    build typegen now DESCRIBEs tables that EXIST (step 2). Point it at the apply
-#    job with --var apply_job_id=<id> (from step 1 / §7) so it also auto-grants
-#    CAN_MANAGE_RUN on that job + injects AIL_APPLY_JOB_ID; see §7.
-cd ail-self-optimizer && databricks bundle deploy --profile dais-demo \
-  --var apply_job_id=<APPLY_JOB_ID> --var catalog=<CATALOG> --var schema=<SCHEMA> && cd ..
-databricks bundle run app -t default --profile dais-demo   # start the app
+# 3. Deploy the job bundle once as the admin/deployer. This creates the jobs whose
+#    ids are declared as App resources. Record those ids from `bundle summary`.
+databricks bundle deploy -t dais_demo \
+  --var catalog=<CATALOG> --var schema=<SCHEMA> --profile dais-demo
+databricks bundle summary -t dais_demo --profile dais-demo
 
-# 4. capture the App SP -> the single framework SP
+# 4. Materialize the workspace-specific catalog/schema/path literals in app.yaml,
+#    then deploy and start the App with every declared resource id. `app.yaml`
+#    intentionally does not accept `${var.*}` interpolation.
+cd ail-self-optimizer
+databricks apps deploy -t default --profile dais-demo \
+  --var sql_warehouse_id=<WAREHOUSE_ID> \
+  --var apply_job_id=<APPLY_JOB_ID> \
+  --var onboarding_job_id=<ONBOARDING_JOB_ID> \
+  --var l0_job_id=<L0_JOB_ID> --var rlm_job_id=<RLM_JOB_ID> \
+  --var judge_backfill_job_id=<JUDGE_BACKFILL_JOB_ID> \
+  --var auto_align_job_id=<AUTO_ALIGN_JOB_ID> --var memory_job_id=<MEMORY_JOB_ID>
+cd ..
+
+# 5. Capture the App SP -> the single framework SP.
 SP=$(databricks apps get ail-self-optimizer -o json --profile dais-demo \
        | python3 -c "import sys,json;print(json.load(sys.stdin)['service_principal_client_id'])")
 
-# 5. bootstrap AGAIN (idempotent) to grant CAN_USE to that SP (wh reused, tables
-#    no-op, tag no-op), then re-deploy the jobs to run as that SP.
-ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
+# 6. Bootstrap again to merge warehouse + dedicated-schema grants for that SP.
+uv run ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
   --warehouse-id <WAREHOUSE_ID> --framework-sp-id "$SP" \
   --catalog <CATALOG> --schema <SCHEMA> --profile dais-demo
-databricks bundle deploy -t dais_demo_sp --var framework_sp_id="$SP" \
+
+# 7. Redeploy the jobs in production mode under the App SP, then verify identity.
+databricks bundle deploy -t prod --var framework_sp_id="$SP" \
   --var catalog=<CATALOG> --var schema=<SCHEMA> --profile dais-demo
+uv run ail-validate-run-as --expected-sp "$SP" --profile dais-demo
 ```
 
 > If you use a **standalone** framework SP (created once by an admin) instead of
@@ -514,11 +521,12 @@ access to the experiment's traces and write access to its assessments — the sa
 experiment access the framework already relies on. Without `AIL_LABELING_TRANSPORT=rest`
 the app falls back to the subprocess bridge (correct for local dev only).
 
-Optional: set `AIL_LABEL_FLOOR` (from the engine —
-`python -c "import ail.readiness as r; print(r.ReadinessThresholds().quality_min_labels)"`)
-in the deploy environment so the panel shows the `N / floor` target. It is deliberately
-**not** a committed literal (two-tier: the floor number lives in Python, never in
-TS/YAML); when unset the panel honestly renders `—` rather than a fabricated number.
+`AIL_LABEL_FLOOR` is materialized in `app.yaml` from the engine value
+(`python -c "import ail.readiness as r; print(r.ReadinessThresholds().quality_min_labels)"`)
+so the deployed panel can show the `N / floor` target without importing Python.
+When that engine threshold changes, regenerate the deployment artifact in the same
+change; runtime configuration validation rejects a missing, unresolved, or invalid
+value rather than silently displaying a fabricated target.
 
 Fail-closed: a grade is only reported "labeled" when the REST write returns an
 `assessment_id`. If the transport can't confirm a write (missing warehouse, unresolvable

@@ -86,6 +86,9 @@ Read these before treating the loop as fully autonomous:
 - Goal catalog and natural-language requirements are one onboarding flow.
 - Custom natural-language quality goals can author MemAlign judges after an
   explicit preview/confirmation step.
+- Judge authoring carries the validated subject experiment into MLflow's
+  Databricks Review App label-schema flow; it does not rely on ambient notebook
+  experiment state.
 - Data Gate descriptions update immediately from cached backend-authored gate
   definitions instead of waiting for another onboarding job.
 - RLM moved from a five-minute cron with queued runs to a Delta table-update
