@@ -186,6 +186,7 @@ def _proposal(
     return ProposedAction(
         proposal_id=proposal_id,
         agent_name="claude_code",
+        experiment_id="660599403165942",
         action_kind=action_kind,
         risk_class=default_risk_class(action_kind),
         status=ProposalStatus.PENDING,
@@ -600,7 +601,11 @@ def test_row_to_proposal_round_trips_agent_task_plan_only_preview_ref_none() -> 
 def test_load_pending_proposal_returns_none_when_no_row(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(apply_service, "_query_rows", lambda *a, **k: [])
     got = load_pending_proposal(
-        client=object(), warehouse_id="w", agent_name="claude_code", proposal_id="nope"
+        client=object(),
+        warehouse_id="w",
+        agent_name="claude_code",
+        experiment_id="660599403165942",
+        proposal_id="nope",
     )
     assert got is None
 
@@ -611,7 +616,11 @@ def test_load_pending_proposal_maps_row(monkeypatch: pytest.MonkeyPatch) -> None
     row = dict(zip(PROPOSAL_COLUMNS, [None if v is None else str(v) for v in flat], strict=True))
     monkeypatch.setattr(apply_service, "_query_rows", lambda *a, **k: [row])
     got = load_pending_proposal(
-        client=object(), warehouse_id="w", agent_name="claude_code", proposal_id="prop-1"
+        client=object(),
+        warehouse_id="w",
+        agent_name="claude_code",
+        experiment_id="660599403165942",
+        proposal_id="prop-1",
     )
     assert got is not None
     assert got.action_kind is ActionKind.METRIC_VIEW
@@ -647,18 +656,52 @@ def test_mark_proposal_status_updates_only_pending(monkeypatch: pytest.MonkeyPat
         client=object(),
         warehouse_id="w",
         agent_name="claude_code",
+        experiment_id="660599403165942",
         proposal_id="prop-1",
         status=ProposalStatus.APPLIED,
     )
     sql = executed[0]
     assert sql.startswith("UPDATE")
     assert "SET status = 'applied'" in sql
+    assert "experiment_id = '660599403165942'" in sql
     assert "status = 'pending'" in sql  # only advances a still-pending row
 
 
 # ---------------------------------------------------------------------------
 # run_decision — live entry fail-closed guards (no client is ever built)
 # ---------------------------------------------------------------------------
+
+
+def test_resolve_agent_defaults_to_live_uc_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = object()
+    calls: list[dict[str, Any]] = []
+
+    def _resolve(agent_name: str, **kwargs: Any) -> object:
+        calls.append({"agent_name": agent_name, **kwargs})
+        return expected
+
+    monkeypatch.delenv("AIL_AGENT_REGISTRY", raising=False)
+    monkeypatch.setattr("ail.jobs.multi_agent.resolve_registered_agent", _resolve)
+
+    got = apply_service._resolve_agent(
+        "claude_code",
+        None,
+        client="client",
+        warehouse_id="wh",
+        catalog="cat",
+        schema="sch",
+    )
+
+    assert got is expected
+    assert calls == [
+        {
+            "agent_name": "claude_code",
+            "client": "client",
+            "warehouse_id": "wh",
+            "catalog": "cat",
+            "schema": "sch",
+        }
+    ]
 
 
 def test_run_decision_refuses_anonymous_approver() -> None:

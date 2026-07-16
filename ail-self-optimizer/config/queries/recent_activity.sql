@@ -1,15 +1,17 @@
 -- Recent proposal/decision outcomes for the Activity page — the observability
 -- complement to the approval queue's pending-only actionable view. Read-only,
 -- two-tier: SELECT from the controller-published agent_proposed_actions table
--- (docs/LOOP_CONTROLLER.md), across ALL agents, most-recent first. Each row is a
+-- (docs/LOOP_CONTROLLER.md), scoped to the selected experiment. Each row is a
 -- proposal and its CURRENT lifecycle outcome (status: pending/approved/rejected/
 -- applied/superseded — advanced in place by lane 3b) plus the WHY (trigger summary)
 -- and the timestamps the table records. No metric is recomputed here and no state is
 -- reinterpreted — Python / the table is the source of truth; the app only reads and
 -- renders these columns verbatim.
+-- @param experiment_id STRING
 SELECT
   proposal_id,
   agent_name,
+  experiment_id,
   status,
   action_kind,
   risk_class,
@@ -18,5 +20,6 @@ SELECT
   created_at,
   generated_at
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.agent_proposed_actions
+WHERE experiment_id = :experiment_id
 ORDER BY created_at DESC
 LIMIT 50

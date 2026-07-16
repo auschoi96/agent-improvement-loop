@@ -137,6 +137,7 @@ def _agent_task_proposal(change: ProposedChange | None = None) -> ProposedAction
             agent_name="claude_code", action_kind=ActionKind.AGENT_TASK, change=change
         ),
         agent_name="claude_code",
+        experiment_id="660599403165942",
         action_kind=ActionKind.AGENT_TASK,
         risk_class=default_risk_class(ActionKind.AGENT_TASK),
         objective_metric="total_tokens",
@@ -166,6 +167,7 @@ def test_action_must_match_change_kind() -> None:
         ProposedAction(
             proposal_id="x",
             agent_name="claude_code",
+            experiment_id="660599403165942",
             action_kind=ActionKind.METRIC_VIEW,
             risk_class=RiskClass.ADDITIVE_ASSET,
             objective_metric="total_tokens",
@@ -251,6 +253,7 @@ def test_agent_task_action_requires_agent_task_plan_change() -> None:
         ProposedAction(
             proposal_id="x",
             agent_name="claude_code",
+            experiment_id="660599403165942",
             action_kind=ActionKind.AGENT_TASK,
             risk_class=RiskClass.AGENT_CHANGE,
             objective_metric="total_tokens",
@@ -387,6 +390,7 @@ def test_proposed_action_round_trips_through_json() -> None:
             agent_name="claude_code", action_kind=ActionKind.METRIC_VIEW, change=change
         ),
         agent_name="claude_code",
+        experiment_id="660599403165942",
         action_kind=ActionKind.METRIC_VIEW,
         risk_class=default_risk_class(ActionKind.METRIC_VIEW),
         objective_metric="total_tokens",

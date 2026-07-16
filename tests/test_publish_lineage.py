@@ -153,7 +153,14 @@ def _forced_version(version: int = 3) -> FakeVersion:
 def _rows(champion: int | None = 2) -> list[PromptLineageRow]:
     versions = [_seed_version(1), _improving_version(2), _forced_version(3)]
     champs: set[int] = set() if champion is None else {champion}
-    return build_lineage_rows(AGENT, PROMPT, versions, champion_versions=champs, generated_at="t0")
+    return build_lineage_rows(
+        AGENT,
+        PROMPT,
+        versions,
+        experiment_id="123",
+        champion_versions=champs,
+        generated_at="t0",
+    )
 
 
 def test_rows_are_newest_version_first() -> None:
@@ -205,7 +212,14 @@ def test_row_builder_matches_column_order() -> None:
 
 def test_missing_creation_timestamp_is_honest_none() -> None:
     v = FakeVersion(version=5, tags={"ail.prompt.source": "seed"}, uri="u", creation_timestamp=None)
-    (row,) = build_lineage_rows(AGENT, PROMPT, [v], champion_versions=set(), generated_at="t")
+    (row,) = build_lineage_rows(
+        AGENT,
+        PROMPT,
+        [v],
+        experiment_id="123",
+        champion_versions=set(),
+        generated_at="t",
+    )
     assert row.registered_at is None
 
 

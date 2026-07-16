@@ -277,6 +277,32 @@ def test_poll_verify_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> Non
     assert verify_calls == []
 
 
+def test_verify_tick_uses_live_registry_experiment(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    args = argparse.Namespace(
+        agent="claude_code",
+        registry=None,
+        experiment=None,
+        catalog="cat",
+        schema="sch",
+    )
+    monkeypatch.setattr(
+        companion.agent_executor,
+        "_resolve_agent",
+        lambda *a, **k: argparse.Namespace(experiment_id="exp-live"),
+    )
+
+    def _select(**kwargs: Any) -> list[dict[str, Any]]:
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(companion, "select_pending_verify_requests", _select)
+
+    companion._run_verify_once(args, client="client", warehouse_id="wh")
+
+    assert calls[0]["experiment_id"] == "exp-live"
+
+
 def test_poll_runs_verify_tick_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     _auth_ok(monkeypatch)
     monkeypatch.setattr(companion.time, "sleep", lambda seconds: None)

@@ -1,18 +1,19 @@
 resources:
   jobs:
     continuous_rlm:
-      name: ail-continuous-rlm-scheduled
+      name: ail-continuous-rlm-trace-arrival
       description: >-
-        L3 — the dedicated, high-powered RLM (HALO) deep-reviewer. Each firing runs
-        one bounded ail.l3.continuous pass over the most recent traces: it skips any
+        L3 — the dedicated, high-powered RLM (HALO) deep-reviewer. Each trace-table
+        update drains the eligible traces that have not yet been reviewed: it skips any
         trace that already carries an rlm_* assessment (idempotent), deterministically
-        samples the rest, ranks the sample by token count, caps the reviews per run,
+        samples the rest, ranks the sample by token count, reviews bounded batches
+        until the experiment is quiet,
         and attaches per-guideline / assets / overall LLM_JUDGE feedback (fail-closed:
         a degenerate review is marked rlm_review_failed, never a fabricated pass).
         The review runs on the most powerful VIABLE judge (databricks-gpt-5-5-pro) and
         is STEERED BY THE USER'S GOAL (objective_metric/direction/target/guardrails →
         a goal-derived rubric) rather than a fixed rubric. This is the standalone
-        scheduled reviewer that feeds the local companion's plan/propose lane on the
+        arrival-triggered reviewer that feeds the local companion's plan/propose lane on the
         top model + goal-steering. Idempotency keeps it from double-reviewing traces
         that already carry RLM feedback.
       tags:
@@ -25,24 +26,28 @@ resources:
       # one warehouse grant) with the other jobs. That identity needs CAN_USE on the
       # trace-store warehouse and read/write on the MLflow trace store.
 
-      # Scheduled cadence (default every five minutes). This is deliberately a schedule, NOT a
-      # table_update trigger: the trace store is a VIEW (cc_trace_unified /
-      # cc_trace_metadata), not a Delta table, so trace-arrival triggering is infeasible
-      # (the reason the original standalone RLM trigger job was retired). Override
-      # continuous_rlm_pause_status to PAUSED to keep it deployed-but-dormant.
-      schedule:
-        quartz_cron_expression: ${var.continuous_rlm_cron}
-        timezone_id: ${var.schedule_timezone}
+      # Trigger on the managed Delta table that receives the agent's OTEL spans. The
+      # unified trace read surface is a view, but the underlying *_otel_spans object is
+      # a real UC Delta table and is eligible for table-update triggers. Debounce a
+      # short write burst into one run; the entrypoint then drains until no eligible
+      # trace remains, including arrivals observed while earlier batches were running.
+      trigger:
         pause_status: ${var.continuous_rlm_pause_status}
+        table_update:
+          table_names:
+            - ${var.catalog}.${var.trace_schema}.${var.agent_name}_otel_spans
+          condition: ANY_UPDATED
+          min_time_between_triggers_seconds: ${var.continuous_rlm_min_time_between_triggers_seconds}
+          wait_after_last_change_seconds: ${var.continuous_rlm_wait_after_last_change_seconds}
 
       # Idempotent (successfully reviewed traces are skipped; never-attempted traces are
-      # processed before failed retries). HALO is expensive; never overlap runs. Queue
-      # scheduled firings so arrivals observed during a long batch are not dropped, and
-      # bound each batch so a hung reviewer cannot starve the queue forever.
+      # processed before failed retries). HALO is expensive; never overlap runs and do
+      # not accumulate queued trigger runs. One active run drains bounded batches until
+      # quiet, so a burst creates work inside the current run instead of a Jobs queue.
       max_concurrent_runs: 1
       timeout_seconds: ${var.continuous_rlm_timeout_seconds}
       queue:
-        enabled: true
+        enabled: false
 
       tasks:
         - task_key: continuous_rlm

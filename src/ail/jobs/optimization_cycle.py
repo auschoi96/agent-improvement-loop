@@ -467,6 +467,7 @@ def _default_publish(agent: Agent, args: argparse.Namespace) -> PublishFn:
         return publish_agent_proposals(
             proposals,
             agent_name=agent.agent_name,
+            experiment_id=agent.experiment_id,
             client=client,
             warehouse_id=args.warehouse_id,
             catalog=args.catalog,

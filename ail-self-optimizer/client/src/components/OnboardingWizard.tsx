@@ -15,9 +15,6 @@ import {
   RadioGroupItem,
   Separator,
   Skeleton,
-  Tabs,
-  TabsList,
-  TabsTrigger,
   Textarea,
 } from '@databricks/appkit-ui/react';
 import {
@@ -38,6 +35,7 @@ import {
   registerBody,
   registerMessage,
   requirementsBody,
+  requirementsForGoals,
   requirementsPlanView,
   resolvedFromCreation,
   resolvedFromValidation,
@@ -54,6 +52,7 @@ import {
   type ValidationResponse,
   type WizardState,
 } from '../lib/onboarding';
+import { postOnboardingJson } from '../lib/onboarding-api';
 
 const API = {
   requirements: '/api/onboarding/requirements',
@@ -62,13 +61,7 @@ const API = {
   register: '/api/onboarding/register',
   previewRequirements: '/api/onboarding/requirements/preview',
   confirmRequirements: '/api/onboarding/requirements/confirm',
-  status: '/api/onboarding/status',
 } as const;
-
-// The two intake modes — pick from the fixed goal catalog (the slice-1 stepper) or
-// describe requirements in free text (slice 2). Additive: the catalog path is
-// unchanged; requirements mode is a parallel flow behind a tab.
-type OnboardingMode = 'catalog' | 'requirements';
 
 const TONE_CLASS: Record<Tone, string> = {
   success: 'text-emerald-700 dark:text-emerald-300',
@@ -76,40 +69,6 @@ const TONE_CLASS: Record<Tone, string> = {
   error: 'text-destructive',
   info: 'text-muted-foreground',
 };
-
-// POST JSON and interpret the response fail-closed. A 401 maps to an honest
-// "sign in" message; a network/parse failure is an error — never a fabricated
-// success. The body identity (actor) is NEVER sent; the server resolves it.
-async function postJson<T>(url: string, body: unknown): Promise<{ ok: boolean; status: number; body: T }> {
-  let res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  let parsed = (await res.json().catch(() => ({}))) as T & {
-    outcome?: string;
-    request_id?: string;
-    run_id?: number;
-  };
-  const deadline = Date.now() + 15 * 60_000;
-  while (res.ok && parsed.outcome === 'pending' && parsed.request_id && parsed.run_id != null) {
-    if (Date.now() >= deadline) {
-      return {
-        ok: false,
-        status: 504,
-        body: { outcome: 'error', error: 'Onboarding did not finish within 15 minutes.' } as T,
-      };
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 3_000));
-    res = await fetch(API.status, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request_id: parsed.request_id, run_id: parsed.run_id }),
-    });
-    parsed = (await res.json().catch(() => ({}))) as typeof parsed;
-  }
-  return { ok: res.ok, status: res.status, body: parsed as T };
-}
 
 function Message({ message }: { message: ToneMessage | null }) {
   if (!message) return null;
@@ -128,7 +87,6 @@ export function OnboardingWizard({
   onRegistered: (agentName: string) => void;
   onClose: () => void;
 }) {
-  const [mode, setMode] = useState<OnboardingMode>('catalog');
   const [state, setState] = useState<WizardState>(initialWizardState);
   const [requirements, setRequirements] = useState<RequirementsResponse | null>(null);
   const [reqError, setReqError] = useState<string | null>(null);
@@ -136,12 +94,12 @@ export function OnboardingWizard({
 
   const patch = useCallback((p: Partial<WizardState>) => setState((s) => ({ ...s, ...p })), []);
 
-  // The goal catalog + the data gates for the current selection come from Python
-  // (two-tier: no gate/scorer logic in TS). Refetched whenever the selection
-  // changes; the empty-selection fetch on mount populates the catalog.
+  // One Python response includes the catalog and every goal's computed gate bundle.
+  // Checkbox changes are projected from that cache below, so Data Gates never waits
+  // on another serverless onboarding job or briefly shows the previous selection.
   useEffect(() => {
     let live = true;
-    postJson<RequirementsResponse>(API.requirements, requirementsBody(state.goals))
+    postOnboardingJson<RequirementsResponse>(API.requirements, requirementsBody([]))
       .then(({ ok, status, body }) => {
         if (!live) return;
         if (!ok || body.outcome === 'error') {
@@ -157,7 +115,9 @@ export function OnboardingWizard({
     return () => {
       live = false;
     };
-  }, [state.goals]);
+  }, []);
+
+  const selectedRequirements = requirementsForGoals(requirements, state.goals);
 
   const validation = stepValidation(state);
   const stepKey = WIZARD_STEPS[state.stepIndex].key;
@@ -165,7 +125,7 @@ export function OnboardingWizard({
   function finish() {
     setRegisterResult(null);
     if (!state.resolved) return;
-    void postJson<RegisterResponse>(
+    void postOnboardingJson<RegisterResponse>(
       API.register,
       // Thread the captured executor path + memory table, and the requirements-confirmed
       // goal_config when present (null on the catalog path → RLM neutral). The actor is
@@ -196,70 +156,56 @@ export function OnboardingWizard({
         <div className="flex items-start justify-between gap-4">
           <div>
             <CardTitle>Add an agent</CardTitle>
-            <CardDescription>
-              {mode === 'catalog'
-                ? WIZARD_STEPS[state.stepIndex].description
-                : 'Describe what to improve in your own words — the engine extracts the dimensions, routes each to a judge or a deterministic metric, and composes the goal.'}
-            </CardDescription>
+            <CardDescription>{WIZARD_STEPS[state.stepIndex].description}</CardDescription>
           </div>
           <Button variant="ghost" onClick={onClose} aria-label="Close wizard">
             Close
           </Button>
         </div>
-        <Tabs value={mode} onValueChange={(v) => setMode(v as OnboardingMode)}>
-          <TabsList>
-            <TabsTrigger value="catalog">Goal catalog</TabsTrigger>
-            <TabsTrigger value="requirements">Describe requirements</TabsTrigger>
-          </TabsList>
-        </Tabs>
-        {mode === 'catalog' && <Stepper stepIndex={state.stepIndex} />}
+        <Stepper stepIndex={state.stepIndex} />
       </CardHeader>
       <CardContent className="space-y-5">
-        {mode === 'catalog' ? (
-          <>
-            {stepKey === 'experiment' && <ExperimentStep state={state} patch={patch} />}
-            {stepKey === 'goals' && (
-              <GoalsStep state={state} patch={patch} requirements={requirements} reqError={reqError} />
-            )}
-            {stepKey === 'data_gate' && (
-              <DataGateStep state={state} patch={patch} requirements={requirements} reqError={reqError} />
-            )}
-            {stepKey === 'register' && <RegisterStep state={state} patch={patch} result={registerResult} />}
+        <>
+          {stepKey === 'experiment' && <ExperimentStep state={state} patch={patch} />}
+          {stepKey === 'goals' && (
+            <GoalsStep state={state} patch={patch} requirements={selectedRequirements} reqError={reqError} />
+          )}
+          {stepKey === 'data_gate' && (
+            <DataGateStep state={state} patch={patch} requirements={selectedRequirements} reqError={reqError} />
+          )}
+          {stepKey === 'register' && <RegisterStep state={state} patch={patch} result={registerResult} />}
 
-            <Separator />
+          <Separator />
 
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                variant="outline"
-                onClick={() => patch({ stepIndex: clampStep(state.stepIndex - 1) })}
-                disabled={state.stepIndex === 0 || registered}
-              >
-                Back
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={() => patch({ stepIndex: clampStep(state.stepIndex - 1) })}
+              disabled={state.stepIndex === 0 || registered}
+            >
+              Back
+            </Button>
+            {isLastStep(state) ? (
+              <Button onClick={finish} disabled={!canAdvance(state) || registered}>
+                Register agent
               </Button>
-              {isLastStep(state) ? (
-                <Button onClick={finish} disabled={!canAdvance(state) || registered}>
-                  Register agent
-                </Button>
-              ) : (
-                <Button
-                  onClick={() => patch({ stepIndex: clampStep(state.stepIndex + 1) })}
-                  disabled={!canAdvance(state)}
-                >
-                  Next
-                </Button>
-              )}
-              {registered ? (
-                <Button variant="outline" onClick={onClose}>
-                  Done
-                </Button>
-              ) : (
-                !validation.ok && <span className="text-sm text-muted-foreground">{validation.reason}</span>
-              )}
-            </div>
-          </>
-        ) : (
-          <RequirementsMode state={state} patch={patch} onClose={onClose} onRegistered={onRegistered} />
-        )}
+            ) : (
+              <Button
+                onClick={() => patch({ stepIndex: clampStep(state.stepIndex + 1) })}
+                disabled={!canAdvance(state)}
+              >
+                Next
+              </Button>
+            )}
+            {registered ? (
+              <Button variant="outline" onClick={onClose}>
+                Done
+              </Button>
+            ) : (
+              !validation.ok && <span className="text-sm text-muted-foreground">{validation.reason}</span>
+            )}
+          </div>
+        </>
       </CardContent>
     </Card>
   );
@@ -306,7 +252,10 @@ function ExperimentStep({ state, patch }: StepProps) {
   const [created, setCreated] = useState<CreationResponse | null>(null);
 
   async function createReviewer(baseName: string): Promise<string> {
-    const { body } = await postJson<CreationResponse>(API.create, createExperimentBody(`${baseName}-ail-internal`));
+    const { body } = await postOnboardingJson<CreationResponse>(API.create, {
+      ...createExperimentBody(`${baseName}-ail-internal`),
+      allow_existing: true,
+    });
     if (body.outcome !== 'created' || !body.experiment_id) {
       throw new Error(body.error ?? 'Could not create the isolated reviewer experiment.');
     }
@@ -317,7 +266,7 @@ function ExperimentStep({ state, patch }: StepProps) {
     setBusy(true);
     setMessage(null);
     try {
-      const { status, body } = await postJson<ValidationResponse>(
+      const { status, body } = await postOnboardingJson<ValidationResponse>(
         API.validate,
         validateExperimentBody(state.experimentIdInput)
       );
@@ -333,8 +282,11 @@ function ExperimentStep({ state, patch }: StepProps) {
       } else {
         patch({ resolved: null, reviewerExperimentId: '' });
       }
-    } catch {
-      setMessage({ tone: 'error', text: 'Network error validating the experiment.' });
+    } catch (error) {
+      setMessage({
+        tone: 'error',
+        text: error instanceof Error ? error.message : 'Network error validating the experiment.',
+      });
     } finally {
       setBusy(false);
     }
@@ -345,7 +297,7 @@ function ExperimentStep({ state, patch }: StepProps) {
     setMessage(null);
     setCreated(null);
     try {
-      const { status, body } = await postJson<CreationResponse>(
+      const { status, body } = await postOnboardingJson<CreationResponse>(
         API.create,
         createExperimentBody(state.experimentNameInput)
       );
@@ -366,8 +318,11 @@ function ExperimentStep({ state, patch }: StepProps) {
       } else {
         patch({ resolved: null, reviewerExperimentId: '' });
       }
-    } catch {
-      setMessage({ tone: 'error', text: 'Network error creating the experiment.' });
+    } catch (error) {
+      setMessage({
+        tone: 'error',
+        text: error instanceof Error ? error.message : 'Network error creating the experiment.',
+      });
     } finally {
       setBusy(false);
     }
@@ -413,7 +368,8 @@ function ExperimentStep({ state, patch }: StepProps) {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Existing traces are accepted when the experiment is not already registered. A separate reviewer experiment is created automatically.
+            Existing traces are accepted when the experiment is not already registered. A separate reviewer experiment
+            is created automatically.
           </p>
         </div>
       ) : (
@@ -448,12 +404,7 @@ function ExperimentStep({ state, patch }: StepProps) {
         <div className="space-y-2 rounded-md border p-3 text-sm">
           {details.url && (
             <p>
-              <a
-                href={details.url}
-                target="_blank"
-                rel="noreferrer"
-                className="underline text-primary"
-              >
+              <a href={details.url} target="_blank" rel="noreferrer" className="underline text-primary">
                 Open the experiment in MLflow
               </a>
             </p>
@@ -468,6 +419,57 @@ function ExperimentStep({ state, patch }: StepProps) {
           )}
         </div>
       )}
+
+      <Separator />
+
+      <div className="space-y-2">
+        <Label htmlFor="agent-name">Agent name</Label>
+        <Input
+          id="agent-name"
+          className="w-72"
+          value={state.agentName}
+          placeholder="e.g. my_claude_code_agent"
+          onChange={(e) => patch({ agentName: e.target.value })}
+        />
+        <p className="text-xs text-muted-foreground">
+          The cohort name used for traces, judges, goals, and comparisons.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="target-workspace">Local project the companion may edit</Label>
+        <Input
+          id="target-workspace"
+          value={state.targetWorkspace}
+          onChange={(e) => patch({ targetWorkspace: e.target.value })}
+          placeholder="/path/to/your/agent/repo"
+        />
+        <p className="text-xs text-muted-foreground">
+          Optional at registration; the executor remains fail-closed until this path is configured.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="requirements-text">Your requirements</Label>
+        <Textarea
+          id="requirements-text"
+          rows={4}
+          value={state.requirementsText}
+          placeholder="e.g. correctness matters most; never hallucinate a tool call; keep latency and cost low"
+          onChange={(e) =>
+            patch({
+              requirementsText: e.target.value,
+              goalConfig: null,
+              customJudgeNames: [],
+              accepted: false,
+            })
+          }
+        />
+        <p className="text-xs text-muted-foreground">
+          In Goals, the engine will recommend deterministic metrics and turn subjective requirements into custom
+          MemAlign judges for you to review before anything is authored.
+        </p>
+      </div>
     </div>
   );
 }
@@ -477,44 +479,166 @@ interface RequirementsProps extends StepProps {
   reqError: string | null;
 }
 
-// Page 2 — the FIXED goal set (no free text). Multi-select; each option shows its
-// resolved scorer (a deterministic L0 metric, or a MemAlign judge — never a fake
-// judge for latency/cost). The catalog comes from the Python engine.
+// Page 2 — fixed goals plus natural-language custom goals. The Python requirements
+// engine routes exact quantities to L0 metrics and subjective dimensions to MemAlign
+// judges. Nothing is authored until the user reviews and confirms the routed plan.
 function GoalsStep({ state, patch, requirements, reqError }: RequirementsProps) {
+  const [preview, setPreview] = useState<RequirementsPreviewResponse | null>(null);
+  const [previewMsg, setPreviewMsg] = useState<ToneMessage | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [targetInput, setTargetInput] = useState('');
+  const [confirmResult, setConfirmResult] = useState<RequirementsConfirmResponse | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
   if (reqError) return <p className="text-sm text-destructive">{reqError}</p>;
   if (!requirements) return <Skeleton className="h-40 w-full" />;
+
+  async function runPreview() {
+    setPreviewing(true);
+    setPreviewMsg(null);
+    setConfirmResult(null);
+    try {
+      const { status, body } = await postOnboardingJson<RequirementsPreviewResponse>(
+        API.previewRequirements,
+        previewRequirementsBody(state.requirementsText, state.agentName)
+      );
+      if (status === 401) {
+        setPreview(null);
+        setPreviewMsg({ tone: 'error', text: 'Sign in to recommend custom goals.' });
+      } else if (body.outcome === 'requirements_preview') {
+        setPreview(body);
+        setTargetInput(body.suggested_target ? String(body.suggested_target.value) : '');
+      } else {
+        setPreview(null);
+        setPreviewMsg(previewRequirementsMessage(body));
+      }
+    } catch {
+      setPreview(null);
+      setPreviewMsg({ tone: 'error', text: 'Network error recommending custom goals.' });
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  const parsedTarget = Number(targetInput);
+  const targetValid = targetInput.trim() !== '' && Number.isFinite(parsedTarget);
+
+  async function runConfirm() {
+    if (!state.resolved || !preview || !targetValid) return;
+    setConfirming(true);
+    try {
+      const { status, body } = await postOnboardingJson<RequirementsConfirmResponse>(
+        API.confirmRequirements,
+        confirmRequirementsBody(state.requirementsText, state.agentName, state.resolved.experiment_id, parsedTarget)
+      );
+      if (status === 401) {
+        setConfirmResult({ outcome: 'error', error: 'Not authenticated — sign in to confirm.' });
+      } else {
+        setConfirmResult(body);
+        if (body.outcome === 'requirements_confirmed' && body.goal_config) {
+          patch({
+            goalConfig: body.goal_config,
+            customJudgeNames: body.authored_judges ?? [],
+            accepted: false,
+          });
+        }
+      }
+    } catch {
+      setConfirmResult({ outcome: 'error', error: 'Network error confirming custom goals.' });
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  const view = preview ? requirementsPlanView(preview) : null;
+  const canPreview = Boolean(state.requirementsText.trim()) && !previewing;
+  const canConfirm = Boolean(view) && targetValid && !confirming && state.goalConfig === null;
+
   return (
-    <div className="space-y-3">
-      {requirements.catalog.map((goal) => {
-        const checked = state.goals.includes(goal.key);
-        return (
-          <label
-            key={goal.key}
-            htmlFor={`goal-${goal.key}`}
-            className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover:bg-muted/40"
-          >
-            <Checkbox
-              id={`goal-${goal.key}`}
-              checked={checked}
-              onCheckedChange={(c) =>
-                patch({
-                  goals: c === true ? toggleGoal(state.goals, goal.key) : state.goals.filter((g) => g !== goal.key),
-                })
-              }
-            />
-            <div className="space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-medium">{goal.label}</span>
-                <Badge variant={goal.requires_quality ? 'default' : 'outline'}>
-                  {goal.requires_quality ? 'judged (needs labels)' : 'deterministic'}
-                </Badge>
-                <Badge variant="outline">scorer: {goal.scorer}</Badge>
+    <div className="space-y-5">
+      <div className="space-y-3">
+        <div>
+          <p className="font-medium">Goal catalog</p>
+          <p className="text-sm text-muted-foreground">Choose any built-in goals that apply.</p>
+        </div>
+        {requirements.catalog.map((goal) => {
+          const checked = state.goals.includes(goal.key);
+          return (
+            <label
+              key={goal.key}
+              htmlFor={`goal-${goal.key}`}
+              className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover:bg-muted/40"
+            >
+              <Checkbox
+                id={`goal-${goal.key}`}
+                checked={checked}
+                onCheckedChange={(c) =>
+                  patch({
+                    goals: c === true ? toggleGoal(state.goals, goal.key) : state.goals.filter((g) => g !== goal.key),
+                    accepted: false,
+                  })
+                }
+              />
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{goal.label}</span>
+                  <Badge variant={goal.requires_quality ? 'default' : 'outline'}>
+                    {goal.requires_quality ? 'MemAlign · needs your labels' : 'deterministic'}
+                  </Badge>
+                  <Badge variant="outline">scorer: {goal.scorer}</Badge>
+                </div>
+                <p className="text-sm text-muted-foreground">{goal.description}</p>
               </div>
-              <p className="text-sm text-muted-foreground">{goal.description}</p>
-            </div>
-          </label>
-        );
-      })}
+            </label>
+          );
+        })}
+      </div>
+
+      <Separator />
+
+      <div className="space-y-3 rounded-md border p-4">
+        <div>
+          <p className="font-medium">Define custom goals from your requirements</p>
+          <p className="text-sm text-muted-foreground">
+            Subjective goals become custom MemAlign judges. They start uncalibrated: you must label traces with your own
+            feedback before the app can align and trust them. Exact goals such as latency, cost, or tokens remain
+            deterministic metrics.
+          </p>
+        </div>
+        <Textarea
+          rows={4}
+          value={state.requirementsText}
+          placeholder="Describe the behavior you want, such as: never claim a tool succeeded unless its output proves it."
+          onChange={(e) => {
+            setPreview(null);
+            setConfirmResult(null);
+            setTargetInput('');
+            patch({ requirementsText: e.target.value, goalConfig: null, customJudgeNames: [], accepted: false });
+          }}
+        />
+        <Button onClick={() => void runPreview()} disabled={!canPreview}>
+          {previewing ? 'Recommending…' : 'Recommend & define goals'}
+        </Button>
+        <Message message={previewMsg} />
+        {state.customJudgeNames.length > 0 && (
+          <p className="text-sm text-emerald-700 dark:text-emerald-300">
+            Custom judges authored: {state.customJudgeNames.join(', ')}. Add human feedback on the Labeling page to
+            align them.
+          </p>
+        )}
+        {view && (
+          <RequirementsPlanPanel
+            view={view}
+            targetInput={targetInput}
+            onTargetChange={setTargetInput}
+            onConfirm={() => void runConfirm()}
+            canConfirm={canConfirm}
+            confirming={confirming}
+            confirmResult={confirmResult}
+            disabled={state.goalConfig !== null}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -554,6 +678,18 @@ function DataGateStep({ state, patch, requirements, reqError }: RequirementsProp
         </div>
       )}
 
+      {state.customJudgeNames.length > 0 && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 space-y-2">
+          <p className="text-sm font-medium">Custom MemAlign judges need your feedback</p>
+          <p className="text-sm text-muted-foreground">
+            {state.customJudgeNames.join(', ')} will remain untrusted until you provide at least{' '}
+            {requirements.thresholds.quality_min_labels} human labels and the scored coverage reaches{' '}
+            {Math.round(requirements.thresholds.scored_coverage_floor * 100)}%. Label representative traces after
+            registration; MemAlign uses that feedback to learn your standard.
+          </p>
+        </div>
+      )}
+
       <label htmlFor="accept-gates" className="flex items-start gap-3 rounded-md border p-3 cursor-pointer">
         <Checkbox id="accept-gates" checked={state.accepted} onCheckedChange={(c) => patch({ accepted: c === true })} />
         <span className="text-sm">
@@ -585,34 +721,16 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
           <span className="font-medium">Reviewer experiment:</span> {state.reviewerExperimentId || '—'}
         </p>
         <p>
+          <span className="font-medium">Agent:</span> {state.agentName || '—'}
+        </p>
+        <p>
           <span className="font-medium">Goals:</span> {state.goals.join(', ') || '—'}
         </p>
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="agent-name">Agent name (unique)</Label>
-        <Input
-          id="agent-name"
-          className="w-72"
-          value={state.agentName}
-          placeholder="e.g. my_claude_code_agent"
-          onChange={(e) => patch({ agentName: e.target.value })}
-          disabled={done}
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="target-workspace">Target workspace (repo/path the executor edits)</Label>
-        <Input
-          id="target-workspace"
-          className="w-full max-w-xl"
-          value={state.targetWorkspace}
-          placeholder="e.g. /Workspace/Repos/me/my_agent"
-          onChange={(e) => patch({ targetWorkspace: e.target.value })}
-          disabled={done}
-        />
-        <p className="text-xs text-muted-foreground">
-          Required for the open-ended executor to run this agent — it edits and snapshots this path. Leave blank to
-          register now and add it later; until then the executor stays fail-closed on this agent. Not guessed.
+        <p>
+          <span className="font-medium">Custom judges:</span> {state.customJudgeNames.join(', ') || '—'}
+        </p>
+        <p>
+          <span className="font-medium">Local project:</span> {state.targetWorkspace || 'not configured'}
         </p>
       </div>
 
@@ -633,177 +751,6 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
       </div>
 
       <Message message={message} />
-    </div>
-  );
-}
-
-// Free-form requirements intake (slice 2). The user resolves a fresh experiment,
-// names the agent, and describes requirements in their own words; the engine
-// previews the routed plan, and — after the human sets/acknowledges the objective
-// target — authors the judges + persists the goal. Every routing/kind/target fact
-// is rendered from the Python response; nothing is re-derived here (two-tier).
-function RequirementsMode({
-  state,
-  patch,
-  onClose,
-  onRegistered,
-}: StepProps & { onClose: () => void; onRegistered: (name: string) => void }) {
-  const [requirementsText, setRequirementsText] = useState('');
-  const [preview, setPreview] = useState<RequirementsPreviewResponse | null>(null);
-  const [previewMsg, setPreviewMsg] = useState<ToneMessage | null>(null);
-  const [previewing, setPreviewing] = useState(false);
-  const [targetInput, setTargetInput] = useState('');
-  const [confirmResult, setConfirmResult] = useState<RequirementsConfirmResponse | null>(null);
-  const [confirming, setConfirming] = useState(false);
-  const [registerResult, setRegisterResult] = useState<RegisterResponse | null>(null);
-
-  const resolved = state.resolved;
-  const agentName = state.agentName.trim();
-  const confirmed = confirmResult?.outcome === 'requirements_confirmed';
-  const canPreview = Boolean(resolved?.fresh) && Boolean(agentName) && Boolean(requirementsText.trim()) && !previewing;
-
-  async function runPreview() {
-    setPreviewing(true);
-    setPreviewMsg(null);
-    setConfirmResult(null);
-    try {
-      const { status, body } = await postJson<RequirementsPreviewResponse>(
-        API.previewRequirements,
-        previewRequirementsBody(requirementsText, agentName)
-      );
-      if (status === 401) {
-        setPreview(null);
-        setPreviewMsg({ tone: 'error', text: 'Sign in to preview requirements.' });
-        return;
-      }
-      if (body.outcome === 'requirements_preview') {
-        setPreview(body);
-        // Pre-fill the editable target from Python's SUGGESTION — never a TS constant.
-        setTargetInput(body.suggested_target ? String(body.suggested_target.value) : '');
-        setPreviewMsg(null);
-      } else {
-        setPreview(null);
-        setPreviewMsg(previewRequirementsMessage(body));
-      }
-    } catch {
-      setPreview(null);
-      setPreviewMsg({ tone: 'error', text: 'Network error previewing requirements.' });
-    } finally {
-      setPreviewing(false);
-    }
-  }
-
-  const parsedTarget = Number(targetInput);
-  const targetValid = targetInput.trim() !== '' && Number.isFinite(parsedTarget);
-  const canConfirm = Boolean(preview) && targetValid && !confirming && !confirmed;
-
-  async function runConfirm() {
-    if (!resolved) return;
-    setConfirming(true);
-    try {
-      const { status, body } = await postJson<RequirementsConfirmResponse>(
-        API.confirmRequirements,
-        confirmRequirementsBody(requirementsText, agentName, resolved.experiment_id, parsedTarget)
-      );
-      if (status === 401) {
-        setConfirmResult({ outcome: 'error', error: 'Not authenticated — sign in to confirm.' });
-        return;
-      }
-      setConfirmResult(body);
-      // Capture the confirmed goal (Python's registry goal_config shape) into wizard
-      // state so the register step threads it onto the payload — confirm → register →
-      // RLM steers. Relayed verbatim (two-tier: Python owns the goal knobs).
-      if (body.outcome === 'requirements_confirmed') {
-        patch({ goalConfig: body.goal_config ?? null });
-        if (!resolved || !body.goal_config) return;
-        const registered = await postJson<RegisterResponse>(
-          API.register,
-          registerBody(agentName, resolved.experiment_id, [], {
-            targetWorkspace: state.targetWorkspace,
-            annotationsTable: state.annotationsTable,
-            goalConfig: body.goal_config,
-            reviewerExperimentId: state.reviewerExperimentId,
-          })
-        );
-        setRegisterResult(registered.body);
-        if (registered.body.outcome === 'registered' && registered.body.agent_name) {
-          onRegistered(registered.body.agent_name);
-        }
-      }
-    } catch {
-      setConfirmResult({ outcome: 'error', error: 'Network error confirming requirements.' });
-    } finally {
-      setConfirming(false);
-    }
-  }
-
-  const view = preview ? requirementsPlanView(preview) : null;
-
-  return (
-    <div className="space-y-5">
-      <ExperimentStep state={state} patch={patch} />
-
-      <div className="space-y-2">
-        <Label htmlFor="req-agent-name">Agent name (the cohort these judges + goal attach to)</Label>
-        <Input
-          id="req-agent-name"
-          className="w-72"
-          value={state.agentName}
-          placeholder="e.g. my_claude_code_agent"
-          onChange={(e) => patch({ agentName: e.target.value })}
-          disabled={confirmed}
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="req-target-workspace">Local project the companion may edit</Label>
-        <Input
-          id="req-target-workspace"
-          value={state.targetWorkspace}
-          onChange={(e) => patch({ targetWorkspace: e.target.value })}
-          placeholder="/path/to/your/agent/repo"
-          disabled={confirmed}
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="req-text">Your requirements</Label>
-        <Textarea
-          id="req-text"
-          rows={4}
-          value={requirementsText}
-          placeholder="e.g. correctness matters most; never hallucinate a tool call; keep latency and cost low"
-          onChange={(e) => setRequirementsText(e.target.value)}
-          disabled={confirmed}
-        />
-        <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => void runPreview()} disabled={!canPreview}>
-            {previewing ? 'Previewing…' : 'Preview plan'}
-          </Button>
-          {!resolved?.fresh && (
-            <span className="text-sm text-muted-foreground">Resolve a fresh experiment above first.</span>
-          )}
-          {resolved?.fresh && !agentName && (
-            <span className="text-sm text-muted-foreground">Name the agent to preview.</span>
-          )}
-        </div>
-        <Message message={previewMsg} />
-      </div>
-
-      {view && (
-        <RequirementsPlanPanel
-          view={view}
-          targetInput={targetInput}
-          onTargetChange={setTargetInput}
-          onConfirm={() => void runConfirm()}
-          canConfirm={canConfirm}
-          confirming={confirming}
-          confirmResult={confirmResult}
-          onClose={onClose}
-          disabled={confirmed}
-        />
-      )}
-      {registerResult && <Message message={registerMessage(registerResult)} />}
     </div>
   );
 }
@@ -831,7 +778,7 @@ function RequirementsPlanPanel({
   canConfirm: boolean;
   confirming: boolean;
   confirmResult: RequirementsConfirmResponse | null;
-  onClose: () => void;
+  onClose?: () => void;
   disabled: boolean;
 }) {
   const confirmed = confirmResult?.outcome === 'requirements_confirmed';
@@ -900,7 +847,7 @@ function RequirementsPlanPanel({
         <Button onClick={onConfirm} disabled={!canConfirm}>
           {confirming ? 'Confirming…' : 'Confirm & author judges'}
         </Button>
-        {confirmed && (
+        {confirmed && onClose && (
           <Button variant="outline" onClick={onClose}>
             Done
           </Button>

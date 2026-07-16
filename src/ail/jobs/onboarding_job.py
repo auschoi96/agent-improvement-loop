@@ -8,6 +8,7 @@ import json
 import os
 from datetime import UTC, datetime
 
+from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
 from ail.jobs.publish_job import resolve_job_auth
 from ail.onboarding.service import run_action
 from ail.publish import _build_workspace_client, _execute, _lit
@@ -17,12 +18,24 @@ ONBOARDING_RESULTS_TABLE = "agent_onboarding_results"
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--request-id", required=True)
-    parser.add_argument("--payload-base64", required=True)
+    # Lakeflow forwards top-level job parameters to Python wheel tasks using the
+    # parameter names verbatim (``--request_id`` / ``--payload_base64``). Keep the
+    # hyphenated forms used by the task's explicit named_parameters as aliases so
+    # either transport shape resolves to one canonical argparse destination.
+    parser.add_argument("--request-id", "--request_id", dest="request_id", required=True)
+    parser.add_argument(
+        "--payload-base64", "--payload_base64", dest="payload_base64", required=True
+    )
     parser.add_argument("--warehouse-id", required=True)
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--schema", required=True)
+    parser.add_argument("--trace-schema", default="mlflow_traces")
     parser.add_argument("--goal-llm-endpoint", required=True)
+    # The arrival-triggered RLM job id, so a successful registration can add the new
+    # agent's *_otel_spans table to that job's table_update trigger (see
+    # ail.onboarding.service._reconcile_rlm_trigger_after_register). Empty => the
+    # reconcile is skipped (the agent is still registered and covered by the cron jobs).
+    parser.add_argument("--rlm-job-id", "--rlm_job_id", dest="rlm_job_id", default="")
     parser.add_argument("--token-secret-scope", default="")
     parser.add_argument("--token-secret-key", default="")
     return parser.parse_args(argv)
@@ -68,13 +81,27 @@ def main(argv: list[str] | None = None) -> int:
         token_secret_scope=args.token_secret_scope or None,
         token_secret_key=args.token_secret_key or None,
     )
+    # MLflow's UC trace reader does not infer the warehouse from the Job's task
+    # arguments. Surface the same configured warehouse explicitly before any
+    # validate/bootstrap action inspects an existing experiment's trace history.
+    os.environ[TRACING_WAREHOUSE_ENV] = args.warehouse_id
     os.environ["AIL_GOAL_LLM_ENDPOINT"] = args.goal_llm_endpoint
+    # Surface the RLM job id for the registration's best-effort trigger reconcile.
+    # Blank stays unset so the reconcile is a quiet no-op on a deploy that omitted it.
+    if args.rlm_job_id.strip():
+        os.environ["AIL_RLM_JOB_ID"] = args.rlm_job_id.strip()
     payload = _decode_payload(args.payload_base64)
     payload.update(
         {
             "warehouse_id": args.warehouse_id,
             "catalog": args.catalog,
             "schema": args.schema,
+            # These are trusted Job configuration, not app-supplied payload values.
+            # In particular, app.yaml does not expand bundle `${var.*}` tokens, so
+            # allowing those values through would send an invalid UC trace location
+            # to MLflow when the wizard creates the isolated reviewer experiment.
+            "trace_catalog": args.catalog,
+            "trace_schema": args.trace_schema,
         }
     )
     result = run_action(payload)

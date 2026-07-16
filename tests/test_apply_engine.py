@@ -204,6 +204,7 @@ def _proposal(
     return ProposedAction(
         proposal_id=proposal_id,
         agent_name="claude_code",
+        experiment_id="660599403165942",
         action_kind=action_kind,
         risk_class=default_risk_class(action_kind),
         status=status,

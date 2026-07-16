@@ -13,6 +13,7 @@ registry write failure never reports a registered agent.
 from __future__ import annotations
 
 import json
+import types
 from typing import Any
 
 import pytest
@@ -23,6 +24,8 @@ from ail.onboarding.experiment import (
     ExperimentCreation,
     ExperimentInfo,
     ExperimentPermissionError,
+    MlflowExperimentClient,
+    UcTraceLocation,
     create_experiment,
     validate_experiment,
 )
@@ -101,6 +104,8 @@ class _FakeExperimentClient:
 
     def create_experiment(self, name, *, trace_location=None):  # type: ignore[no-untyped-def]
         self.created.append(name)
+        if trace_location is not None and name in self.by_name:
+            return self.by_name[name].experiment_id
         return self.create_returns
 
     def count_traces(self, experiment_id, *, limit):  # type: ignore[no-untyped-def]
@@ -240,6 +245,12 @@ def test_requirements_surface_the_real_floors() -> None:
     assert result.thresholds.quality_min_labels == 20
     assert result.thresholds.scored_coverage_floor == 0.5
     assert len(result.catalog) == 4
+    accuracy = next(goal for goal in result.catalog if goal.key == "accuracy")
+    # The initial catalog response carries every gate description, so changing a
+    # checkbox never waits on a second onboarding Job.
+    assert accuracy.requires_labels is True
+    assert any(gate.name == GateName.HUMAN_LABELS.value for gate in accuracy.gates)
+    assert "20" in accuracy.summary
 
 
 def test_deterministic_goal_needs_traces_not_labels() -> None:
@@ -377,6 +388,55 @@ def test_create_experiment_refuses_existing_name() -> None:
     with pytest.raises(ValueError):
         create_experiment("Taken", client=client)
     assert client.created == []  # never attempted
+
+
+def test_create_experiment_reuses_existing_name_only_when_explicit() -> None:
+    target = f"{_FAKE_HOME}/reviewer-ail-internal"
+    client = _FakeExperimentClient(by_name={target: ExperimentInfo("exp-reviewer", target)})
+    creation = create_experiment("reviewer-ail-internal", client=client, allow_existing=True)
+    assert creation == ExperimentCreation("exp-reviewer", target)
+    assert client.created == []
+
+
+def test_create_experiment_relinks_an_existing_internal_reviewer_location() -> None:
+    target = f"{_FAKE_HOME}/reviewer-ail-internal"
+    client = _FakeExperimentClient(by_name={target: ExperimentInfo("exp-reviewer", target)})
+    location = UcTraceLocation("cat", "trace_schema", "reviewer_internal")
+    creation = create_experiment(
+        "reviewer-ail-internal",
+        client=client,
+        trace_location=location,
+        allow_existing=True,
+    )
+    assert creation == ExperimentCreation("exp-reviewer", target)
+    assert client.created == [target]
+
+
+def test_mlflow_client_uses_idempotent_set_experiment_and_retries_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mlflow
+
+    client = MlflowExperimentClient()
+    monkeypatch.setattr(client, "_ensure", lambda: object())
+    calls: list[tuple[str, object]] = []
+
+    def _set_experiment(*, experiment_name: str, trace_location: object) -> object:
+        calls.append((experiment_name, trace_location))
+        if len(calls) == 1:
+            raise RuntimeError("DeadlineExceeded: location provisioning continued")
+        return types.SimpleNamespace(experiment_id="exp-linked")
+
+    monkeypatch.setattr(mlflow, "set_experiment", _set_experiment)
+    experiment_id = client.create_experiment(
+        "/Users/dev/reviewer-ail-internal",
+        trace_location=UcTraceLocation("cat", "trace_schema", "reviewer_internal"),
+    )
+
+    assert experiment_id == "exp-linked"
+    assert len(calls) == 2
+    location = calls[-1][1]
+    assert location.full_table_prefix == "cat.trace_schema.reviewer_internal"
 
 
 def test_create_experiment_failclosed_on_empty_id() -> None:
@@ -1059,3 +1119,112 @@ def test_confirm_surfaces_goal_config_that_steers_the_rlm() -> None:
     assert knobs["objective_metric"] == "no_hallucinated_tool_calls"
     assert knobs["goal_direction"] == "maximize"
     assert knobs["goal_target"] == 0.25
+
+
+# ---------------------------------------------------------------------------
+# RLM trigger reconcile after a successful registration
+# (ail.onboarding.service._reconcile_rlm_trigger_after_register). Onboarding adds
+# the new agent's *_otel_spans table to the arrival-triggered RLM job so it WAKES on
+# the new agent's traces — best-effort, never failing a successful registration.
+# ---------------------------------------------------------------------------
+
+
+class _FakeReconcileTableUpdate:
+    def __init__(self, table_names: list[str]) -> None:
+        self.table_names = list(table_names)
+
+
+class _FakeReconcileTrigger:
+    def __init__(self, table_names: list[str]) -> None:
+        self.table_update = _FakeReconcileTableUpdate(table_names)
+
+
+class _FakeReconcileSettings:
+    def __init__(self, table_names: list[str]) -> None:
+        self.trigger = _FakeReconcileTrigger(table_names)
+
+
+class _FakeReconcileJob:
+    def __init__(self, settings: Any) -> None:
+        self.settings = settings
+
+
+class _FakeReconcileJobsApi:
+    def __init__(self, table_names: list[str]) -> None:
+        self._settings = _FakeReconcileSettings(table_names)
+        self.update_calls: list[Any] = []
+
+    def get(self, job_id: int) -> Any:
+        return _FakeReconcileJob(self._settings)
+
+    def update(self, job_id: int, *, new_settings: Any) -> None:
+        self.update_calls.append((job_id, new_settings))
+
+
+class _FakeReconcileClient:
+    def __init__(self, table_names: list[str]) -> None:
+        self.jobs = _FakeReconcileJobsApi(table_names)
+
+
+def _reconcile(  # type: ignore[no-untyped-def]
+    client,
+    monkeypatch,
+    job_id_env,
+    annotations_table="cat.mlflow_traces.newbot_otel_annotations",
+):
+    from ail.onboarding.service import _reconcile_rlm_trigger_after_register
+
+    if job_id_env is None:
+        monkeypatch.delenv("AIL_RLM_JOB_ID", raising=False)
+    else:
+        monkeypatch.setenv("AIL_RLM_JOB_ID", job_id_env)
+    _reconcile_rlm_trigger_after_register(
+        client,
+        agent_name="newbot",
+        experiment_id="exp-newbot",
+        annotations_table=annotations_table,
+    )
+
+
+def test_reconcile_after_register_adds_spans_table(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = _FakeReconcileClient(["cat.mlflow_traces.claude_code_otel_spans"])
+    _reconcile(client, monkeypatch, "643188029858547")
+    assert len(client.jobs.update_calls) == 1
+    job_id, settings = client.jobs.update_calls[0]
+    assert job_id == 643188029858547
+    assert "cat.mlflow_traces.newbot_otel_spans" in settings.trigger.table_update.table_names
+
+
+def test_reconcile_after_register_skips_when_env_unset(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = _FakeReconcileClient(["cat.mlflow_traces.claude_code_otel_spans"])
+    _reconcile(client, monkeypatch, None)
+    assert client.jobs.update_calls == []  # no job id => quiet no-op, no write
+
+
+def test_reconcile_after_register_skips_on_non_int_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = _FakeReconcileClient([])
+    _reconcile(client, monkeypatch, "not-a-number")
+    assert client.jobs.update_calls == []
+
+
+def test_reconcile_after_register_is_fail_soft(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # A Jobs API failure inside the reconcile must be swallowed — a successful
+    # registration is never undone by a best-effort trigger reconcile.
+    class _BoomJobs:
+        def get(self, job_id: int) -> Any:
+            raise RuntimeError("jobs api down")
+
+    class _BoomClient:
+        def __init__(self) -> None:
+            self.jobs = _BoomJobs()
+
+    monkeypatch.setenv("AIL_RLM_JOB_ID", "42")
+    from ail.onboarding.service import _reconcile_rlm_trigger_after_register
+
+    # Must not raise.
+    _reconcile_rlm_trigger_after_register(
+        _BoomClient(),
+        agent_name="newbot",
+        experiment_id="exp-newbot",
+        annotations_table="cat.mlflow_traces.newbot_otel_annotations",
+    )

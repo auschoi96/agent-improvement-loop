@@ -13,7 +13,7 @@ export function ComparePage() {
       <RequireAgent>
         {(agent) => (
           <PanelBoundary title="Version comparison failed to load">
-            <VersionComparison agentName={agent.agent_name} />
+            <VersionComparison agentName={agent.agent_name} experimentId={agent.experiment_id} />
           </PanelBoundary>
         )}
       </RequireAgent>

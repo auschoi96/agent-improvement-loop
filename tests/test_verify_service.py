@@ -48,6 +48,11 @@ def _patch_request_seams(
 ) -> None:
     monkeypatch.setattr(vs, "resolve_catalog_schema", lambda c, s: ("cat", "sch"))
     monkeypatch.setattr(vs, "_build_workspace_client", lambda profile: object())
+    monkeypatch.setattr(
+        vs,
+        "_resolve_agent",
+        lambda *args, **kwargs: types.SimpleNamespace(experiment_id="exp-subject"),
+    )
     monkeypatch.setattr(vs, "load_pending_proposal", lambda **kwargs: proposal)
     monkeypatch.setattr(vs, "mark_verify_requested", lambda **kwargs: mark_calls.append(kwargs))
 
@@ -103,8 +108,14 @@ def test_request_refuses_non_provable_kind(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_request_flags_a_provable_pending_proposal(monkeypatch: pytest.MonkeyPatch) -> None:
     mark_calls: list[dict[str, Any]] = []
+    load_calls: list[dict[str, Any]] = []
     proposal = types.SimpleNamespace(action_kind=ActionKind.SKILL_UPDATE)
     _patch_request_seams(monkeypatch, proposal=proposal, mark_calls=mark_calls)
+    monkeypatch.setattr(
+        vs,
+        "load_pending_proposal",
+        lambda **kwargs: load_calls.append(kwargs) or proposal,
+    )
     result = vs.run_verify_request(
         proposal_id="p1",
         agent_name="claude_code",
@@ -114,8 +125,10 @@ def test_request_flags_a_provable_pending_proposal(monkeypatch: pytest.MonkeyPat
     )
     assert result.outcome is vs.VerifyRequestOutcome.REQUESTED
     assert result.verify_status == vs.VerifyStatus.REQUESTED.value
+    assert load_calls[0]["experiment_id"] == "exp-subject"
     assert len(mark_calls) == 1
     assert mark_calls[0]["proposal_id"] == "p1"
+    assert mark_calls[0]["experiment_id"] == "exp-subject"
     assert mark_calls[0]["requested_by"] == "r@x.com"
 
 
@@ -148,6 +161,26 @@ def _capture_execute(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return statements
 
 
+def test_select_requests_is_scoped_to_experiment(monkeypatch: pytest.MonkeyPatch) -> None:
+    statements: list[str] = []
+
+    def _query(client: Any, warehouse_id: str, statement: str) -> list[dict[str, Any]]:
+        statements.append(statement)
+        return []
+
+    monkeypatch.setattr(vs, "_query_rows", _query)
+    assert (
+        vs.select_pending_verify_requests(
+            client=object(),
+            warehouse_id="wh",
+            agent_name="a",
+            experiment_id="exp-subject",
+        )
+        == []
+    )
+    assert "experiment_id = 'exp-subject'" in statements[0]
+
+
 def test_write_result_none_proof_writes_all_null_and_never_sets_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,6 +189,7 @@ def test_write_result_none_proof_writes_all_null_and_never_sets_status(
         client=object(),
         warehouse_id="wh",
         agent_name="a",
+        experiment_id="exp-subject",
         proposal_id="p1",
         proof=None,
         verify_status=vs.VerifyStatus.NO_SUITE,
@@ -172,6 +206,7 @@ def test_write_result_none_proof_writes_all_null_and_never_sets_status(
     assert "verify_status = 'no_suite'" in sql
     # Evidence only: the write is scoped to the pending row and never flips approval.
     assert "status = 'pending'" in sql
+    assert "experiment_id = 'exp-subject'" in sql
     set_clause = sql.split("SET", 1)[1].split("WHERE", 1)[0]
     assert "verify_status" in set_clause
     assert " status = " not in set_clause  # approval status is untouched
@@ -197,6 +232,7 @@ def test_write_result_real_proof_populates_proof_columns(monkeypatch: pytest.Mon
         client=object(),
         warehouse_id="wh",
         agent_name="a",
+        experiment_id="exp-subject",
         proposal_id="p1",
         proof=proof,
         verify_status=vs.VerifyStatus.VERIFIED,

@@ -15,7 +15,7 @@ export function LabelingPage() {
       <RequireAgent>
         {(agent) => (
           <PanelBoundary title="Labeling failed to load">
-            <LabelingPanel agentName={agent.agent_name} experimentId={agent.experiment_id} />
+            <LabelingPanel key={agent.experiment_id} agentName={agent.agent_name} experimentId={agent.experiment_id} />
           </PanelBoundary>
         )}
       </RequireAgent>

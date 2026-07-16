@@ -6,6 +6,7 @@
 -- agent_prompt_lineage by Tier A Python; this is read-only — the app renders the
 -- audit trail, it never computes trust here.
 -- @param agent_name STRING
+-- @param experiment_id STRING
 SELECT
   version,
   source,
@@ -24,4 +25,5 @@ SELECT
   registered_at
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.agent_prompt_lineage
 WHERE agent_name = :agent_name
+  AND experiment_id = :experiment_id
 ORDER BY version DESC

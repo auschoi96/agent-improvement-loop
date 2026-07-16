@@ -191,6 +191,7 @@ def _agent_task_proposal(
     return ProposedAction(
         proposal_id=pid,
         agent_name="claude_code",
+        experiment_id="660599403165942",
         action_kind=ActionKind.AGENT_TASK,
         risk_class=default_risk_class(ActionKind.AGENT_TASK),
         status=status,
@@ -211,6 +212,7 @@ def _metric_view_proposal() -> ProposedAction:
     return ProposedAction(
         proposal_id="mv1",
         agent_name="claude_code",
+        experiment_id="660599403165942",
         action_kind=ActionKind.METRIC_VIEW,
         risk_class=default_risk_class(ActionKind.METRIC_VIEW),
         objective_metric="total_tokens",

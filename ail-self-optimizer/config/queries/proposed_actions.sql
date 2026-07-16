@@ -9,9 +9,11 @@
 -- the app's only write-path (a custom AppKit server route → ail.loop.apply_service);
 -- this query stays SELECT-only.
 -- @param agent_name STRING
+-- @param experiment_id STRING
 SELECT
   proposal_id,
   agent_name,
+  experiment_id,
   status,
   action_kind,
   risk_class,
@@ -59,4 +61,5 @@ SELECT
   verify_error
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.agent_proposed_actions
 WHERE agent_name = :agent_name
+  AND experiment_id = :experiment_id
 ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, created_at DESC

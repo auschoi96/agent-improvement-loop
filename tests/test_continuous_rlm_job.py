@@ -223,6 +223,48 @@ def test_requires_warehouse_id(monkeypatch: pytest.MonkeyPatch) -> None:
         job.main(["--experiment=EXP1"])
 
 
+def test_single_firing_drains_bounded_batches_until_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(job, "resolve_job_auth", lambda **kw: "minted")
+    calls: list[set[str]] = []
+
+    def report(trace_ids: list[str]) -> Any:
+        return SimpleNamespace(
+            n_scanned=3,
+            n_already_reviewed=0,
+            n_reviewer_traces_skipped=0,
+            n_sampled_out=0,
+            n_selected=len(trace_ids),
+            n_reviewed=len(trace_ids),
+            n_failed=0,
+            outcomes=[SimpleNamespace(trace_id=trace_id) for trace_id in trace_ids],
+        )
+
+    batches = iter([report(["t1", "t2"]), report(["t3"]), report([])])
+
+    def fake_run(_experiment_id: str, **kwargs: Any) -> Any:
+        calls.append(set(kwargs["exclude_trace_ids"]))
+        return next(batches)
+
+    monkeypatch.setattr(job, "run_continuous_rlm", fake_run)
+
+    rc = job.main(
+        [
+            "--experiment=EXP1",
+            "--reviewer-experiment=REV1",
+            "--warehouse-id=wh-1",
+            "--objective-metric=",
+            "--max-reviews=2",
+        ]
+    )
+
+    assert rc == 0
+    assert calls == [set(), {"t1", "t2"}, {"t1", "t2", "t3"}]
+
+
 # -- registry (multi-agent) mode -------------------------------------------
 
 
