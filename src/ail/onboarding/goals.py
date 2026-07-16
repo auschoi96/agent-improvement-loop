@@ -225,7 +225,7 @@ class _Contract(BaseModel):
 
 
 class GoalOption(_Contract):
-    """One catalog entry, as the dropdown renders it (no gate detail)."""
+    """One catalog entry, including precomputed gates for instant UI updates."""
 
     key: str
     label: str
@@ -236,6 +236,9 @@ class GoalOption(_Contract):
     guardrail_judges: list[str] = Field(default_factory=list)
     optional_quality_judge: str | None = None
     description: str = ""
+    requires_labels: bool = False
+    gates: list[GateRequirement] = Field(default_factory=list)
+    summary: str = ""
 
     @classmethod
     def from_spec(cls, spec: GoalSpec) -> GoalOption:
@@ -410,7 +413,22 @@ def build_requirements(goal_keys: list[str] | None = None) -> RequirementsResult
     iff any chosen goal is judged (needs the ``human_labels`` gate).
     """
     th = ReadinessThresholds()
-    catalog = [GoalOption.from_spec(GOAL_CATALOG[k]) for k in GoalKey]
+    catalog: list[GoalOption] = []
+    for catalog_key in GoalKey:
+        spec = GOAL_CATALOG[catalog_key]
+        status = _readiness_for(spec, th)
+        gates = [_gate_requirement(gate, th) for gate in status.gates]
+        catalog.append(
+            GoalOption.from_spec(spec).model_copy(
+                update={
+                    "requires_labels": any(
+                        gate.name == GateName.HUMAN_LABELS.value for gate in gates
+                    ),
+                    "gates": gates,
+                    "summary": _goal_summary(gates),
+                }
+            )
+        )
 
     selected: list[GoalRequirement] = []
     union: dict[str, GateRequirement] = {}

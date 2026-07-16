@@ -113,6 +113,7 @@ class PromptLineageRow(_Contract):
     """
 
     agent_name: str
+    experiment_id: str
     prompt_name: str
     version: int
     uri: str | None = None
@@ -223,6 +224,7 @@ def build_lineage_rows(
     prompt_name: str,
     versions: list[Any],
     *,
+    experiment_id: str,
     champion_versions: set[int],
     generated_at: str | None,
 ) -> list[PromptLineageRow]:
@@ -243,6 +245,7 @@ def build_lineage_rows(
         rows.append(
             PromptLineageRow(
                 agent_name=agent_name,
+                experiment_id=experiment_id,
                 prompt_name=prompt_name,
                 version=version_num,
                 uri=getattr(v, "uri", None),
@@ -287,6 +290,7 @@ def champion_versions(client: LineageRegistryClient, full_name: str) -> set[int]
 
 LINEAGE_COLUMNS: list[str] = [
     "agent_name",
+    "experiment_id",
     "prompt_name",
     "version",
     "uri",
@@ -310,6 +314,7 @@ LINEAGE_COLUMNS: list[str] = [
 def _lineage_row(r: PromptLineageRow) -> list[Any]:
     return [
         r.agent_name,
+        r.experiment_id,
         r.prompt_name,
         r.version,
         r.uri,
@@ -337,6 +342,7 @@ def _ddl(catalog: str, schema: str) -> list[str]:
         "COMMENT 'Agent self-optimization loop: L0 deterministic metrics (Tier A).'",
         f"""CREATE TABLE IF NOT EXISTS {fqn}.{LINEAGE_TABLE} (
             agent_name STRING,
+            experiment_id STRING,
             prompt_name STRING,
             version INT,
             uri STRING,
@@ -400,6 +406,7 @@ def publish_agent_lineage(
         agent.agent_name,
         full_name,
         versions,
+        experiment_id=agent.experiment_id,
         champion_versions=champion_versions(registry_client, full_name),
         generated_at=stamp,
     )
@@ -414,7 +421,7 @@ def publish_agent_lineage(
         LINEAGE_TABLE,
         LINEAGE_COLUMNS,
         [_lineage_row(r) for r in rows],
-        f"agent_name = {_lit(agent.agent_name)}",
+        f"agent_name = {_lit(agent.agent_name)} AND experiment_id = {_lit(agent.experiment_id)}",
     )
     return rows
 

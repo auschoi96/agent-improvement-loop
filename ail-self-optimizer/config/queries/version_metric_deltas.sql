@@ -3,6 +3,7 @@
 -- the app reads baseline/candidate/delta and renders direction; it does NOT
 -- recompute any metric or delta in SQL. Read-only.
 -- @param agent_name STRING
+-- @param experiment_id STRING
 -- @param baseline_version STRING
 -- @param candidate_version STRING
 SELECT
@@ -17,6 +18,7 @@ SELECT
   improved
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.agent_version_comparison
 WHERE agent_name = :agent_name
+  AND experiment_id = :experiment_id
   AND baseline_version = :baseline_version
   AND candidate_version = :candidate_version
 ORDER BY CASE metric

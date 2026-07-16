@@ -56,6 +56,7 @@ PROPOSALS_TABLE = "agent_proposed_actions"
 #: never drift (the :mod:`ail.publish` convention).
 PROPOSAL_COLUMNS: list[str] = [
     "agent_name",
+    "experiment_id",
     "proposal_id",
     "schema_version",
     "status",
@@ -162,6 +163,7 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
     )
     return [
         p.agent_name,
+        p.experiment_id,
         p.proposal_id,
         p.schema_version,
         p.status.value,
@@ -234,6 +236,7 @@ def _ddl(catalog: str, schema: str) -> list[str]:
         "COMMENT 'Agent self-optimization loop: L0 deterministic metrics (Tier A).'",
         f"""CREATE TABLE IF NOT EXISTS {fqn}.{PROPOSALS_TABLE} (
             agent_name STRING,
+            experiment_id STRING,
             proposal_id STRING,
             schema_version STRING,
             status STRING,
@@ -294,6 +297,7 @@ def publish_agent_proposals(
     proposals: list[ProposedAction],
     *,
     agent_name: str,
+    experiment_id: str,
     client: Any,
     warehouse_id: str,
     catalog: str = DEFAULT_CATALOG,
@@ -318,6 +322,16 @@ def publish_agent_proposals(
             "clobbers another agent."
         )
 
+    mismatched_experiments = sorted(
+        {p.experiment_id for p in proposals if p.experiment_id != experiment_id}
+    )
+    if mismatched_experiments:
+        raise ValueError(
+            f"publish_agent_proposals is scoped to experiment {experiment_id!r} but got "
+            f"{mismatched_experiments}; publish each experiment independently so an "
+            "experiment-scoped REPLACE never clobbers another experiment."
+        )
+
     stamp = generated_at or datetime.now(UTC).isoformat()
     fqn = f"`{catalog}`.`{schema}`"
     for ddl in _ddl(catalog, schema):
@@ -331,7 +345,7 @@ def publish_agent_proposals(
         PROPOSALS_TABLE,
         PROPOSAL_COLUMNS,
         rows,
-        f"agent_name = {_lit(agent_name)}",
+        f"agent_name = {_lit(agent_name)} AND experiment_id = {_lit(experiment_id)}",
     )
 
 
@@ -351,16 +365,17 @@ def publish_proposals(
     every agent's slice is replaced independently. Builds a workspace client (the
     :mod:`ail.publish` way) when one is not injected. Returns ``{agent_name: rows}``.
     """
-    by_agent: dict[str, list[ProposedAction]] = defaultdict(list)
+    by_agent: dict[tuple[str, str], list[ProposedAction]] = defaultdict(list)
     for p in proposals:
-        by_agent[p.agent_name].append(p)
+        by_agent[(p.agent_name, p.experiment_id)].append(p)
 
     ws = client if client is not None else _build_workspace_client(profile)
     written: dict[str, int] = {}
-    for name, agent_proposals in by_agent.items():
+    for (name, experiment_id), agent_proposals in by_agent.items():
         written[name] = publish_agent_proposals(
             agent_proposals,
             agent_name=name,
+            experiment_id=experiment_id,
             client=ws,
             warehouse_id=warehouse_id,
             catalog=catalog,

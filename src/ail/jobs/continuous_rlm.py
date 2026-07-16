@@ -1,9 +1,9 @@
-"""Databricks Job entrypoint for the scheduled continuous RLM review.
+"""Databricks Job entrypoint for trace-arrival continuous RLM review.
 
-Fired on a schedule (``resources/continuous_rlm.job.yml``), not a trace-arrival
-trigger: the UC-backed trace store is a VIEW, so a ``table_update`` trigger is
-infeasible. Each firing runs one bounded :func:`ail.l3.continuous.run_continuous_rlm`
-pass — sampling, idempotency, and the fail-closed failed-review marker all live there.
+Fired by a table-update trigger on the managed UC ``*_otel_spans`` Delta table
+(``resources/continuous_rlm.job.yml``). Each firing runs bounded
+:func:`ail.l3.continuous.run_continuous_rlm` batches until no eligible trace remains.
+Sampling, idempotency, and the fail-closed failed-review marker all live there.
 
 Registry-driven multi-agent: with no ``--experiment`` it runs REGISTRY MODE — it
 reads every agent from the UC ``agent_registry`` (via :mod:`ail.jobs.multi_agent`)
@@ -155,7 +155,7 @@ def _build_rubric(knobs: dict[str, Any]) -> ReviewRubric:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run one bounded scheduled RLM/HALO pass over recent MLflow traces. "
+        description="Drain unreviewed MLflow traces with bounded RLM/HALO batches. "
         "With no --experiment it runs REGISTRY MODE over every agent in agent_registry "
         "(each agent's own experiment + goal_config); pass --experiment to review JUST "
         "that one experiment (single-agent override)."
@@ -274,34 +274,69 @@ def _run_rlm_for(
         f"rubric={rubric.rubric_id} sample_rate={args.sample_rate} "
         f"max_reviews={args.max_reviews}"
     )
-    report = run_continuous_rlm(
-        experiment,
-        judge_model=args.judge_model,
-        sql_warehouse_id=args.warehouse_id,
-        max_results=args.max_results,
-        max_reviews=args.max_reviews,
-        sample_rate=args.sample_rate,
-        min_tokens=args.min_tokens,
-        rubric=rubric,
-        reviewer_experiment_id=reviewer_experiment,
-        max_turns=args.max_turns,
-        temperature=args.temperature,
-        reasoning_effort=reasoning_effort,
-        retry_failed=True,
-        max_workers=args.max_workers,
-        enable_code_sandbox=args.code_sandbox == "auto",
-    )
+    attempted_trace_ids: set[str] = set()
+    total_selected = 0
+    total_reviewed = 0
+    total_failed = 0
+    batch = 0
+    while True:
+        batch += 1
+        report = run_continuous_rlm(
+            experiment,
+            judge_model=args.judge_model,
+            sql_warehouse_id=args.warehouse_id,
+            max_results=args.max_results,
+            max_reviews=args.max_reviews,
+            sample_rate=args.sample_rate,
+            min_tokens=args.min_tokens,
+            rubric=rubric,
+            reviewer_experiment_id=reviewer_experiment,
+            max_turns=args.max_turns,
+            temperature=args.temperature,
+            reasoning_effort=reasoning_effort,
+            retry_failed=True,
+            exclude_trace_ids=attempted_trace_ids,
+            max_workers=args.max_workers,
+            enable_code_sandbox=args.code_sandbox == "auto",
+        )
+        print(
+            "[ail.jobs.continuous_rlm] "
+            f"batch={batch} scanned={report.n_scanned} "
+            f"already_reviewed={report.n_already_reviewed} "
+            f"reviewer_traces_skipped={report.n_reviewer_traces_skipped} "
+            f"sampled_out={report.n_sampled_out} selected={report.n_selected} "
+            f"reviewed={report.n_reviewed} failed={report.n_failed}"
+        )
+        total_selected += report.n_selected
+        total_reviewed += report.n_reviewed
+        total_failed += report.n_failed
+        outcomes = list(getattr(report, "outcomes", []) or [])
+        before = len(attempted_trace_ids)
+        attempted_trace_ids.update(str(outcome.trace_id) for outcome in outcomes)
+
+        if report.n_selected == 0:
+            break
+        if len(attempted_trace_ids) == before:
+            # Defensive seam for a malformed/reporting-only implementation: a
+            # selected batch with no outcome ids cannot make provable progress.
+            # Exit rather than spin forever; the task failure rule below preserves
+            # observability when everything selected failed.
+            print(
+                "[ail.jobs.continuous_rlm] selected work produced no trace outcomes; "
+                "stopping the drain to avoid an infinite loop",
+                file=sys.stderr,
+            )
+            break
+
     print(
         "[ail.jobs.continuous_rlm] "
-        f"scanned={report.n_scanned} already_reviewed={report.n_already_reviewed} "
-        f"reviewer_traces_skipped={report.n_reviewer_traces_skipped} "
-        f"sampled_out={report.n_sampled_out} selected={report.n_selected} "
-        f"reviewed={report.n_reviewed} failed={report.n_failed}"
+        f"drain_complete batches={batch} unique_attempted={len(attempted_trace_ids)} "
+        f"selected={total_selected} reviewed={total_reviewed} failed={total_failed}"
     )
     # A Databricks task must not report SUCCESS when HALO selected work but every
     # review failed. The per-trace failure markers remain attached for diagnosis,
     # while the non-zero exit makes the broken optimization loop visible to Jobs.
-    if report.n_selected > 0 and report.n_reviewed == 0:
+    if total_selected > 0 and total_reviewed == 0:
         print(
             "[ail.jobs.continuous_rlm] all selected HALO reviews failed; "
             "failing the task so the outage is observable",

@@ -45,7 +45,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from ail.loop.apply_service import _query_rows, load_pending_proposal
+from ail.loop.apply_service import _query_rows, _resolve_agent, load_pending_proposal
 from ail.loop.proposals import ActionKind, ProofSummary, ProposalStatus
 from ail.loop.publish_proposals import PROPOSALS_TABLE
 from ail.optimize.phase2 import Phase2Artifact
@@ -194,6 +194,7 @@ def mark_verify_requested(
     client: Any,
     warehouse_id: str,
     agent_name: str,
+    experiment_id: str,
     proposal_id: str,
     requested_by: str,
     requested_at: str,
@@ -216,7 +217,8 @@ def mark_verify_requested(
         f"verify_requested_by = {_lit(requested_by)}, "
         f"verify_requested_at = {_lit(requested_at)}, "
         f"verify_completed_at = NULL, verify_error = NULL "
-        f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
+        f"WHERE agent_name = {_lit(agent_name)} AND experiment_id = {_lit(experiment_id)} "
+        f"AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.PENDING.value)}",
     )
 
@@ -226,6 +228,7 @@ def select_pending_verify_requests(
     client: Any,
     warehouse_id: str,
     agent_name: str,
+    experiment_id: str,
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
 ) -> list[dict[str, Any]]:
@@ -240,6 +243,7 @@ def select_pending_verify_requests(
     sql = (
         f"SELECT proposal_id, action_kind FROM {fqn} "
         f"WHERE agent_name = {_lit(agent_name)} "
+        f"AND experiment_id = {_lit(experiment_id)} "
         f"AND status = {_lit(ProposalStatus.PENDING.value)} "
         f"AND verify_status = {_lit(VerifyStatus.REQUESTED.value)}"
     )
@@ -251,6 +255,7 @@ def write_verify_result(
     client: Any,
     warehouse_id: str,
     agent_name: str,
+    experiment_id: str,
     proposal_id: str,
     proof: ProofSummary | None,
     verify_status: VerifyStatus,
@@ -275,7 +280,8 @@ def write_verify_result(
         f"verify_status = {_lit(verify_status.value)}, "
         f"verify_completed_at = {_lit(completed_at)}, "
         f"verify_error = {_lit(verify_error)} "
-        f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
+        f"WHERE agent_name = {_lit(agent_name)} AND experiment_id = {_lit(experiment_id)} "
+        f"AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.PENDING.value)}",
     )
 
@@ -328,6 +334,7 @@ def run_verify_request(
     warehouse_id: str | None = None,
     catalog: str | None = None,
     schema: str | None = None,
+    registry_path: str | None = None,
 ) -> VerifyRequestResult:
     """Load the authoritative pending proposal and (if provable) request a verify.
 
@@ -358,11 +365,20 @@ def run_verify_request(
     try:
         resolved_catalog, resolved_schema = resolve_catalog_schema(catalog, schema)
         client = _build_workspace_client(profile)
+        agent = _resolve_agent(
+            agent_name,
+            registry_path,
+            client=client,
+            warehouse_id=wh,
+            catalog=resolved_catalog,
+            schema=resolved_schema,
+        )
         proposal = load_pending_proposal(
             client=client,
             warehouse_id=wh,
             agent_name=agent_name,
             proposal_id=proposal_id,
+            experiment_id=agent.experiment_id,
             catalog=resolved_catalog,
             schema=resolved_schema,
         )
@@ -390,6 +406,7 @@ def run_verify_request(
             client=client,
             warehouse_id=wh,
             agent_name=agent_name,
+            experiment_id=agent.experiment_id,
             proposal_id=proposal_id,
             requested_by=requested_by,
             requested_at=requested_at,
@@ -538,6 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         warehouse_id=payload.get("warehouse_id"),
         catalog=payload.get("catalog"),
         schema=payload.get("schema"),
+        registry_path=payload.get("registry_path"),
     )
     print(result.model_dump_json())
     return 0

@@ -3,6 +3,7 @@
 -- headline objective delta. The `status` is decided in Python (Tier A), never
 -- here — the app renders it, it does not compute trust. Read-only.
 -- @param agent_name STRING
+-- @param experiment_id STRING
 SELECT
   baseline_version,
   candidate_version,
@@ -25,4 +26,5 @@ SELECT
   reasons
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.agent_version_readiness
 WHERE agent_name = :agent_name
+  AND experiment_id = :experiment_id
 ORDER BY candidate_version

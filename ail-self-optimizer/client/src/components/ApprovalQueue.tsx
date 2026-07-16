@@ -38,13 +38,31 @@ const TONE_CLASS: Record<DecisionTone, string> = {
 // reviewer approves on evidence. Approve/Reject POST to the authenticated server
 // route (ail.loop.apply_service via a custom AppKit plugin); after a decision that
 // changes state the list is remounted (via `reloadKey`) so it refetches.
-export function ApprovalQueue({ agentName }: { agentName: string }) {
+export function ApprovalQueue({ agentName, experimentId }: { agentName: string; experimentId: string }) {
   const [reloadKey, setReloadKey] = useState(0);
-  return <QueueList key={reloadKey} agentName={agentName} onDecided={() => setReloadKey((k) => k + 1)} />;
+  return (
+    <QueueList
+      key={reloadKey}
+      agentName={agentName}
+      experimentId={experimentId}
+      onDecided={() => setReloadKey((k) => k + 1)}
+    />
+  );
 }
 
-function QueueList({ agentName, onDecided }: { agentName: string; onDecided: () => void }) {
-  const params = useMemo(() => ({ agent_name: sql.string(agentName) }), [agentName]);
+function QueueList({
+  agentName,
+  experimentId,
+  onDecided,
+}: {
+  agentName: string;
+  experimentId: string;
+  onDecided: () => void;
+}) {
+  const params = useMemo(
+    () => ({ agent_name: sql.string(agentName), experiment_id: sql.string(experimentId) }),
+    [agentName, experimentId]
+  );
   const { data, loading, error } = useAnalyticsQuery('proposed_actions', params);
 
   if (loading) {

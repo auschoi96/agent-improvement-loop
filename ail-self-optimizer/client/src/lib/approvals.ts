@@ -13,6 +13,7 @@ export type DecisionKind = 'approve' | 'reject';
 export interface ProposedActionRow {
   proposal_id: string;
   agent_name: string;
+  experiment_id: string;
   status: string;
   action_kind: string;
   risk_class: string;
@@ -232,9 +233,7 @@ export interface VerifyRequest {
   agent_name: string;
 }
 
-export function buildVerifyRequest(
-  row: Pick<ProposedActionRow, 'proposal_id' | 'agent_name'>
-): VerifyRequest {
+export function buildVerifyRequest(row: Pick<ProposedActionRow, 'proposal_id' | 'agent_name'>): VerifyRequest {
   return { proposal_id: row.proposal_id, agent_name: row.agent_name };
 }
 
@@ -290,9 +289,7 @@ export function verifyEvidence(row: ProposedActionRow): VerifyEvidence | null {
         detail: 'Frozen-suite proof queued on the companion — refresh for the result.',
       };
     case 'verified': {
-      const savings = hasNum(row.proof_realized_savings_pct)
-        ? fmtSignedPct(row.proof_realized_savings_pct)
-        : '—';
+      const savings = hasNum(row.proof_realized_savings_pct) ? fmtSignedPct(row.proof_realized_savings_pct) : '—';
       return {
         tone: 'success',
         label: 'Tier-2 verify: PROMOTE',

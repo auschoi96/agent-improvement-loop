@@ -82,6 +82,7 @@ describe('selectOnboardingBridge', () => {
 const jobClient = (overrides: Partial<OnboardingJobClient> = {}): OnboardingJobClient => ({
   runNow: vi.fn().mockResolvedValue({ run_id: 41 }),
   getRun: vi.fn().mockResolvedValue({ state: { life_cycle_state: 'RUNNING' } }),
+  getRunOutput: vi.fn().mockResolvedValue({}),
   executeStatement: vi.fn().mockResolvedValue({
     statement_id: 'stmt-1',
     status: { state: 'SUCCEEDED' },
@@ -133,7 +134,7 @@ describe('job onboarding transport', () => {
     expect(getRun).not.toHaveBeenCalled();
   });
 
-  it('stays pending while the run is active and fails honestly when no result was written', async () => {
+  it('stays pending while active and through a successful result-table visibility race', async () => {
     configureJobTransport();
     const active = jobClient();
     await expect(readJobOnboardingStatus('request-1', 41, active)).resolves.toMatchObject({
@@ -148,8 +149,42 @@ describe('job onboarding transport', () => {
       }),
     });
     await expect(readJobOnboardingStatus('request-1', 41, terminal)).resolves.toMatchObject({
+      outcome: 'pending',
+      request_id: 'request-1',
+      run_id: 41,
+    });
+  });
+
+  it('falls back to the successful task JSON when the result row is not visible', async () => {
+    configureJobTransport();
+    const client = jobClient({
+      getRun: vi.fn().mockResolvedValue({
+        state: { life_cycle_state: 'TERMINATED', result_state: 'SUCCESS' },
+        tasks: [{ run_id: 99 }],
+      }),
+      getRunOutput: vi.fn().mockResolvedValue({
+        logs: 'warning: noisy startup\n{"outcome":"validated","experiment_id":"exp-1","fresh":true}\n',
+      }),
+    });
+
+    await expect(readJobOnboardingStatus('request-1', 41, client)).resolves.toEqual({
+      outcome: 'validated',
+      experiment_id: 'exp-1',
+      fresh: true,
+    });
+  });
+
+  it('surfaces a failed terminal run honestly when no result exists', async () => {
+    configureJobTransport();
+    const terminal = jobClient({
+      getRun: vi.fn().mockResolvedValue({
+        state: { life_cycle_state: 'INTERNAL_ERROR', result_state: 'FAILED', state_message: 'boom' },
+      }),
+    });
+
+    await expect(readJobOnboardingStatus('request-1', 41, terminal)).resolves.toEqual({
       outcome: 'error',
-      error: 'onboarding job succeeded without writing a result',
+      error: 'onboarding job ended INTERNAL_ERROR/FAILED: boom',
     });
   });
 });

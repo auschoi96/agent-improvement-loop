@@ -114,6 +114,8 @@ class ClaudeCodeAdapter(AgentAdapter):
             hook logs the run's transcript to Databricks-managed MLflow
             (best-effort, fire-and-forget). When ``None``, the trace is built
             solely from the captured event stream.
+        logged_model_id: Optional MLflow external-agent version ID. When set, the
+            transcript trace is linked through request metadata ``mlflow.modelId``.
         default_allowed_tools: Tools allowed when a task specifies none and no
             MCP servers are configured.
     """
@@ -124,8 +126,10 @@ class ClaudeCodeAdapter(AgentAdapter):
         self,
         mlflow_experiment: str | None = None,
         default_allowed_tools: list[str] | None = None,
+        logged_model_id: str | None = None,
     ) -> None:
         self.mlflow_experiment = mlflow_experiment
+        self.logged_model_id = logged_model_id
         self.default_allowed_tools = (
             list(default_allowed_tools)
             if default_allowed_tools is not None
@@ -323,7 +327,7 @@ class ClaudeCodeAdapter(AgentAdapter):
     def _build_hooks(self, hook_matcher_cls: Any) -> dict[str, Any]:
         if not self.mlflow_experiment:
             return {}
-        hook = _mlflow_stop_hook(self.mlflow_experiment)
+        hook = _mlflow_stop_hook(self.mlflow_experiment, logged_model_id=self.logged_model_id)
         if hook is None:
             return {}
         return {"Stop": [hook_matcher_cls(hooks=[hook])]}
@@ -666,7 +670,7 @@ def _resolve_plugin_root(value: Any, root: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _mlflow_stop_hook(experiment: str) -> Any:
+def _mlflow_stop_hook(experiment: str, *, logged_model_id: str | None = None) -> Any:
     """Build a best-effort ``Stop`` hook that logs the transcript to MLflow.
 
     Configures the public ``mlflow.claude_code.tracing`` env contract
@@ -701,10 +705,17 @@ def _mlflow_stop_hook(experiment: str) -> Any:
 
         async def _log_transcript() -> None:
             try:
-                setup_mlflow()
+                def _process_with_version() -> None:
+                    setup_mlflow()
+                    if logged_model_id:
+                        with mlflow.set_active_model(model_id=logged_model_id):
+                            process_transcript(transcript_path, session_id)
+                    else:
+                        process_transcript(transcript_path, session_id)
+
                 loop = asyncio.get_running_loop()
                 await asyncio.wait_for(
-                    loop.run_in_executor(None, process_transcript, transcript_path, session_id),
+                    loop.run_in_executor(None, _process_with_version),
                     timeout=60.0,
                 )
             except Exception as exc:  # noqa: BLE001

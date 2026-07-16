@@ -861,6 +861,7 @@ def run_create(
     trace_catalog: str | None = None,
     trace_schema: str | None = None,
     trace_table_prefix: str | None = None,
+    allow_existing: bool = False,
 ) -> CreationResult:
     """Create a fresh experiment live (fail-closed; permission error is honest ERROR)."""
     if not actor.strip():
@@ -883,7 +884,12 @@ def run_create(
         if trace_catalog and trace_schema:
             prefix = _trace_table_prefix(trace_table_prefix or clean)
             location = UcTraceLocation(trace_catalog, trace_schema, prefix)
-        creation = create_experiment_probe(clean, client=client, trace_location=location)
+        creation = create_experiment_probe(
+            clean,
+            client=client,
+            trace_location=location,
+            allow_existing=allow_existing,
+        )
     except ExperimentPermissionError as exc:
         return CreationResult(
             outcome=OnboardingOutcome.ERROR,
@@ -1232,7 +1238,7 @@ def run_register(
             client=client, warehouse_id=wh, catalog=catalog, schema=schema
         )
         _ensure_baseline_judges(experiment_id.strip(), profile=profile, warehouse_id=wh)
-        return register_agent(
+        result = register_agent(
             agent_name=agent_name,
             experiment_id=experiment_id,
             goal_keys=goal_keys,
@@ -1247,6 +1253,21 @@ def run_register(
             annotations_table=annotations_table,
             target_workspace=target_workspace,
         )
+        if result.outcome is OnboardingOutcome.REGISTERED:
+            # Add this agent's own *_otel_spans table to the arrival-triggered RLM
+            # job's watched-table list so the job WAKES on the new agent's traces
+            # (the job body already reviews every registered agent; only its trigger
+            # is table-scoped). Best-effort: a reconcile failure must NOT undo a
+            # successful registration — the four cron jobs already cover the agent,
+            # and the deploy-time heal (ail.jobs.bootstrap_grants) re-reconciles the
+            # whole registry on the next bundle deploy. See ail.jobs.rlm_trigger.
+            _reconcile_rlm_trigger_after_register(
+                client,
+                agent_name=agent_name,
+                experiment_id=experiment_id,
+                annotations_table=annotations_table,
+            )
+        return result
     except Exception as exc:  # noqa: BLE001 - any infra failure is an honest ERROR, never a fake register
         return RegisterResult(
             outcome=OnboardingOutcome.ERROR,
@@ -1255,6 +1276,64 @@ def run_register(
             goals=list(goal_keys),
             actor=actor,
             error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _reconcile_rlm_trigger_after_register(
+    client: Any,
+    *,
+    agent_name: str,
+    experiment_id: str,
+    annotations_table: str | None,
+) -> None:
+    """Best-effort: add the just-registered agent's spans table to the RLM trigger.
+
+    Reads the RLM job id from ``AIL_RLM_JOB_ID`` (set by the onboarding job from the
+    ``rlm_job_id`` bundle var). Absent/blank/non-numeric => skip quietly: a deploy that
+    did not wire the id simply keeps today's behavior (the agent is registered and the
+    cron jobs cover it), never a crash. Any Jobs API failure is caught and logged, never
+    propagated — reconciling the trigger is an optimization on top of an already-durable
+    registration, not part of the registration's success contract.
+    """
+    raw = (os.environ.get("AIL_RLM_JOB_ID") or "").strip()
+    if not raw:
+        return
+    try:
+        rlm_job_id = int(raw)
+    except ValueError:
+        print(
+            f"[ail.onboarding] AIL_RLM_JOB_ID={raw!r} is not an int; "
+            "skipping RLM trigger reconcile (agent is registered).",
+            file=sys.stderr,
+        )
+        return
+
+    from ail.jobs.rlm_trigger import reconcile_rlm_trigger_tables
+
+    agent = Agent(
+        agent_name=agent_name,
+        experiment_id=experiment_id,
+        annotations_table=annotations_table,
+    )
+    try:
+        result = reconcile_rlm_trigger_tables(client, rlm_job_id=rlm_job_id, agents=[agent])
+    except Exception as exc:  # noqa: BLE001 - reconcile is best-effort; never fail the registration
+        print(
+            f"[ail.onboarding] RLM trigger reconcile failed for agent={agent_name} "
+            f"(agent IS registered; deploy heal will retry): {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    if result.updated:
+        print(
+            f"[ail.onboarding] RLM trigger now watches {', '.join(result.added)} "
+            f"for agent={agent_name}"
+        )
+    elif result.underivable:
+        print(
+            f"[ail.onboarding] agent={agent_name} has no derivable spans table "
+            "(no annotations_table); RLM trigger unchanged.",
+            file=sys.stderr,
         )
 
 
@@ -1397,6 +1476,7 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
             trace_catalog=str(payload.get("trace_catalog") or "") or None,
             trace_schema=str(payload.get("trace_schema") or "") or None,
             trace_table_prefix=str(payload.get("trace_table_prefix") or "") or None,
+            allow_existing=payload.get("allow_existing") is True,
         )
     if action == "register_agent":
         name = str(payload.get("agent_name") or "")

@@ -135,6 +135,18 @@ class TestContinuousSelection:
         assert n_reviewer_skipped == 0
         assert n_sampled_out == 2
 
+    def test_drain_exclusion_prevents_same_run_reselection(self) -> None:
+        selections, *_ = cr.select_unreviewed_traces(
+            [_trace("attempted", 1_000), _trace("next", 500)],
+            max_reviews=2,
+            sample_rate=1.0,
+            min_tokens=0,
+            retry_failed=True,
+            exclude_trace_ids={"attempted"},
+        )
+
+        assert [selection.trace_id for selection in selections] == ["next"]
+
 
 class TestContinuousRun:
     def test_prepares_optional_sandbox_once_before_parallel_reviews(

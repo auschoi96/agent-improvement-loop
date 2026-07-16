@@ -419,6 +419,7 @@ class ProposedAction(_Model):
     schema_version: str = SCHEMA_VERSION
     proposal_id: str
     agent_name: str
+    experiment_id: str
     action_kind: ActionKind
     risk_class: RiskClass
     status: ProposalStatus = ProposalStatus.PENDING

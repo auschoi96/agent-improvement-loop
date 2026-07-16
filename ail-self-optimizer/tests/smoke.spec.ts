@@ -41,6 +41,115 @@ test('smoke test - quick connect is the default add-agent path', async ({ page }
   await expect(page.locator('[data-slot="card-title"]').filter({ hasText: 'Add an agent' })).toBeVisible();
 });
 
+test('background agent polling keeps the active overview mounted', async ({ page }) => {
+  let agentQueryRequests = 0;
+  page.on('request', (request) => {
+    if (request.url().includes('/api/analytics/query/agents')) agentQueryRequests += 1;
+  });
+
+  // Accelerate only AgentProvider's exact 30-second interval. Other app timers keep
+  // their production behavior, while this regression crosses multiple agent polls.
+  await page.addInitScript(() => {
+    const nativeSetInterval = window.setInterval.bind(window);
+    window.setInterval = ((handler, timeout, ...args) =>
+      nativeSetInterval(handler, timeout === 30_000 ? 250 : timeout, ...args)) as typeof window.setInterval;
+  });
+
+  await page.goto('/overview?agent=claude_code');
+  const toolWasteTab = page.getByRole('tab', { name: 'Tool waste' });
+  await expect(toolWasteTab).toBeVisible();
+  await toolWasteTab.click();
+  await expect(toolWasteTab).toHaveAttribute('aria-selected', 'true');
+
+  const tabList = page.getByRole('tablist');
+  const originalTabList = await tabList.elementHandle();
+  expect(originalTabList).not.toBeNull();
+
+  await expect.poll(() => agentQueryRequests).toBeGreaterThanOrEqual(2);
+
+  await expect(toolWasteTab).toHaveAttribute('aria-selected', 'true');
+  expect(await originalTabList!.evaluate((node) => node.isConnected)).toBe(true);
+});
+
+test('switching the agent experiment replaces every experiment-scoped view', async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.setExtraHTTPHeaders({ 'x-forwarded-email': 'smoke-test@databricks.com' });
+  const legacyExperiment = '660599403165942';
+  const isolatedExperiment = '1301765275062543';
+  let selectedExperiment = isolatedExperiment;
+
+  await page.route('**/api/analytics/query/agents', async (route) => {
+    const body = `data: ${JSON.stringify({
+      type: 'result',
+      data: [
+        {
+          agent_name: 'claude_code',
+          experiment_id: selectedExperiment,
+          reviewer_experiment_id: '1301765275062544',
+          description: 'Claude Code CLI sessions',
+        },
+      ],
+    })}\n\n`;
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body });
+  });
+
+  await page.addInitScript(() => {
+    const nativeSetInterval = window.setInterval.bind(window);
+    window.setInterval = ((handler, timeout, ...args) => {
+      if (timeout === 30_000) {
+        (window as Window & { runAgentPoll?: () => void }).runAgentPoll = () => {
+          if (typeof handler === 'function') handler(...args);
+        };
+        return nativeSetInterval(() => undefined, 2_147_483_647);
+      }
+      return nativeSetInterval(handler, timeout, ...args);
+    }) as typeof window.setInterval;
+  });
+
+  const pollAgents = async () => {
+    await page.evaluate(() => (window as Window & { runAgentPoll?: () => void }).runAgentPoll?.());
+  };
+
+  await page.goto('/overview?agent=claude_code');
+  const tracesKpi = page.getByText('Traces', { exact: true }).locator('..');
+  await expect(tracesKpi.getByText('122', { exact: true })).toBeVisible();
+
+  selectedExperiment = legacyExperiment;
+  await pollAgents();
+  await expect(tracesKpi.getByText('264', { exact: true })).toBeVisible();
+
+  await page.goto('/compare?agent=claude_code');
+  await expect(page.getByText('v0-baseline-no-skill → v1-token-efficiency-skill')).toBeVisible();
+
+  selectedExperiment = isolatedExperiment;
+  await pollAgents();
+  await expect(page.getByText(/No version comparison published/)).toBeVisible();
+
+  await page.goto('/labeling?agent=claude_code');
+  await expect(page.getByText(/correctness judge/).first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/modularity judge/).first()).toBeVisible();
+  await expect(page.getByText(/groundedness judge/).first()).toBeVisible();
+  await expect(page.getByText(/token_efficiency judge/).first()).toBeVisible();
+  const isolatedTrace = page.getByText(/trace:.*mlflow_traces\.claude_code\//).first();
+  await expect(isolatedTrace).toBeVisible();
+  const isolatedTraceNode = await isolatedTrace.elementHandle();
+  expect(isolatedTraceNode).not.toBeNull();
+
+  selectedExperiment = legacyExperiment;
+  await pollAgents();
+  await expect(page.getByText(/trace:.*mlflow_traces\.cc\//).first()).toBeVisible({ timeout: 60_000 });
+  expect(await isolatedTraceNode!.evaluate((node) => node.isConnected)).toBe(false);
+
+  selectedExperiment = isolatedExperiment;
+  await pollAgents();
+  await page.goto('/approvals?agent=claude_code');
+  await expect(page.getByText('Skill update', { exact: true })).toBeVisible();
+
+  selectedExperiment = legacyExperiment;
+  await pollAgents();
+  await expect(page.getByText(/No pending proposals/)).toBeVisible();
+});
+
 // ── Lifecycle hooks (artifact capture; unchanged from template) ──────────────
 
 test.beforeEach(async ({ page }) => {

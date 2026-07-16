@@ -325,6 +325,7 @@ def run_cycle(
                     change=candidate.change,
                 ),
                 agent_name=agent.agent_name,
+                experiment_id=agent.experiment_id,
                 action_kind=decision.action_kind,
                 risk_class=decision.risk_class,
                 status=ProposalStatus.PENDING,

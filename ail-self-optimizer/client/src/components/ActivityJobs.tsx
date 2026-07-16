@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { useMemo } from 'react';
+import { sql } from '@databricks/appkit-ui/js';
 import {
   Badge,
   Button,
@@ -51,7 +53,7 @@ const OUTCOME_TONE_CLASS: Record<OutcomeTone, string> = {
 //   2. Recent proposal/decision outcomes — a SELECT-only view of agent_proposed_actions.
 //   3. Un-instrumented optimizers — an explicit "not tracked as jobs yet" state.
 // Strictly read-only: nothing here mutates state or triggers a run.
-export function ActivityJobs({ onClose }: { onClose: () => void }) {
+export function ActivityJobs({ onClose, experimentId }: { onClose: () => void; experimentId: string }) {
   return (
     <Card className="shadow-sm border-primary/30">
       <CardHeader>
@@ -71,7 +73,7 @@ export function ActivityJobs({ onClose }: { onClose: () => void }) {
       <CardContent className="space-y-8">
         <RegisteredJobRuns />
         <Separator />
-        <RecentOutcomes />
+        <RecentOutcomes experimentId={experimentId} />
         <Separator />
         <UntrackedOptimizers />
       </CardContent>
@@ -225,15 +227,16 @@ function RunRow({ run }: { run: JobRunView }) {
 
 // --- Section 2: recent proposal/decision outcomes ----------------------------------
 
-function RecentOutcomes() {
-  const { data, loading, error } = useAnalyticsQuery('recent_activity');
+function RecentOutcomes({ experimentId }: { experimentId: string }) {
+  const params = useMemo(() => ({ experiment_id: sql.string(experimentId) }), [experimentId]);
+  const { data, loading, error } = useAnalyticsQuery('recent_activity', params);
   const rows = (data ?? []) as RecentActivityRow[];
 
   return (
     <section className="space-y-3">
       <SectionHeading
         title="Recent proposal & decision outcomes"
-        description="A read-only view of agent_proposed_actions across every agent — each proposal's current outcome (pending / approved / rejected / applied / superseded) and when it was created. The observability complement to the approval queue's pending-only view."
+        description="A read-only view of proposal outcomes scoped to the selected MLflow experiment. Switching experiments cannot leak proposals from the prior target."
       />
 
       {loading && (
