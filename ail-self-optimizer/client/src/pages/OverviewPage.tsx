@@ -25,7 +25,7 @@ import { useLiveRefreshRevision } from '../shell/live-refresh-context';
 // KPIs stay pinned at the top; the deeper diagnostics move into tabs so the surface no
 // longer dumps everything into one long scroll. Every panel keeps its exact query,
 // parameters, and ESTIMATE labeling — only the layout changed.
-function OverviewBody({ experimentId }: { experimentId: string }) {
+function OverviewBody({ experimentId, annotationsTable }: { experimentId: string; annotationsTable?: string }) {
   const refreshRevision = useLiveRefreshRevision();
   // Memoize the shared :experiment_id binding so the per-agent queries don't refetch on
   // every render (AppKit parameter guidance).
@@ -34,7 +34,7 @@ function OverviewBody({ experimentId }: { experimentId: string }) {
   return (
     <div className="space-y-6">
       <PanelBoundary title="Corpus summary failed to load">
-        <CorpusKpis key={`corpus-${refreshRevision}`} experimentId={experimentId} />
+        <CorpusKpis key={`corpus-${refreshRevision}`} experimentId={experimentId} annotationsTable={annotationsTable} />
       </PanelBoundary>
 
       <Tabs defaultValue="tail" className="space-y-4">
@@ -162,7 +162,9 @@ export function OverviewPage() {
   return (
     <div className="space-y-6">
       <PageHeader />
-      <RequireAgent>{(agent) => <OverviewBody experimentId={agent.experiment_id} />}</RequireAgent>
+      <RequireAgent>
+        {(agent) => <OverviewBody experimentId={agent.experiment_id} annotationsTable={agent.annotations_table} />}
+      </RequireAgent>
     </div>
   );
 }

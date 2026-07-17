@@ -26,6 +26,10 @@ test('smoke test - overview loads and renders current sections', async ({ page }
   if (await populated.isVisible()) {
     await expect(page.getByText('Total Tokens', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('Tool Calls', { exact: true }).first()).toBeVisible();
+    const tracesKpi = populated.locator('..');
+    await expect(
+      tracesKpi.getByText('LIVE', { exact: true }).or(tracesKpi.getByText('SNAPSHOT', { exact: true }))
+    ).toBeVisible();
   }
 });
 
@@ -86,6 +90,7 @@ test('switching the agent experiment replaces every experiment-scoped view', asy
           agent_name: 'claude_code',
           experiment_id: selectedExperiment,
           reviewer_experiment_id: '1301765275062544',
+          annotations_table: '',
           description: 'Claude Code CLI sessions',
         },
       ],
@@ -113,6 +118,7 @@ test('switching the agent experiment replaces every experiment-scoped view', asy
   await page.goto('/overview?agent=claude_code');
   const tracesKpi = page.getByText('Traces', { exact: true }).locator('..');
   await expect(tracesKpi.getByText('122', { exact: true })).toBeVisible();
+  await expect(tracesKpi.getByText('Snapshot · live table not registered', { exact: true })).toBeVisible();
 
   selectedExperiment = legacyExperiment;
   await pollAgents();

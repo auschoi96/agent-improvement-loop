@@ -305,7 +305,10 @@ ail-bootstrap-grants --experiment <EXPERIMENT_ID> \
 #    job with --var apply_job_id=<id> (from step 1 / §7) so it also auto-grants
 #    CAN_MANAGE_RUN on that job + injects AIL_APPLY_JOB_ID; see §7.
 cd ail-self-optimizer && databricks bundle deploy --profile dais-demo \
-  --var apply_job_id=<APPLY_JOB_ID> --var catalog=<CATALOG> --var schema=<SCHEMA> && cd ..
+  --var apply_job_id=<APPLY_JOB_ID> --var catalog=<CATALOG> --var schema=<SCHEMA> \
+  --var trace_schema=<TRACE_SCHEMA> \
+  --var primary_otel_spans_table_name=<FIRST_AGENT_PREFIX>_otel_spans \
+  --var secondary_otel_spans_table_name=<SECOND_AGENT_PREFIX>_otel_spans && cd ..
 databricks bundle run app -t default --profile dais-demo   # start the app
 
 # 4. capture the App SP -> the single framework SP
@@ -335,6 +338,14 @@ databricks bundle deploy -t dais_demo_sp --var framework_sp_id="$SP" \
 > re-deploying the reference demo) is `AIL_ALLOW_REFERENCE_WORKSPACE=1` -- a
 > **distinct** env var from the bootstrap's `AIL_ALLOW_REFERENCE` /
 > `--allow-reference-workspace` (step 2 / §3).
+
+The app bundle declares every analytics table and registered agent OTEL spans
+table as a `uc_securable` with `permission: SELECT`. Databricks Apps grants those
+permissions to the app service principal during deployment. Add another declared
+OTEL table resource (or replace one of the two table-name variables) whenever the
+registry grows; a live-count query for an undeclared table fails closed and the UI
+continues showing the last atomic L0 snapshot. Do not compensate by adding the app
+service principal to `admins`.
 
 ---
 
@@ -417,6 +428,10 @@ the design is honest about what is declarative and what is not:
 - **App warehouse grant: native.** Declaring the warehouse on the app with
   `permission: CAN_USE` auto-grants `CAN_USE` to the app SP on deploy — no
   bootstrap needed for the app itself.
+- **App Unity Catalog reads are native.** Every app-read table is declared as a
+  `uc_securable` with `permission: SELECT`, including the registered agents'
+  `*_otel_spans` tables used for the live trace count. Deployment applies the
+  table grants to the app SP; no admin-group membership is required.
 
 ---
 
