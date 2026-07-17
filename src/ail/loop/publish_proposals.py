@@ -45,9 +45,10 @@ __all__ = [
     "PROPOSAL_COLUMNS",
     "publish_agent_proposals",
     "publish_proposals",
+    "insert_proposal_if_absent",
 ]
 
-SCHEMA_VERSION = "ail.loop.proposals/v1"
+SCHEMA_VERSION = "ail.loop.proposals/v1.1"
 
 #: The single unified table lane 3's approval queue reads (SELECT-only).
 PROPOSALS_TABLE = "agent_proposed_actions"
@@ -88,6 +89,14 @@ PROPOSAL_COLUMNS: list[str] = [
     "change_plan",
     "change_preview_diff",
     "change_produced_change_ref",
+    # reviewed local-apply contract + companion lifecycle. The hosted app only
+    # advances approval; these fields are executed/updated by the local companion.
+    "change_local_apply_spec_json",
+    "local_apply_status",
+    "local_apply_error",
+    "local_apply_completed_at",
+    "local_apply_pre_change_ref",
+    "local_apply_validation_output",
     # proof
     "proof_objective_metric",
     "proof_proved_improvement",
@@ -190,6 +199,12 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
         c.plan,
         c.preview_diff,
         c.produced_change_ref,
+        c.local_apply_spec.model_dump_json() if c.local_apply_spec is not None else None,
+        "awaiting_approval" if c.local_apply_spec is not None else None,
+        None,
+        None,
+        None,
+        None,
         *proof_cols,
         g.readiness_tier,
         g.can_prove_improvement,
@@ -263,6 +278,12 @@ def _ddl(catalog: str, schema: str) -> list[str]:
             change_plan STRING,
             change_preview_diff STRING,
             change_produced_change_ref STRING,
+            change_local_apply_spec_json STRING,
+            local_apply_status STRING,
+            local_apply_error STRING,
+            local_apply_completed_at STRING,
+            local_apply_pre_change_ref STRING,
+            local_apply_validation_output STRING,
             proof_objective_metric STRING,
             proof_proved_improvement BOOLEAN,
             proof_correctness_held BOOLEAN,
@@ -383,3 +404,38 @@ def publish_proposals(
             generated_at=generated_at,
         )
     return written
+
+
+def insert_proposal_if_absent(
+    proposal: ProposedAction,
+    *,
+    client: Any,
+    warehouse_id: str,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+    generated_at: str | None = None,
+) -> bool:
+    """Insert one externally-produced proposal without replacing the agent slice.
+
+    The GEPA job runs independently of the controller publisher. Reusing the
+    publisher's agent-scoped ``REPLACE`` would erase unrelated pending/decided rows,
+    so this path uses a guarded ``INSERT ... WHERE NOT EXISTS`` keyed by
+    ``(agent_name, experiment_id, proposal_id)``. Repeating persistence for the same
+    MLflow run is therefore idempotent and never resets an approved/applied row.
+    """
+    stamp = generated_at or datetime.now(UTC).isoformat()
+    for ddl in _ddl(catalog, schema):
+        _execute(client, warehouse_id, ddl)
+    row = _proposal_row(proposal, generated_at=stamp)
+    fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
+    columns = ", ".join(PROPOSAL_COLUMNS)
+    values = ", ".join(_lit(v) for v in row)
+    statement = (
+        f"INSERT INTO {fqn} ({columns}) SELECT {values} "
+        f"WHERE NOT EXISTS (SELECT 1 FROM {fqn} "
+        f"WHERE agent_name = {_lit(proposal.agent_name)} "
+        f"AND experiment_id = {_lit(proposal.experiment_id)} "
+        f"AND proposal_id = {_lit(proposal.proposal_id)})"
+    )
+    _execute(client, warehouse_id, statement)
+    return True

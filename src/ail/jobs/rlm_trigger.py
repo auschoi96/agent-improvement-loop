@@ -45,6 +45,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from databricks.sdk.service.jobs import Condition as TableUpdateCondition
+
 from ail.registry import Agent
 
 __all__ = [
@@ -174,10 +176,16 @@ def reconcile_rlm_trigger_tables(
             watched=watched,
         )
 
-    # Partial update: mutate ONLY the watched-table list on the existing settings and
-    # send them back. jobs.update merges new_settings, so preserving the rest of the
-    # object (schedule=None, queue, tasks, debounce) keeps every other setting intact.
+    # Databricks requires an explicit condition once more than one table is watched.
+    # ANY_UPDATED matches the product contract: an arrival in any registered agent's
+    # spans table must wake the registry-driven drain.
     table_update.table_names = watched
+    if len(watched) > 1:
+        table_update.condition = TableUpdateCondition.ANY_UPDATED
+
+    # Partial update: mutate only the watched-table list and its required multi-table
+    # condition on the existing settings, preserving schedule absence, queue, tasks,
+    # and debounce values.
     client.jobs.update(rlm_job_id, new_settings=settings)
 
     return ReconcileResult(

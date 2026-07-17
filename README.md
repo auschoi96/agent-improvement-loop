@@ -60,6 +60,23 @@ flowchart LR
 | Proposal generation | Requires the local companion to be running on compute that can access the agent's project. |
 | Applying changes | Requires human approval. The hosted app does not silently edit a local coding project. |
 | Comparing versions | Requires version/configuration metadata and published comparison evidence. Merely naming two traces does not prove one version is better. |
+| GEPA optimization | Runs only when a user opens Optimize, chooses a bounded budget, acknowledges the cost, and dispatches it. It is not an automatic reaction to every trace. |
+
+### What happens when you run GEPA
+
+The Optimize page dispatches a bounded Databricks Job. This repository uses
+**GEPA Optimize Anything directly** (`gepa.optimize` with a custom adapter), not
+`mlflow.genai.optimize_prompts`, because the artifact is a coding-agent skill body
+and fitness is a two-arm baseline/candidate comparison that fails closed on execution
+or correctness regressions.
+
+If the evolved body wins on the held-out split, the job logs it to the reviewer
+MLflow experiment and creates an Approval with the exact local diff, project-relative
+target, hashes, evidence, and validation command. Approval changes it to
+`approved / waiting_for_companion`; the hosted app never writes the user's computer.
+The local companion downloads the approved artifact, verifies the target and hashes,
+snapshots it, rewrites atomically, validates, and records lineage. Conflicts apply
+nothing, and failed validation restores the original snapshot.
 
 ## Important caveats
 
@@ -69,11 +86,13 @@ Read these before treating the loop as fully autonomous:
 |---|---|
 | Quality goals need human feedback | Custom quality goals start as **untrusted** MemAlign judges. Label representative traces; the default alignment floor is about 20 labels, and trust still requires agreement and scored coverage. Pure token, latency, tool-count, and cost goals are deterministic and do not inherently need labels. |
 | Subject and reviewer experiments must stay separate | Assessments attach to subject traces, while RLM/judge execution traces go to the reviewer experiment. Combining them contaminates counts and can make the framework review itself. |
-| RLM triggers watch physical tables | The reference job watches `austin_choi_omni_agent_catalog.mlflow_traces.claude_code_otel_spans`. A new agent using another spans table needs that table added to the job trigger. Registry membership does not update the trigger automatically. The scan window is the newest 10,000 traces, so very large backlogs need an explicit backfill. |
+| RLM triggers watch physical tables | Onboarding adds a new agent's derived `*_otel_spans` table to the RLM trigger, and deployment bootstrap heals the full add-only registry list after a bundle deploy. An agent without a valid `annotations_table` is reported as underivable rather than guessed. The scan window is the newest 10,000 traces, so very large backlogs still need an explicit backfill. |
 | Coding-agent versions are metadata snapshots | Claude Code and Codex are external processes, so versions use `mlflow.create_external_model(model_type="agent")`. Set `MLFLOW_ACTIVE_MODEL_ID` or call `set_active_model` to link future traces. Historical traces are not rewritten with `mlflow.modelId`. |
 | The local companion must be running | Databricks continues evaluating traces if the companion stops, but local planning, proposals, and approved project edits do not progress. |
 | Existing experiments can be adopted but not shared | A populated experiment can keep its trace history, but one experiment can belong to only one registry entry. Every app page is scoped by the selected entry's experiment ID. |
 | Authentication is environment-specific | UC trace APIs need accepted runtime credentials. Expired local profile OAuth can break trace reads and browser smoke tests even when the deployed app is healthy. |
+| GEPA currently executes Claude Code only | The hosted job packages the `claude_code` coding-agent adapter. Codex and arbitrary custom coding agents remain visible in the app, but Optimize refuses their live runs until an executable adapter is packaged. |
+| GEPA cannot edit a laptop from the app | Approval records `waiting_for_companion`. A locally running companion verifies the reviewed MLflow artifact and hashes before it rewrites the configured project-relative target. |
 
 ## What recently changed
 
@@ -92,6 +111,10 @@ Read these before treating the loop as fully autonomous:
   trigger with drain-until-quiet behavior.
 - Compare now shows coding-agent configuration differences and MLflow external
   agent version IDs.
+- Optimize now dispatches and monitors the resource-scoped GEPA Databricks Job
+  without refreshing the page. A held-out winner becomes an experiment-scoped
+  Approval; the local companion performs the reviewed rewrite with snapshot,
+  validation, rollback, and lineage.
 
 The detailed deployment record, live IDs, validation results, and remaining
 operational checks are in
@@ -127,7 +150,8 @@ The deployment order is important:
    schema variables.
 2. Run `ail-bootstrap-grants` before the app build so required tables and additive
    columns exist and the monitoring warehouse is configured.
-3. Deploy the AppKit app with the job and warehouse resource IDs.
+3. Deploy the AppKit app with the apply, onboarding, GEPA, monitoring-job, and
+   warehouse resource IDs. The GEPA binding requires `CAN_MANAGE_RUN`.
 4. Onboard the agent in the app and confirm its goals/data gates.
 5. Start the local companion for planning and applying approved project changes.
 
@@ -145,6 +169,7 @@ tables have not been migrated.
 - App tables: `austin_choi_omni_agent_catalog.agent_improvement_loop`
 - Trace tables: `austin_choi_omni_agent_catalog.mlflow_traces`
 - RLM job: `643188029858547` (`ail-continuous-rlm-trace-arrival`)
+- GEPA job: `804443805571652` (`ail-gepa-optimization`, queue disabled)
 
 ## Provenance and license
 

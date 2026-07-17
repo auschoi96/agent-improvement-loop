@@ -11,6 +11,7 @@ import { ActivityPage } from './pages/ActivityPage';
 import { LineagePage } from './pages/LineagePage';
 import { AddAgentPage } from './pages/AddAgentPage';
 import { HowItWorksPage } from './pages/HowItWorksPage';
+import { OptimizePage } from './pages/OptimizePage';
 import { DEFAULT_PATH } from './lib/navigation';
 import { LiveRefreshBoundary } from './shell/LiveRefreshBoundary';
 
@@ -32,12 +33,48 @@ export default function App() {
             <div className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8">
               <Routes>
                 <Route path="/" element={<Navigate to={DEFAULT_PATH} replace />} />
-                <Route path="/overview" element={<LiveRefreshBoundary><OverviewPage /></LiveRefreshBoundary>} />
-                <Route path="/compare" element={<LiveRefreshBoundary><ComparePage /></LiveRefreshBoundary>} />
-                <Route path="/approvals" element={<LiveRefreshBoundary><ApprovalsPage /></LiveRefreshBoundary>} />
+                <Route
+                  path="/overview"
+                  element={
+                    <LiveRefreshBoundary>
+                      <OverviewPage />
+                    </LiveRefreshBoundary>
+                  }
+                />
+                <Route
+                  path="/compare"
+                  element={
+                    <LiveRefreshBoundary>
+                      <ComparePage />
+                    </LiveRefreshBoundary>
+                  }
+                />
+                <Route path="/optimize" element={<OptimizePage />} />
+                <Route
+                  path="/approvals"
+                  element={
+                    <LiveRefreshBoundary>
+                      <ApprovalsPage />
+                    </LiveRefreshBoundary>
+                  }
+                />
                 <Route path="/labeling" element={<LabelingPage />} />
-                <Route path="/activity" element={<LiveRefreshBoundary><ActivityPage /></LiveRefreshBoundary>} />
-                <Route path="/lineage" element={<LiveRefreshBoundary><LineagePage /></LiveRefreshBoundary>} />
+                <Route
+                  path="/activity"
+                  element={
+                    <LiveRefreshBoundary>
+                      <ActivityPage />
+                    </LiveRefreshBoundary>
+                  }
+                />
+                <Route
+                  path="/lineage"
+                  element={
+                    <LiveRefreshBoundary>
+                      <LineagePage />
+                    </LiveRefreshBoundary>
+                  }
+                />
                 <Route path="/add-agent" element={<AddAgentPage />} />
                 <Route path="/how-it-works" element={<HowItWorksPage />} />
                 <Route path="*" element={<Navigate to={DEFAULT_PATH} replace />} />

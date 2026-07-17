@@ -10,6 +10,7 @@ import {
   gateSummary,
   isPending,
   isProvable,
+  localApplySpec,
   proofSummary,
   rejectReasonError,
   riskClassLabel,
@@ -114,6 +115,8 @@ function QueueList({
                 <Badge variant={row.status === 'applied' ? 'default' : 'outline'}>{row.status}</Badge>
                 <span>{actionKindLabel(row.action_kind)}</span>
                 <span className="text-xs">· {row.trigger_summary}</span>
+                {row.local_apply_status && <span className="text-xs">· local: {row.local_apply_status}</span>}
+                {row.local_apply_error && <span className="text-xs text-destructive">· {row.local_apply_error}</span>}
               </li>
             ))}
           </ul>
@@ -136,6 +139,7 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
   // for those kinds. The engine independently refuses a non-provable request.
   const provable = isProvable(row.action_kind);
   const evidence = verifyEvidence(row);
+  const localSpec = localApplySpec(row);
 
   async function decide(decision: DecisionKind) {
     setMessage(null);
@@ -167,7 +171,7 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
       const msg = decisionMessage(body);
       setMessage(msg);
       // Refresh the queue only when the proposal's state actually changed.
-      if (['applied', 'rejected', 'applied_unrecorded'].includes(body.outcome)) {
+      if (['approved', 'applied', 'rejected', 'applied_unrecorded'].includes(body.outcome)) {
         onDecided();
       }
     } catch (err) {
@@ -254,6 +258,38 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
             {change.body}
           </pre>
         </details>
+
+        {localSpec && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm space-y-1">
+            <p className="font-semibold">Local companion apply required</p>
+            <p>
+              Target: <code>{localSpec.target_path}</code> ({localSpec.target_kind})
+            </p>
+            <p>
+              Held-out evidence: evolved {localSpec.holdout_evolved_savings_pct ?? '—'}% vs seed{' '}
+              {localSpec.holdout_seed_savings_pct ?? '—'}% · delta {localSpec.holdout_savings_delta_pct ?? '—'} pct-pts
+              {localSpec.holdout_task_ids?.length ? ` · ${localSpec.holdout_task_ids.length} held-out task(s)` : ''}
+            </p>
+            <p>
+              Baseline hash: <code>{localSpec.baseline_sha256}</code>
+            </p>
+            <p>
+              Candidate hash: <code>{localSpec.candidate_sha256}</code>
+            </p>
+            <p>
+              Validate: <code>{localSpec.validation_command.join(' ')}</code> (timeout{' '}
+              {localSpec.validation_timeout_seconds}s)
+            </p>
+            <p>
+              Artifact: <code>{localSpec.artifact_uri}</code>
+            </p>
+            <p className="text-muted-foreground">
+              Approve authorizes only this stored artifact and relative path. The hosted app cannot write local files;
+              the companion will refuse a changed baseline or path escape, snapshot first, and roll back if validation
+              fails.
+            </p>
+          </div>
+        )}
 
         <div className="space-y-2">
           <Textarea

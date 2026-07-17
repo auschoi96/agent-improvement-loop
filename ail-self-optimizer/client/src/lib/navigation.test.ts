@@ -16,10 +16,11 @@ import { runTone, outcomeTone, UNTRACKED_OPTIMIZERS } from './jobs';
 import type { ProposedActionRow } from './approvals';
 
 describe('IA config', () => {
-  it('maps the six task-grouped primary sections to routes', () => {
+  it('maps the seven task-grouped primary sections to routes', () => {
     expect(PRIMARY_NAV.map((n) => n.key)).toEqual([
       'overview',
       'compare',
+      'optimize',
       'approvals',
       'labeling',
       'activity',
@@ -39,14 +40,15 @@ describe('IA config', () => {
 
   it('scopes the agent-specific sections and leaves cross-agent flows unscoped', () => {
     const requires = (k: string) => ALL_NAV.find((n) => n.key === k)!.requiresAgent;
-    // Agent-scoped: overview / compare / approvals / labeling / lineage need a selected agent.
+    // Agent-scoped: overview / compare / optimize / approvals / labeling / lineage need a selected agent.
     expect([
       requires('overview'),
       requires('compare'),
+      requires('optimize'),
       requires('approvals'),
       requires('labeling'),
       requires('lineage'),
-    ]).toEqual([true, true, true, true, true]);
+    ]).toEqual([true, true, true, true, true, true]);
     // Cross-agent / help flows must NOT require an agent (Activity is workspace-wide;
     // Add agent is how you get your first one).
     expect([requires('activity'), requires('add-agent'), requires('how-it-works')]).toEqual([false, false, false]);
@@ -57,6 +59,7 @@ describe('active-route / nav-state mapping', () => {
   it('resolves each route to its nav key', () => {
     expect(navKeyForPath('/overview')).toBe('overview');
     expect(navKeyForPath('/compare')).toBe('compare');
+    expect(navKeyForPath('/optimize')).toBe('optimize');
     expect(navKeyForPath('/approvals')).toBe('approvals');
     expect(navKeyForPath('/labeling')).toBe('labeling');
     expect(navKeyForPath('/activity')).toBe('activity');

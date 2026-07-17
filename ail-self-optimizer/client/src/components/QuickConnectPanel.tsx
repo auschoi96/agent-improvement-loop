@@ -46,14 +46,11 @@ export function QuickConnectPanel({
     setBusy(true);
     setResult(null);
     try {
-      const { ok, body } = await postOnboardingJson<BootstrapResponse>(
-        '/api/onboarding/bootstrap',
-        {
-          agent_name: name.trim(),
-          requirements_text: objective.trim(),
-          ...(targetWorkspace.trim() ? { target_workspace: targetWorkspace.trim() } : {}),
-        }
-      );
+      const { ok, body } = await postOnboardingJson<BootstrapResponse>('/api/onboarding/bootstrap', {
+        agent_name: name.trim(),
+        requirements_text: objective.trim(),
+        ...(targetWorkspace.trim() ? { target_workspace: targetWorkspace.trim() } : {}),
+      });
       setResult(body);
       if (ok && body.outcome === 'registered' && body.agent_name) onRegistered(body.agent_name);
     } catch {
@@ -142,7 +139,7 @@ export function QuickConnectPanel({
                 {(result.authored_judges ?? []).join(', ') || 'none required'}.
               </>
             ) : (
-              result.error ?? 'Setup failed.'
+              (result.error ?? 'Setup failed.')
             )}
           </div>
         )}

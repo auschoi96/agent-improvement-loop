@@ -1,0 +1,67 @@
+resources:
+  jobs:
+    gepa_optimization:
+      name: ail-gepa-optimization
+      description: >-
+        Explicit UI-dispatched GEPA candidate search. Resolves the selected agent
+        from UC, runs the frozen coding suite with bounded cost knobs, and logs a
+        candidate artifact to the agent's reviewer experiment. Never promotes.
+      tags:
+        project: agent-improvement-loop
+        tier: optimization
+        optimizer: gepa
+        managed_by: dab
+      max_concurrent_runs: 1
+      queue:
+        enabled: false
+      timeout_seconds: 21600
+      parameters:
+        - name: agent_name
+          default: ''
+        - name: experiment_id
+          default: ''
+        - name: suite_version
+          default: phase2-mini
+        - name: max_metric_calls
+          default: '6'
+        - name: holdout_fraction
+          default: '0.4'
+        - name: max_train_tasks
+          default: '2'
+        - name: reflection_lm
+          default: databricks:/databricks-claude-sonnet-4-6
+        - name: seed
+          default: '0'
+        - name: confirmed_costly_run
+          default: 'false'
+      tasks:
+        - task_key: gepa_optimize
+          environment_key: serverless
+          python_wheel_task:
+            package_name: ail
+            entry_point: ail-gepa-job
+            named_parameters:
+              agent: '{{job.parameters.agent_name}}'
+              experiment-id: '{{job.parameters.experiment_id}}'
+              warehouse-id: ${var.warehouse_id}
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              suite-version: '{{job.parameters.suite_version}}'
+              max-metric-calls: '{{job.parameters.max_metric_calls}}'
+              holdout-fraction: '{{job.parameters.holdout_fraction}}'
+              max-train-tasks: '{{job.parameters.max_train_tasks}}'
+              reflection-lm: '{{job.parameters.reflection_lm}}'
+              agent-model: ${var.gepa_agent_model}
+              seed: '{{job.parameters.seed}}'
+              confirmed-costly-run: '{{job.parameters.confirmed_costly_run}}'
+              token-secret-scope: ${var.token_secret_scope}
+              token-secret-key: ${var.token_secret_key}
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              - ../dist/*.whl
+              - claude-agent-sdk==0.2.114
+              - dspy==3.2.1
+              - pytest>=8,<9

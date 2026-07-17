@@ -21,6 +21,7 @@ import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Any
 
 from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
 from ail.ingest.base import NormalizedTrace, TraceSource, TraceStatus
@@ -195,7 +196,7 @@ def has_rlm_failure_marker(trace: NormalizedTrace) -> bool:
     )
 
 
-def _halo_sandbox_class() -> type:
+def _halo_sandbox_class() -> Any:
     from engine.sandbox.sandbox import Sandbox
 
     return Sandbox

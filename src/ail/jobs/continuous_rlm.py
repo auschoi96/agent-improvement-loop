@@ -17,12 +17,9 @@ ARE the legitimate goal source.
 
 Two things this wrapper owns:
 
-* **Model + effort.** ``--judge-model`` defaults to ``databricks-gpt-5-5-pro`` — the
-  most powerful *viable* HALO judge (Databricks Claude endpoints reject HALO's always-on
-  ``parallel_tool_calls``; ``gpt-5-6`` does not exist on the gateway). Effort is
-  auto-resolved from the model by :func:`ail.l3.reviewer.resolve_reasoning_effort`
-  (so this alias gets ``xhigh`` despite HALO's hyphen-blind prefix check); pass an
-  explicit ``--reasoning-effort`` to override.
+* **Model + FMAPI shape.** ``--judge-model`` defaults to
+  ``databricks-claude-opus-4-8``. HALO uses Databricks Chat Completions for Claude
+  and omits OpenAI-only fields that Claude FMAPI rejects.
 * **Goal-steering.** When ``--objective-metric`` is set, the review rubric is derived
   from the operator-configured goal (:func:`ail.l3.goal_rubric.rubric_from_goal`) so
   HALO judges and recommends in service of what the user is optimizing for. An empty
@@ -47,8 +44,8 @@ from ail.l3.reviewer import normalize_reasoning_effort
 from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
 from ail.registry import Agent
 
-#: Most powerful VIABLE HALO judge on the Databricks gateway (see module docstring).
-DEFAULT_JUDGE_MODEL = "databricks-gpt-5-5-pro"
+#: HALO judge on the Databricks gateway (see module docstring).
+DEFAULT_JUDGE_MODEL = "databricks-claude-opus-4-8"
 
 
 # Neutral goal defaults for REGISTRY mode. Used for a goal_config key an agent left
@@ -188,7 +185,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=str.lower,
         choices=["", "none", "auto", "minimal", "low", "medium", "high", "xhigh"],
         help="Explicit HALO reasoning-effort override. Empty / 'none' / 'auto' (any case) "
-        "=> no override, auto-resolve from --judge-model (databricks-gpt-5-5-pro => xhigh).",
+        "=> no override; Databricks Claude uses its provider-side reasoning default.",
     )
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--max-reviews", type=int, default=2)

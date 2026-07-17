@@ -45,6 +45,18 @@ test('smoke test - quick connect is the default add-agent path', async ({ page }
   await expect(page.locator('[data-slot="card-title"]').filter({ hasText: 'Add an agent' })).toBeVisible();
 });
 
+test('smoke test - Optimize renders the selected experiment without dispatching', async ({ page }) => {
+  await page.goto('/optimize?agent=claude_code');
+
+  await expect(page.getByRole('heading', { name: 'Optimize agent' })).toBeVisible();
+  await expect(page.getByText('GEPA candidate search', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('GEPA agent')).toHaveValue('claude_code');
+  await expect(page.getByLabel('GEPA subject experiment')).toHaveValue('1301765275062543');
+  await expect(page.getByLabel('GEPA reviewer experiment')).toHaveValue('1301765275062544');
+  await expect(page.getByRole('checkbox', { name: /I understand this launches/ })).not.toBeChecked();
+  await expect(page.getByRole('button', { name: 'Run GEPA' })).toBeDisabled();
+});
+
 test('background agent polling keeps the active overview mounted', async ({ page }) => {
   let agentQueryRequests = 0;
   page.on('request', (request) => {
@@ -126,10 +138,13 @@ test('switching the agent experiment replaces every experiment-scoped view', asy
 
   await page.goto('/compare?agent=claude_code');
   await expect(page.getByText('v0-baseline-no-skill → v1-token-efficiency-skill')).toBeVisible();
+  await expect(page.getByText('candidate MLflow ID: not registered', { exact: true })).toBeVisible();
 
   selectedExperiment = isolatedExperiment;
   await pollAgents();
-  await expect(page.getByText(/No version comparison published/)).toBeVisible();
+  await expect(
+    page.getByText('candidate MLflow ID: m-a8f5256c2c2447f6946efb17658f324e', { exact: true })
+  ).toBeVisible();
 
   await page.goto('/labeling?agent=claude_code');
   await expect(page.getByText(/correctness judge/).first()).toBeVisible({ timeout: 60_000 });

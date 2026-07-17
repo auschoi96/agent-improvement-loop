@@ -12,6 +12,7 @@ from ail.registry import (
     DEFAULT_REGISTRY,
     Agent,
     AgentRegistry,
+    OptimizationTarget,
     load_registry,
 )
 
@@ -75,6 +76,33 @@ def test_agent_target_workspace_round_trips_json() -> None:
     agent = Agent(agent_name="x", experiment_id="1", target_workspace="/repos/my-agent")
     restored = Agent.model_validate_json(agent.model_dump_json())
     assert restored == agent
+
+
+def test_optimization_target_is_relative_tokenized_and_round_trips() -> None:
+    target = OptimizationTarget(
+        path=".claude/skills/my-agent/SKILL.md",
+        validation_command='python -m pytest -q "tests/test agent.py"',
+    )
+    assert target.validation_command == [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test agent.py",
+    ]
+    agent = Agent(
+        agent_name="x",
+        experiment_id="1",
+        target_workspace="/repos/x",
+        optimization_target=target,
+    )
+    assert Agent.model_validate_json(agent.model_dump_json()) == agent
+
+
+@pytest.mark.parametrize("path", ["/absolute/SKILL.md", "../escape.md", "a/../../escape.md"])
+def test_optimization_target_rejects_unsafe_path(path: str) -> None:
+    with pytest.raises(ValueError, match="project-relative"):
+        OptimizationTarget(path=path, validation_command=["true"])
 
 
 def test_agent_goal_config_and_annotations_table_absent_are_none() -> None:

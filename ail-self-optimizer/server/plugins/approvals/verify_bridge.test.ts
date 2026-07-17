@@ -1,10 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  deferredJobVerifyBridge,
-  resolveVerifyTransport,
-  selectVerifyBridge,
-  type VerifyInput,
-} from './verify_bridge';
+import { deferredJobVerifyBridge, resolveVerifyTransport, selectVerifyBridge, type VerifyInput } from './verify_bridge';
 
 const INPUT: VerifyInput = {
   proposal_id: 'prop-1',

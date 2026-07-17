@@ -666,9 +666,7 @@ def register_bundle_logged_models(
                 params=params,
             )
             by_experiment[experiment_id].append(existing)
-        updated.append(
-            aggregate.model_copy(update={"logged_model_id": str(existing.model_id)})
-        )
+        updated.append(aggregate.model_copy(update={"logged_model_id": str(existing.model_id)}))
 
     return bundle.model_copy(update={"aggregates": updated})
 
@@ -687,6 +685,7 @@ REGISTRY_COLUMNS: list[str] = [
     "goal_config_json",
     "annotations_table",
     "target_workspace",
+    "optimization_target_json",
     "generated_at",
 ]
 
@@ -772,6 +771,11 @@ def _registry_row(agent: Agent, *, generated_at: str | None) -> list[Any]:
         json.dumps(agent.goal_config) if agent.goal_config is not None else None,
         agent.annotations_table,
         agent.target_workspace,
+        (
+            agent.optimization_target.model_dump_json()
+            if agent.optimization_target is not None
+            else None
+        ),
         generated_at,
     ]
 
@@ -887,6 +891,7 @@ def _ddl(catalog: str, schema: str) -> list[str]:
             goal_config_json STRING,
             annotations_table STRING,
             target_workspace STRING,
+            optimization_target_json STRING,
             generated_at STRING
         ) USING DELTA
         COMMENT 'Agent registry: agent_name -> dedicated MLflow experiment (+ optional config).'""",
@@ -1064,6 +1069,7 @@ def load_registered_agents_full(
                 annotations_table=_str_or_none(row.get("annotations_table")),
                 tag_filter=_json_or_none(row.get("tag_filter_json")),
                 target_workspace=_str_or_none(row.get("target_workspace")),
+                optimization_target=_json_or_none(row.get("optimization_target_json")),
             )
         )
     return agents

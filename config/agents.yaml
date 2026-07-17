@@ -29,3 +29,14 @@ agents:
       guardrail_judge: []
     annotations_table: austin_choi_omni_agent_catalog.mlflow_traces.claude_code_otel_annotations
     target_workspace: /Users/austin.choi/PycharmProjects2/agent-improvement-loop
+    optimization_target:
+      kind: claude_skill
+      path: src/ail/optimize/assets/skills/token-efficient-execution/SKILL.md
+      validation_command:
+        - python
+        - -m
+        - pytest
+        - -q
+        - tests/test_optimize_lever.py
+        - tests/test_gepa_runner.py
+      validation_timeout_seconds: 900

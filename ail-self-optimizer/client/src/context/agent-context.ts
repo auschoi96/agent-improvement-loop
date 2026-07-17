@@ -5,6 +5,7 @@ import { createContext, useContext } from 'react';
 export interface AgentRow {
   agent_name: string;
   experiment_id: string;
+  reviewer_experiment_id?: string;
   annotations_table?: string;
   description: string;
 }

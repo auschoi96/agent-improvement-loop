@@ -135,6 +135,8 @@ export function OnboardingWizard({
         annotationsTable: state.annotationsTable,
         goalConfig: state.goalConfig,
         reviewerExperimentId: state.reviewerExperimentId,
+        optimizationTargetPath: state.optimizationTargetPath,
+        optimizationValidationCommand: state.optimizationValidationCommand,
       })
     )
       .then(({ status, body }) => {
@@ -747,6 +749,33 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
         <p className="text-xs text-muted-foreground">
           Fully-qualified table the memory-distiller reads this agent&apos;s annotations from. Required for the memory
           job — it skips an agent with no annotations table. Leave blank to add it later. Not guessed.
+        </p>
+      </div>
+
+      <div className="space-y-2 rounded-md border p-3">
+        <p className="text-sm font-medium">Approved GEPA rewrite target (optional)</p>
+        <Label htmlFor="optimization-target-path">Project-relative prompt or Claude skill file</Label>
+        <Input
+          id="optimization-target-path"
+          className="w-full max-w-xl"
+          value={state.optimizationTargetPath}
+          placeholder=".claude/skills/my-agent/SKILL.md"
+          onChange={(e) => patch({ optimizationTargetPath: e.target.value })}
+          disabled={done}
+        />
+        <Label htmlFor="optimization-validation-command">Validation command</Label>
+        <Input
+          id="optimization-validation-command"
+          className="w-full max-w-xl"
+          value={state.optimizationValidationCommand}
+          placeholder="python -m pytest -q"
+          onChange={(e) => patch({ optimizationValidationCommand: e.target.value })}
+          disabled={done}
+        />
+        <p className="text-xs text-muted-foreground">
+          Both fields are required to enable the last mile. The hosted app only records the reviewed target; your local
+          companion verifies the original hash, snapshots it, applies the exact MLflow artifact, runs this command, and
+          rolls back on failure. Absolute paths and parent traversal are refused.
         </p>
       </div>
 

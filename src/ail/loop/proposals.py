@@ -38,8 +38,9 @@ from __future__ import annotations
 
 import hashlib
 from enum import StrEnum
+from pathlib import PurePosixPath
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ail.optimize.phase2 import L1Outcome, Phase2Artifact
 from ail.readiness.contract import ReadinessStatus
@@ -51,6 +52,8 @@ __all__ = [
     "ProposalStatus",
     "TriggerKind",
     "ChangeKind",
+    "LocalApplyTargetKind",
+    "LocalApplySpec",
     "TriggerSignal",
     "ProposedChange",
     "ProofSummary",
@@ -62,7 +65,7 @@ __all__ = [
 
 #: Version of the proposed-action contract. Bump the minor for additive,
 #: backward-compatible fields; the major for breaking shape changes.
-SCHEMA_VERSION = "ail.loop.proposals/v1"
+SCHEMA_VERSION = "ail.loop.proposals/v1.1"
 
 
 class ActionKind(StrEnum):
@@ -159,6 +162,14 @@ class ChangeKind(StrEnum):
     AGENT_TASK_PLAN = "agent_task_plan"
 
 
+class LocalApplyTargetKind(StrEnum):
+    """How the local companion rewrites an explicitly registered target file."""
+
+    CLAUDE_SKILL = "claude_skill"
+    PROMPT_FILE = "prompt_file"
+    AGENTS_MD = "agents_md"
+
+
 #: Default risk class per action kind. A metric view is additive; every change to
 #: the agent's own prompt/skill/instructions (and a revert of one) is an agent
 #: change. A caller may override per proposal (e.g. reverting an *additive* asset).
@@ -208,6 +219,65 @@ class _Model(BaseModel):
     """Base for the proposal models: forbid unknown fields so drift is loud."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class LocalApplySpec(_Model):
+    """Immutable instructions for applying a reviewed artifact on the user's machine."""
+
+    schema_version: str = "ail.local_apply/v1"
+    target_kind: LocalApplyTargetKind
+    target_path: str
+    artifact_uri: str
+    artifact_path: str
+    artifact_field: str = "evolved_skill_body"
+    baseline_sha256: str
+    candidate_sha256: str
+    validation_command: list[str] = Field(min_length=1)
+    validation_timeout_seconds: int = Field(default=600, ge=1, le=3600)
+    mlflow_run_id: str
+    reviewer_experiment_id: str
+    holdout_evolved_savings_pct: float | None = None
+    holdout_seed_savings_pct: float | None = None
+    holdout_savings_delta_pct: float | None = None
+    holdout_task_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("target_path")
+    @classmethod
+    def _relative_target_path(cls, value: str) -> str:
+        text = value.strip().replace("\\", "/")
+        path = PurePosixPath(text)
+        if not text or path.is_absolute() or text in {".", ".."} or ".." in path.parts:
+            raise ValueError("target_path must be a non-empty project-relative path without '..'")
+        return str(path)
+
+    @field_validator(
+        "artifact_uri",
+        "artifact_path",
+        "artifact_field",
+        "mlflow_run_id",
+        "reviewer_experiment_id",
+    )
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("local-apply artifact fields must be non-empty")
+        return value.strip()
+
+    @field_validator("baseline_sha256", "candidate_sha256")
+    @classmethod
+    def _sha256(cls, value: str) -> str:
+        digest = value.strip().lower()
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("local-apply hashes must be lowercase SHA-256 hex digests")
+        return digest
+
+    @field_validator("validation_command")
+    @classmethod
+    def _command(cls, value: list[str]) -> list[str]:
+        command = [str(part).strip() for part in value]
+        if not command or any(not part for part in command):
+            raise ValueError("validation_command must contain non-empty argv entries")
+        return command
 
 
 class TriggerSignal(_Model):
@@ -286,6 +356,7 @@ class ProposedChange(_Model):
     plan: str | None = None
     preview_diff: str | None = None
     produced_change_ref: str | None = None
+    local_apply_spec: LocalApplySpec | None = None
 
     @model_validator(mode="after")
     def _require_payload(self) -> ProposedChange:
@@ -467,6 +538,7 @@ def derive_proposal_id(*, agent_name: str, action_kind: ActionKind, change: Prop
             change.evolved_body_ref or "",
             change.revert_target or "",
             change.plan or "",
+            change.local_apply_spec.model_dump_json() if change.local_apply_spec else "",
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

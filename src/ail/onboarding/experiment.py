@@ -88,9 +88,7 @@ class ExperimentClient(Protocol):
         """The experiment named ``name``, or ``None`` if none. Raises on auth."""
         ...
 
-    def create_experiment(
-        self, name: str, *, trace_location: UcTraceLocation | None = None
-    ) -> str:
+    def create_experiment(self, name: str, *, trace_location: UcTraceLocation | None = None) -> str:
         """Create an experiment and return its id. Raises when creation is denied."""
         ...
 
@@ -375,9 +373,7 @@ class MlflowExperimentClient:
             return None
         return ExperimentInfo(experiment_id=str(exp.experiment_id), name=str(exp.name))
 
-    def create_experiment(
-        self, name: str, *, trace_location: UcTraceLocation | None = None
-    ) -> str:
+    def create_experiment(self, name: str, *, trace_location: UcTraceLocation | None = None) -> str:
         try:
             if trace_location is not None:
                 import mlflow

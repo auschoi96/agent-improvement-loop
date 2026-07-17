@@ -277,6 +277,18 @@ declare module "@databricks/appkit-ui/react" {
           change_evolved_body_ref: string;
           /** @sqlType STRING */
           change_revert_target: string;
+          /** @sqlType STRING */
+          change_local_apply_spec_json: string;
+          /** @sqlType STRING */
+          local_apply_status: string;
+          /** @sqlType STRING */
+          local_apply_error: string;
+          /** @sqlType STRING */
+          local_apply_completed_at: string;
+          /** @sqlType STRING */
+          local_apply_pre_change_ref: string;
+          /** @sqlType STRING */
+          local_apply_validation_output: string;
           /** @sqlType BOOLEAN */
           proof_proved_improvement: boolean;
           /** @sqlType BOOLEAN */

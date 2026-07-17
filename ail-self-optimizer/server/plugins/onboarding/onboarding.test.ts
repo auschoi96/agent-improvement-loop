@@ -142,11 +142,7 @@ describe('handleCreateExperiment — fail-closed create', () => {
   it('forwards explicit idempotent reuse only for internal reviewer provisioning', async () => {
     const { bridge, calls } = recordingBridge({ outcome: 'created', experiment_id: 'review-exp' });
     const { res, captured } = fakeRes();
-    await handleCreateExperiment(
-      req(AUTH, { name: 'agent-ail-internal', allow_existing: true }),
-      res,
-      bridge
-    );
+    await handleCreateExperiment(req(AUTH, { name: 'agent-ail-internal', allow_existing: true }), res, bridge);
     expect(calls[0]).toMatchObject({
       action: 'create_experiment',
       name: 'agent-ail-internal',

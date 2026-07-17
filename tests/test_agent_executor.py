@@ -496,6 +496,42 @@ def test_mark_committed_only_advances_approved(monkeypatch: pytest.MonkeyPatch) 
     assert "status = 'approved'" in sql  # only advances a still-approved row
 
 
+def test_gepa_reads_and_terminal_updates_are_experiment_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+
+    def _query(client, warehouse_id, statement):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+        if statement.startswith("UPDATE"):
+            return [{"num_affected_rows": "1"}]
+        return []
+
+    monkeypatch.setattr(ax, "_query_rows", _query)
+    assert (
+        ax.list_gepa_proposals(
+            object(),
+            "w",
+            agent_name="claude_code",
+            experiment_id="subject-1",
+        )
+        == []
+    )
+    ax.mark_gepa_local_state(
+        object(),
+        "w",
+        agent_name="claude_code",
+        experiment_id="subject-1",
+        proposal_id="p1",
+        local_status="applied",
+        completed_at="t",
+        applied=True,
+    )
+
+    assert all("agent_name = 'claude_code'" in statement for statement in statements)
+    assert all("experiment_id = 'subject-1'" in statement for statement in statements)
+
+
 def test_write_preview_zero_rows_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     """B5: a zero-row guard match is a FAIL, never a silent success."""
     _guarded_query_spy(monkeypatch, affected="0")

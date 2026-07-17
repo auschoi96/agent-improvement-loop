@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from databricks.sdk.service.jobs import Condition as TableUpdateCondition
 
 from ail.jobs.rlm_trigger import (
     reconcile_rlm_trigger_tables,
@@ -29,6 +30,7 @@ from ail.registry import Agent
 @dataclass
 class _FakeTableUpdate:
     table_names: list[str]
+    condition: TableUpdateCondition | None = None
     min_time_between_triggers_seconds: int = 60
     wait_after_last_change_seconds: int = 61
 
@@ -77,7 +79,9 @@ class _FakeClient:
 
 def _client_with(table_names: list[str]) -> _FakeClient:
     return _FakeClient(
-        _FakeSettings(trigger=_FakeTrigger(table_update=_FakeTableUpdate(table_names=list(table_names))))
+        _FakeSettings(
+            trigger=_FakeTrigger(table_update=_FakeTableUpdate(table_names=list(table_names)))
+        )
     )
 
 
@@ -122,6 +126,7 @@ def test_adds_new_spans_table_and_issues_single_update() -> None:
         "cat.mlflow_traces.claude_code_otel_spans",
         "cat.mlflow_traces.newbot_otel_spans",
     ]
+    assert settings.trigger.table_update.condition is TableUpdateCondition.ANY_UPDATED
 
 
 def test_no_update_when_table_already_watched() -> None:
@@ -171,6 +176,7 @@ def test_preserves_other_settings_on_update() -> None:
     assert settings.queue == {"enabled": False}
     assert settings.max_concurrent_runs == 1
     assert settings.trigger.table_update.wait_after_last_change_seconds == 61
+    assert settings.trigger.table_update.condition is TableUpdateCondition.ANY_UPDATED
 
 
 def test_dedupes_multiple_agents_and_batches_one_update() -> None:

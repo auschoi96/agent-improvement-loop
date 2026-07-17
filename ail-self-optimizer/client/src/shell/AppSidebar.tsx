@@ -26,6 +26,7 @@ import {
   GitCompareArrows,
   LayoutDashboard,
   Plus,
+  Sparkles,
   Tags,
   type LucideProps,
 } from 'lucide-react';
@@ -44,6 +45,7 @@ import type { ProposedActionRow } from '../lib/approvals';
 const ICONS: Record<NavKey, ComponentType<LucideProps>> = {
   overview: LayoutDashboard,
   compare: GitCompareArrows,
+  optimize: Sparkles,
   approvals: ClipboardCheck,
   labeling: Tags,
   activity: Activity,

@@ -534,7 +534,7 @@ _SLICE4_GOAL_CONFIG = {
 }
 
 
-def test_register_persists_all_three_extended_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_register_persists_extended_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     cap = _CapturePublishRegistry()
     monkeypatch.setattr("ail.onboarding.service.publish_registry", cap)
     result = _register(
@@ -542,6 +542,11 @@ def test_register_persists_all_three_extended_fields(monkeypatch) -> None:  # ty
         goal_config=_SLICE4_GOAL_CONFIG,
         annotations_table="cat.sch.otel_annotations",
         target_workspace="/Workspace/Repos/me/my_agent",
+        optimization_target={
+            "kind": "claude_skill",
+            "path": ".claude/skills/agent/SKILL.md",
+            "validation_command": ["python", "-m", "pytest", "-q"],
+        },
     )
     assert result.outcome is OnboardingOutcome.REGISTERED
     assert len(cap.registries) == 1
@@ -550,6 +555,7 @@ def test_register_persists_all_three_extended_fields(monkeypatch) -> None:  # ty
     assert agent.goal_config == _SLICE4_GOAL_CONFIG
     assert agent.annotations_table == "cat.sch.otel_annotations"
     assert agent.target_workspace == "/Workspace/Repos/me/my_agent"
+    assert agent.optimization_target.path == ".claude/skills/agent/SKILL.md"
     # ...alongside the fields register always carried (no regression).
     assert agent.agent_name == "my_agent"
     assert agent.experiment_id == "exp-1"
@@ -567,6 +573,7 @@ def test_register_backcompat_extended_fields_default_to_none(monkeypatch) -> Non
     assert agent.goal_config is None
     assert agent.annotations_table is None
     assert agent.target_workspace is None
+    assert agent.optimization_target is None
 
 
 # ---------------------------------------------------------------------------

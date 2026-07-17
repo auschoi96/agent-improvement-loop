@@ -264,10 +264,7 @@ export async function handleBootstrapAgent(
   });
 }
 
-export async function handleOnboardingStatus(
-  req: OnboardingHttpRequest,
-  res: OnboardingHttpResponse
-): Promise<void> {
+export async function handleOnboardingStatus(req: OnboardingHttpRequest, res: OnboardingHttpResponse): Promise<void> {
   const actor = readActor(req);
   if (!actor) return unauthorized(res);
   const body = (req.body ?? {}) as Record<string, unknown>;

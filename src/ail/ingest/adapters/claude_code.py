@@ -705,6 +705,7 @@ def _mlflow_stop_hook(experiment: str, *, logged_model_id: str | None = None) ->
 
         async def _log_transcript() -> None:
             try:
+
                 def _process_with_version() -> None:
                     setup_mlflow()
                     if logged_model_id:

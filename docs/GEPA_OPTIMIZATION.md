@@ -159,16 +159,79 @@ The split is deterministic (seeded shuffle of sorted task ids, or an explicit
   only train tasks as `trainset`/`valset`, and the adapter's `evaluated_task_ids` is
   a subset of train and **disjoint** from held-out.
 
-## The human gate
+## The human gate and local last mile
 
-`run_gepa_optimization` returns a `GepaOptimizationResult` carrying the **candidate**
-evolved body + its live held-out result vs the seed's. It does **not** write the
-skill to disk, register it, or promote it. `human_gate_required` is always `True`;
-the object has no side effect that applies the artifact. Promotion is a separate
-human step — review the held-out delta, then apply the evolved body to the asset
-(`src/ail/optimize/assets/skills/token-efficient-execution/SKILL.md`) deliberately.
-`tests/test_gepa_runner.py::TestReturnsCandidateNotPromotion` asserts the loop never
-mutates the on-disk skill asset.
+`run_gepa_optimization` itself still returns only a `GepaOptimizationResult`; it
+never writes a skill, registers a prompt alias, or promotes anything. The
+UI-dispatched job (`src/ail/jobs/gepa_job.py`) adds the governed handoff around that
+pure result:
+
+1. Log `gepa/gepa_candidate.json` to the agent's separate reviewer experiment.
+2. Re-run `candidate_improvement`: the body must be changed, both held-out arms must
+   exist, and evolved-minus-seed held-out savings must be strictly positive.
+3. For a winner, insert one idempotent `gepa_prompt` row into
+   `agent_proposed_actions`. The proposal includes the exact unified diff,
+   project-relative target, seed/candidate SHA-256 hashes, artifact URI, held-out
+   evidence, and validation argv. A non-winner gets no Approval.
+4. The Approvals page displays all of that evidence. Approve advances only to
+   `approved / waiting_for_companion`; the Databricks App/Job cannot and does not
+   write a user's local path.
+5. `python -m ail.companion poll` fetches the exact approved MLflow artifact, verifies
+   the artifact/diff/hashes and target containment, snapshots the target, rewrites it
+   atomically, runs validation, records `agent_executor_commits`, and advances the
+   proposal to `applied`.
+
+The local apply fails closed. A changed baseline becomes `conflict` and is not
+overwritten. A missing/mismatched artifact or path escape is refused. Failed
+validation restores the pre-change snapshot and records `failed_validation`. The
+companion never re-runs GEPA after approval, so the bytes applied are the bytes the
+human reviewed. `tests/test_gepa_runner.py::TestReturnsCandidateNotPromotion` guards
+the optimizer boundary; `tests/test_gepa_local_apply.py` guards the local apply,
+conflict, and rollback boundaries.
+
+The registered agent must carry:
+
+```yaml
+target_workspace: /path/to/the/local/agent/repo
+optimization_target:
+  kind: claude_skill
+  path: .claude/skills/my-agent/SKILL.md
+  validation_command: [python, -m, pytest, -q]
+```
+
+`path` must be relative to `target_workspace`; absolute paths and `..` are rejected.
+
+### App dispatcher and job resource
+
+The app's `/optimize` route uses AppKit's resource-scoped Jobs plugin. The deployed
+app receives only the declared `DATABRICKS_JOB_GEPA` binding, and its service
+principal gets `CAN_MANAGE_RUN` on that job. Browser input is schema-validated and
+the job re-resolves the selected registry row, then rejects an `experiment_id` that
+does not match it before model compute begins.
+
+AppKit 0.38.1 discovers the named key from `DATABRICKS_JOB_GEPA` but still validates
+its static single-job manifest alias at startup. `app.yaml` therefore binds both
+`DATABRICKS_JOB_GEPA` and `DATABRICKS_JOB_ID` to the same `gepa-job` resource;
+explicit `jobs.gepa` configuration exposes only the named route.
+
+Status is polled through short Jobs API requests and updates only the dispatcher
+panel; it never reloads the route. The remembered active run is keyed by both agent
+and experiment, so switching an experiment cannot display or apply another
+experiment's candidate. Job output is accepted only from the schema-validated
+`AIL_GEPA_RESULT=` marker. The job has one active-run slot and queueing disabled so
+costly clicks do not accumulate into a backlog.
+
+To run from the UI:
+
+1. Configure `target_workspace`, `optimization_target.path`, and the validation
+   command during onboarding.
+2. Open **Optimize** for the selected agent/experiment.
+3. Choose the metric-call/train-task/holdout bounds and acknowledge the live cost.
+4. Dispatch and monitor the job. A held-out winner appears in **Approvals**; it is
+   still unapplied until a human approves it and the local companion processes it.
+
+The packaged live adapter currently supports only `claude_code`. Other agents fail
+closed before the costly optimizer starts.
 
 ## Cost / fidelity
 
@@ -197,7 +260,7 @@ reported number keeps full fidelity even if the inner search used a proxy.
 pins this: the proxy runs the train tasks, the live adapter runs only the held-out
 tasks.
 
-## Running it (live)
+## Running it directly (live, without the app dispatcher)
 
 ```bash
 AIL_LIVE_GEPA=1 python scripts/run_gepa_optimization.py \

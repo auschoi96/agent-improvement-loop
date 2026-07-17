@@ -8,6 +8,7 @@ import { isPending, type ProposedActionRow } from './approvals';
 export type NavKey =
   | 'overview'
   | 'compare'
+  | 'optimize'
   | 'approvals'
   | 'labeling'
   | 'activity'
@@ -51,6 +52,16 @@ export const PRIMARY_NAV: NavItem[] = [
     title: 'Baseline vs new version',
     description:
       'Within this agent’s experiment, a baseline version vs a newer one — L0 deltas, with readiness honestly gating the trust verdict.',
+    requiresAgent: true,
+    showTitle: true,
+  },
+  {
+    key: 'optimize',
+    label: 'Optimize',
+    path: '/optimize',
+    title: 'Optimize agent',
+    description:
+      'Explicitly dispatch a bounded GEPA candidate search, monitor its Databricks Job, and send a winning local rewrite to Approvals.',
     requiresAgent: true,
     showTitle: true,
   },

@@ -75,6 +75,7 @@ from ail.loop.proposals import (
     ActionKind,
     ChangeKind,
     GateStatus,
+    LocalApplySpec,
     ProofSummary,
     ProposalStatus,
     ProposedAction,
@@ -156,6 +157,9 @@ class ApplyServiceOutcome(StrEnum):
     """The outcome the app surfaces to the reviewer."""
 
     APPLIED = "applied"
+    #: Human-authorized, but intentionally not applied by hosted compute. The local
+    #: companion must fetch and commit the exact reviewed artifact.
+    APPROVED = "approved"
     REJECTED = "rejected"
     #: A fail-closed refusal — nothing was applied (surface :attr:`refused_reason`).
     REFUSED = "refused"
@@ -252,6 +256,32 @@ def decide_on_proposal(
       is LIVE; status is advanced to ``applied`` and the decision recorded, but the
       lineage timeline record failed — surfaced for reconciliation.
     """
+    # GEPA local rewrites have a hard trust boundary: hosted compute records the
+    # approval but never resolves or writes a laptop path. The approved row is then
+    # consumed by the local companion. A legacy GEPA proposal without the immutable
+    # local-apply spec is refused rather than falling through to prompt-registry apply.
+    if proposal.action_kind is ActionKind.GEPA_PROMPT and decision.decision is DecisionKind.APPROVE:
+        try:
+            approved = _approve_gepa_for_local_companion(
+                proposal, decision, gate_recheck=gate_recheck
+            )
+        except ApplyRefused as exc:
+            refused = _refused_result(proposal, decision, reason=exc.reason)
+            _persist(
+                refused,
+                proposal=proposal,
+                decision_writer=decision_writer,
+                status_writer=None,
+            )
+            return refused
+        _persist(
+            approved,
+            proposal=proposal,
+            decision_writer=decision_writer,
+            status_writer=status_writer,
+        )
+        return approved
+
     try:
         result = apply_approved_proposal(
             proposal,
@@ -315,6 +345,33 @@ def _persist(
     The two writes are attempted independently so a live apply plus *any* failed
     persistence deterministically returns ``APPLIED_UNRECORDED``.
     """
+    if service.outcome is ApplyServiceOutcome.APPROVED:
+        # Approval is an authorization token for a later local mutation. Record the
+        # authenticated decision FIRST; only then expose status=approved to the
+        # companion. If either write fails, no hosted/local apply is reported here.
+        try:
+            decision_writer(service)
+            service.decision_recorded = True
+        except Exception as exc:  # noqa: BLE001 - fail closed before status becomes approved
+            service.decision_recorded = False
+            service.outcome = ApplyServiceOutcome.ERROR
+            service.status = ProposalStatus.PENDING.value
+            service.error = f"decision audit not recorded ({type(exc).__name__}: {exc})"
+            return
+        try:
+            if status_writer is None:
+                raise RuntimeError("no status writer configured")
+            status_writer(
+                agent_name=proposal.agent_name,
+                proposal_id=proposal.proposal_id,
+                status=ProposalStatus.APPROVED,
+            )
+        except Exception as exc:  # noqa: BLE001 - decision exists, but companion must not see approval
+            service.outcome = ApplyServiceOutcome.ERROR
+            service.status = ProposalStatus.PENDING.value
+            service.error = f"approval status not advanced ({type(exc).__name__}: {exc})"
+        return
+
     live_apply = service.outcome in (
         ApplyServiceOutcome.APPLIED,
         ApplyServiceOutcome.APPLIED_UNRECORDED,
@@ -349,6 +406,10 @@ def _persist(
         # unrecorded (reconcile) — never a clean success. Do not touch REJECTED/REFUSED.
         if live_apply:
             service.outcome = ApplyServiceOutcome.APPLIED_UNRECORDED
+        elif service.outcome is ApplyServiceOutcome.APPROVED:
+            # No local file changed, so a failed approval/status audit is a plain
+            # error and must never be shown as "waiting for companion".
+            service.outcome = ApplyServiceOutcome.ERROR
 
 
 def _status_for_outcome(outcome: ApplyServiceOutcome) -> ProposalStatus | None:
@@ -356,6 +417,8 @@ def _status_for_outcome(outcome: ApplyServiceOutcome) -> ProposalStatus | None:
         return ProposalStatus.APPLIED
     if outcome is ApplyServiceOutcome.REJECTED:
         return ProposalStatus.REJECTED
+    if outcome is ApplyServiceOutcome.APPROVED:
+        return ProposalStatus.APPROVED
     return None  # REFUSED / ERROR leave the proposal pending
 
 
@@ -420,6 +483,55 @@ def _refused_result(
         status=proposal.status.value,
         reason=decision.reason,
         refused_reason=reason,
+    )
+
+
+def _approve_gepa_for_local_companion(
+    proposal: ProposedAction,
+    decision: ApprovalDecision,
+    *,
+    gate_recheck: GateRecheck,
+) -> ApplyServiceResult:
+    """Authorize an exact GEPA local rewrite without applying it on hosted compute."""
+    if decision.proposal_id != proposal.proposal_id:
+        raise ApplyRefused(
+            f"decision targets {decision.proposal_id!r}, not proposal {proposal.proposal_id!r}"
+        )
+    if proposal.status is not ProposalStatus.PENDING:
+        raise ApplyRefused(
+            f"proposal {proposal.proposal_id!r} is {proposal.status.value!r}, not pending"
+        )
+    spec: LocalApplySpec | None = proposal.change.local_apply_spec
+    if spec is None:
+        raise ApplyRefused(
+            "GEPA proposal has no immutable local_apply_spec; hosted compute cannot write "
+            "the user's machine and an unbound target must not be approved (fail-closed)"
+        )
+    if not proposal.change.diff or not proposal.change.diff.strip():
+        raise ApplyRefused("GEPA proposal has no exact reviewed diff (fail-closed)")
+    proof = proposal.proof
+    if proof is None or not (proof.proved_improvement and proof.correctness_held):
+        raise ApplyRefused(
+            "GEPA proposal lacks a held-out improvement with correctness held (fail-closed)"
+        )
+    if not proposal.gate_status.gated:
+        raise ApplyRefused("GEPA proposal's recorded gate is not cleared (fail-closed)")
+    current_gate = gate_recheck(proposal)
+    if not current_gate.ok:
+        reasons = " | ".join(current_gate.reasons) or "current gate did not clear"
+        raise ApplyRefused(f"apply-time gate re-check failed: {reasons}")
+    return ApplyServiceResult(
+        outcome=ApplyServiceOutcome.APPROVED,
+        proposal_id=proposal.proposal_id,
+        agent_name=proposal.agent_name,
+        decision=DecisionKind.APPROVE,
+        approver=decision.approver,
+        decided_at=decision.decided_at,
+        action_kind=proposal.action_kind.value,
+        risk_class=proposal.risk_class.value,
+        status=ProposalStatus.APPROVED.value,
+        reason=decision.reason,
+        summary=(f"approved local rewrite of {spec.target_path}; waiting for the local companion"),
     )
 
 
@@ -833,6 +945,12 @@ def _row_to_proposal(row: dict[str, Any]) -> ProposedAction:
         source_rank=_i(row, "trigger_source_rank"),
         trace_refs=_json_list(row, "trigger_trace_refs"),
     )
+    local_spec_raw = row.get("change_local_apply_spec_json")
+    local_spec = (
+        LocalApplySpec.model_validate_json(str(local_spec_raw))
+        if local_spec_raw not in (None, "")
+        else None
+    )
     change = ProposedChange(
         kind=ChangeKind(str(row["change_kind"])),
         summary=str(row.get("change_summary") or ""),
@@ -846,6 +964,7 @@ def _row_to_proposal(row: dict[str, Any]) -> ProposedAction:
         plan=_s(row, "change_plan"),
         preview_diff=_s(row, "change_preview_diff"),
         produced_change_ref=_s(row, "change_produced_change_ref"),
+        local_apply_spec=local_spec,
     )
     # Reconstruct proof=None for an evidence-first proposal (all proof_* columns NULL),
     # so it round-trips as evidence-only and the apply engine applies it on evidence +
@@ -984,10 +1103,15 @@ def mark_proposal_status(
     solely in this ephemeral status.
     """
     fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
+    local_state = (
+        f", local_apply_status = {_lit('waiting_for_companion')}, local_apply_error = NULL"
+        if status is ProposalStatus.APPROVED
+        else ""
+    )
     _execute(
         client,
         warehouse_id,
-        f"UPDATE {fqn} SET status = {_lit(status.value)} "
+        f"UPDATE {fqn} SET status = {_lit(status.value)}{local_state} "
         f"WHERE agent_name = {_lit(agent_name)} AND experiment_id = {_lit(experiment_id)} "
         f"AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.PENDING.value)}",
