@@ -63,6 +63,8 @@ declare module "@databricks/appkit-ui/react" {
           /** @sqlType STRING */
           reviewer_experiment_id: string;
           /** @sqlType STRING */
+          annotations_table: string;
+          /** @sqlType STRING */
           description: string;
         }>;
       };
@@ -168,6 +170,19 @@ declare module "@databricks/appkit-ui/react" {
           cost_priced: boolean;
           /** @sqlType DOUBLE */
           redundancy_rate: number;
+        }>;
+      };
+    live_trace_summary: {
+        name: "live_trace_summary";
+        parameters: {
+          /** STRING - use sql.string() */
+          otel_spans_table: SQLStringMarker;
+        };
+        result: Array<{
+          /** @sqlType BIGINT */
+          live_trace_count: number;
+          /** @sqlType TIMESTAMP */
+          latest_trace_end: string;
         }>;
       };
     prompt_lineage: {

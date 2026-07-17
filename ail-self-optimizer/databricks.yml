@@ -50,6 +50,17 @@ variables:
   trace_schema:
     description: Unity Catalog schema used by Traces-in-Unity-Catalog experiments.
     default: mlflow_traces
+  primary_otel_spans_table_name:
+    description: >-
+      First registered agent's MLflow-managed *_otel_spans table name. The app
+      resource grants SELECT to the app service principal during deployment.
+    default: claude_code_otel_spans
+  secondary_otel_spans_table_name:
+    description: >-
+      Second registered agent's MLflow-managed *_otel_spans table name. Override
+      when deploying a different registry; every live-count source must be
+      declared as an app UC securable before removing broad/admin access.
+    default: 4408383386333204_otel_spans
   label_floor:
     description: Human labels required before MemAlign may trust a judge.
     default: '20'
@@ -80,6 +91,64 @@ resources:
           sql_warehouse:
             id: ${var.sql_warehouse_id}
             permission: CAN_USE
+        # AppKit analytics queries run as the app service principal. Declare every
+        # table they read so Apps grants SELECT during deployment; do not rely on
+        # workspace-admin or broad schema membership.
+        - name: agent-registry-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.agent_registry
+            permission: SELECT
+        - name: l0-corpus-summary-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.l0_corpus_summary
+            permission: SELECT
+        - name: l0-session-metrics-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.l0_session_metrics
+            permission: SELECT
+        - name: l0-diagnosis-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.l0_diagnosis
+            permission: SELECT
+        - name: proposed-actions-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.agent_proposed_actions
+            permission: SELECT
+        - name: version-l0-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.agent_version_l0
+            permission: SELECT
+        - name: version-comparison-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.agent_version_comparison
+            permission: SELECT
+        - name: version-readiness-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.agent_version_readiness
+            permission: SELECT
+        - name: prompt-lineage-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.agent_prompt_lineage
+            permission: SELECT
+        - name: primary-otel-spans-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.trace_schema}.${var.primary_otel_spans_table_name}
+            permission: SELECT
+        - name: secondary-otel-spans-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.trace_schema}.${var.secondary_otel_spans_table_name}
+            permission: SELECT
         # The `ail-apply-service` job the app triggers on approve/reject (§7).
         # Declaring it as a resource with CAN_MANAGE_RUN makes the Apps platform
         # AUTO-GRANT that permission to the app SP at deploy (same mechanism as
