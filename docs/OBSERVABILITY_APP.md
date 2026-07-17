@@ -100,10 +100,19 @@ Keep the current landing page; add an **agent switcher** and these views.
 
 ## Liveness
 
-"Live / updating as traces come in" = the **publish cadence**. True continuous
-refresh requires the scheduled-publish job + experiment monitoring wiring (the
-continuous-ops item; see `DEPLOY.md`). The comparison view and that wiring ship
-as a pair.
+The Overview separates source freshness from computed-metric freshness:
+
+- **Trace count is live** from the selected experiment's managed
+  `*_otel_spans` Delta table (distinct completed root traces).
+- **Tokens, cost, percentiles, and redundancy remain atomic L0 snapshots** from
+  the Python publisher. When live count is ahead, the UI reports exactly how
+  many traces are awaiting L0 refresh.
+
+Every raw OTEL table read by the app must be declared as a DAB app
+`uc_securable` with `SELECT`; an undeclared source fails closed to the snapshot.
+Future Lakebase serving should continuously sync a curated scalar trace-serving
+Delta table, not the raw OTEL table (raw spans contain unsupported `VARIANT`
+columns and are not CDF-enabled).
 
 ## Trust guarantees (carried from `READINESS_AND_TRUST.md`)
 

@@ -5,6 +5,7 @@ SELECT
   agent_name,
   experiment_id,
   reviewer_experiment_id,
+  annotations_table,
   description
 FROM austin_choi_omni_agent_catalog.agent_improvement_loop.agent_registry
 ORDER BY agent_name
