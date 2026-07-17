@@ -526,6 +526,7 @@ class TestEngineSeam:
         monkeypatch.setattr(engine_main, "run_engine_async", fake_run_engine_async)
         jsonl = tmp_path / "t.jsonl"
         jsonl.write_text("{}\n")
+
         async def invoke() -> str:
             return rv.run_halo_review("PROMPT", jsonl, model="m", base_url="http://x", api_key="k")
 

@@ -22,6 +22,9 @@ export interface GoalOption {
   guardrail_judges: string[];
   optional_quality_judge: string | null;
   description: string;
+  requires_labels: boolean;
+  gates: GateRequirement[];
+  summary: string;
 }
 
 export interface GateRequirement {
@@ -184,12 +187,12 @@ export const WIZARD_STEPS: readonly WizardStep[] = [
   {
     key: 'experiment',
     title: 'Experiment',
-    description: 'Point at a fresh MLflow experiment, or create one — one agent per experiment.',
+    description: 'Connect the experiment and describe the agent, project, and requirements in one place.',
   },
   {
     key: 'goals',
     title: 'Goals',
-    description: 'Choose what to improve. Each goal maps to a deterministic metric or a calibrated judge.',
+    description: 'Choose built-in goals or turn your requirements into custom feedback-trained judges.',
   },
   {
     key: 'data_gate',
@@ -199,7 +202,7 @@ export const WIZARD_STEPS: readonly WizardStep[] = [
   {
     key: 'register',
     title: 'Register',
-    description: 'Name the agent and register it — it then appears in the agent switcher.',
+    description: 'Review the complete setup and register it in the agent switcher.',
   },
 ] as const;
 
@@ -237,6 +240,10 @@ export interface WizardState {
   // requirements path was used (else null → the catalog path, RLM neutral). Opaque:
   // set verbatim from the confirm response, threaded onto register — never built here.
   goalConfig: Record<string, unknown> | null;
+  // Natural-language intake is part of the catalog flow. Quality dimensions are
+  // authored as MemAlign judges only after explicit preview + confirmation.
+  requirementsText: string;
+  customJudgeNames: string[];
 }
 
 export const initialWizardState: WizardState = {
@@ -254,6 +261,8 @@ export const initialWizardState: WizardState = {
   optimizationValidationCommand: '',
   annotationsTable: '',
   goalConfig: null,
+  requirementsText: '',
+  customJudgeNames: [],
 };
 
 export function toggleGoal(goals: readonly string[], key: string): string[] {
@@ -272,13 +281,12 @@ export function stepValidation(state: WizardState): StepValidation {
   const step = WIZARD_STEPS[state.stepIndex]?.key;
   switch (step) {
     case 'experiment':
-      return state.resolved?.fresh
-        ? { ok: true, reason: null }
-        : { ok: false, reason: 'Validate or create a fresh experiment to continue.' };
+      if (!state.resolved?.fresh) return { ok: false, reason: 'Validate or create a fresh experiment to continue.' };
+      return state.agentName.trim() ? { ok: true, reason: null } : { ok: false, reason: 'Name the agent to continue.' };
     case 'goals':
-      return state.goals.length > 0
+      return state.goals.length > 0 || state.goalConfig !== null
         ? { ok: true, reason: null }
-        : { ok: false, reason: 'Select at least one goal to improve.' };
+        : { ok: false, reason: 'Select a catalog goal or confirm your custom goals.' };
     case 'data_gate':
       return state.accepted
         ? { ok: true, reason: null }
@@ -287,7 +295,10 @@ export function stepValidation(state: WizardState): StepValidation {
       if (!state.agentName.trim()) return { ok: false, reason: 'Enter a unique agent name.' };
       if (!state.reviewerExperimentId.trim()) return { ok: false, reason: 'Create the isolated reviewer experiment.' };
       if (Boolean(state.optimizationTargetPath.trim()) !== Boolean(state.optimizationValidationCommand.trim())) {
-        return { ok: false, reason: 'Provide both the GEPA target path and its validation command, or leave both blank.' };
+        return {
+          ok: false,
+          reason: 'Provide both the GEPA target path and its validation command, or leave both blank.',
+        };
       }
       return { ok: true, reason: null };
     default:
@@ -524,6 +535,45 @@ export function dataGateView(req: RequirementsResponse): DataGateView {
       scorer: g.scorer,
       summary: g.summary ?? '',
     })),
+  };
+}
+
+// The initial catalog response carries each goal's Python-computed gate bundle.
+// Projecting a checkbox selection from that cache makes Data Gates update in the
+// same render, without another serverless onboarding job. All labels, thresholds,
+// needed strings, and summaries remain verbatim Python outputs.
+export function requirementsForGoals(
+  req: RequirementsResponse | null,
+  goals: readonly string[]
+): RequirementsResponse | null {
+  if (!req) return null;
+  const chosen = new Set(goals);
+  const selected: GoalRequirement[] = req.catalog
+    .filter((goal) => chosen.has(goal.key))
+    .map((goal) => ({
+      key: goal.key,
+      label: goal.label,
+      objective_metric: goal.objective_metric,
+      scorer: goal.scorer,
+      scorer_kind: goal.scorer_kind,
+      requires_quality: goal.requires_quality,
+      requires_labels: goal.requires_labels,
+      guardrail_judges: goal.guardrail_judges,
+      optional_quality_judge: goal.optional_quality_judge,
+      gates: goal.gates,
+      summary: goal.summary,
+    }));
+  const gates = new Map<string, GateRequirement>();
+  for (const goal of selected) for (const gate of goal.gates) if (!gates.has(gate.name)) gates.set(gate.name, gate);
+  return {
+    ...req,
+    selected,
+    union_gates: [...gates.values()],
+    requires_labels: selected.some((goal) => goal.requires_labels),
+    summary: selected
+      .map((goal) => goal.summary)
+      .filter(Boolean)
+      .join(' '),
   };
 }
 

@@ -1,9 +1,8 @@
-"""Scheduled L3/RLM runner over recent traces.
+"""Arrival-triggered L3/RLM runner over recent traces.
 
-A Databricks Job fires this on a *schedule* (not a trace-arrival trigger: the
-UC-backed MLflow trace store is a VIEW, ``cc_trace_unified`` / ``cc_trace_metadata``,
-so a ``table_update`` trigger is infeasible — see ``resources/continuous_rlm.job.yml``).
-Each firing scans the most recent traces and owns the cost guards:
+A Databricks Job fires this when the managed UC ``*_otel_spans`` Delta table is
+updated (see ``resources/continuous_rlm.job.yml``). Each pass scans the most recent
+traces and owns the cost guards:
 
 * skip any trace that already carries an ``rlm_*`` assessment;
 * deterministically sample trace ids, then rank the sampled set by token count;
@@ -22,6 +21,7 @@ import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Any
 
 from ail.compare.monitoring import TRACING_WAREHOUSE_ENV
 from ail.ingest.base import NormalizedTrace, TraceSource, TraceStatus
@@ -116,6 +116,7 @@ def select_unreviewed_traces(
     min_tokens: int | None = None,
     status: TraceStatus | None = None,
     retry_failed: bool = False,
+    exclude_trace_ids: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[TraceSelection], int, int, int]:
     """Choose the bounded, sampled, not-yet-reviewed subset for this firing.
 
@@ -132,11 +133,17 @@ def select_unreviewed_traces(
             0,
         )
 
+    excluded = exclude_trace_ids or set()
     unreviewed: list[NormalizedTrace] = []
     failed_retries: list[NormalizedTrace] = []
     n_already_reviewed = 0
     n_reviewer_traces_skipped = 0
     for trace in traces:
+        if trace.trace_id in excluded:
+            # A drain run may scan the same trace in a later batch before the
+            # trace-store read surface reflects the just-written assessment. Never
+            # review one subject twice inside the same Jobs run.
+            continue
         if has_rlm_assessment(trace):
             n_already_reviewed += 1
         elif has_rlm_failure_marker(trace):
@@ -189,7 +196,7 @@ def has_rlm_failure_marker(trace: NormalizedTrace) -> bool:
     )
 
 
-def _halo_sandbox_class() -> type:
+def _halo_sandbox_class() -> Any:
     from engine.sandbox.sandbox import Sandbox
 
     return Sandbox
@@ -244,6 +251,7 @@ def run_continuous_rlm(
     reasoning_effort: str | None = None,
     use_responses_api: bool | None = None,
     retry_failed: bool = False,
+    exclude_trace_ids: set[str] | frozenset[str] | None = None,
     max_workers: int = 4,
     enable_code_sandbox: bool = True,
 ) -> ContinuousRlmRunReport:
@@ -281,6 +289,7 @@ def run_continuous_rlm(
         min_tokens=min_tokens,
         status=status,
         retry_failed=retry_failed,
+        exclude_trace_ids=exclude_trace_ids,
     )
 
     if selections:

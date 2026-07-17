@@ -234,8 +234,7 @@ DEFAULT_REGISTRY = AgentRegistry(
                 "guardrail_judge": [],
             },
             annotations_table=(
-                "austin_choi_omni_agent_catalog.mlflow_traces."
-                "claude_code_otel_annotations"
+                "austin_choi_omni_agent_catalog.mlflow_traces.claude_code_otel_annotations"
             ),
             target_workspace="/Users/austin.choi/PycharmProjects2/agent-improvement-loop",
             optimization_target=OptimizationTarget(

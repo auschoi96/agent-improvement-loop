@@ -44,6 +44,7 @@ import re
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, get_args
@@ -92,7 +93,7 @@ def _prepare_halo_otel_compatibility() -> None:
         # annotations during import; ``Any`` preserves the runtime contract.
         from typing import Any
 
-        otel_types._ExtendedAttributes = Mapping[str, Any]  # type: ignore[attr-defined]
+        otel_types._ExtendedAttributes = Mapping[str, Any]
 
 
 @contextmanager
@@ -123,7 +124,7 @@ def _databricks_responses_compatibility(enabled: bool) -> Iterator[None]:
             payload["input"] = _normalize_databricks_responses_input(items)
         return payload
 
-    OpenAIResponsesModel._build_response_create_kwargs = patched  # type: ignore[method-assign]
+    OpenAIResponsesModel._build_response_create_kwargs = patched
     original_compact = compactor_module.compact
 
     async def responses_compact(*, client: Any, compaction_model: Any, item: Any) -> str:
@@ -142,7 +143,76 @@ def _databricks_responses_compatibility(enabled: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        OpenAIResponsesModel._build_response_create_kwargs = original  # type: ignore[method-assign]
+        OpenAIResponsesModel._build_response_create_kwargs = original
+        compactor_module.compact = original_compact
+        agent_context_module.compact = original_compact
+
+
+@contextmanager
+def _databricks_claude_chat_compatibility(enabled: bool) -> Iterator[None]:
+    """Omit OpenAI-only fields rejected by Databricks Claude Chat FMAPI.
+
+    HALO configures ``parallel_tool_calls`` on every tool-using request, but the
+    Databricks Claude gateway rejects that OpenAI field. Opus 4.8 also rejects a
+    caller-supplied ``temperature``. Leave both to provider defaults while keeping
+    messages, tools, tool choice, and output limits unchanged.
+    """
+    if not enabled:
+        yield
+        return
+
+    import engine.agents.agent_context as agent_context_module
+    import engine.agents.compactor as compactor_module
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+
+    original_fetch = OpenAIChatCompletionsModel._fetch_response
+
+    @functools.wraps(original_fetch)
+    async def patched_fetch(
+        self: Any,
+        system_instructions: Any,
+        input: Any,
+        model_settings: Any,
+        tools: Any,
+        output_schema: Any,
+        handoffs: Any,
+        span: Any,
+        tracing: Any,
+        stream: bool = False,
+        prompt: Any = None,
+    ) -> Any:
+        compatible = replace(
+            model_settings,
+            parallel_tool_calls=None,
+            temperature=None,
+        )
+        return await original_fetch(
+            self,
+            system_instructions,
+            input,
+            compatible,
+            tools,
+            output_schema,
+            handoffs,
+            span,
+            tracing,
+            stream,
+            prompt,
+        )
+
+    OpenAIChatCompletionsModel._fetch_response = patched_fetch  # type: ignore[method-assign]
+    original_compact = compactor_module.compact
+
+    async def compatible_compact(*, client: Any, compaction_model: Any, item: Any) -> str:
+        model = compaction_model.model_copy(update={"temperature": None})
+        return await original_compact(client=client, compaction_model=model, item=item)
+
+    compactor_module.compact = compatible_compact
+    agent_context_module.compact = compatible_compact
+    try:
+        yield
+    finally:
+        OpenAIChatCompletionsModel._fetch_response = original_fetch  # type: ignore[method-assign]
         compactor_module.compact = original_compact
         agent_context_module.compact = original_compact
 
@@ -241,6 +311,7 @@ def _normalize_databricks_responses_input(items: list[Any]) -> list[Any]:
         normalized.append(role_item)
 
     return normalized
+
 
 #: Assessment name the **overall** verdict is attached under. Together with the
 #: per-guideline ``rlm_<id>`` and the ``rlm_recommended_assets`` names — and the
@@ -614,9 +685,10 @@ def run_halo_review(
     ``halo-engine`` nor a model is needed in CI.
 
     HALO drives the OpenAI Agents SDK, which defaults to the **Responses API**.
-    Databricks reasoning endpoints such as ``databricks-gpt-5-5-pro`` only expose
-    the Responses API, while legacy chat endpoints expose chat-completions. When
-    ``use_responses_api`` is omitted, select the API from the model alias.
+    Databricks GPT reasoning endpoints such as ``databricks-gpt-5-5-pro`` expose
+    the Responses API, while Databricks Claude endpoints (including Opus 4.8) use
+    Chat Completions. When ``use_responses_api`` is omitted, select from the model
+    alias. The Claude path also omits OpenAI-only request fields rejected by FMAPI.
     ``disable_agent_tracing`` turns off the Agents SDK's own trace exporter
     (which would otherwise try to POST to OpenAI with the wrong credentials);
     our reviewer trace is the MLflow one opened by :func:`review_trace`, not the
@@ -647,13 +719,23 @@ def run_halo_review(
         reasoning_effort=reasoning_effort,
     )
     messages = [AgentMessage(role="user", content=prompt)]
+
     def _run() -> Any:
         return asyncio.run(
             run_engine_async(messages, config, Path(trace_path), telemetry=telemetry)
         )
 
-    responses_compat = use_responses and bool(base_url and "databricks" in base_url)
-    with _databricks_responses_compatibility(responses_compat):
+    databricks_endpoint = bool(base_url and "databricks" in base_url)
+    responses_compat = use_responses and databricks_endpoint
+    claude_chat_compat = (
+        not use_responses
+        and databricks_endpoint
+        and model.lower().startswith(("databricks-claude-", "claude-"))
+    )
+    with (
+        _databricks_responses_compatibility(responses_compat),
+        _databricks_claude_chat_compatibility(claude_chat_compat),
+    ):
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -955,9 +1037,9 @@ def review_trace(
             ``model`` via :func:`resolve_reasoning_effort` — which lets a Databricks
             reasoning alias like ``databricks-gpt-5-5-pro`` still get ``xhigh`` despite
             HALO's hyphen-blind prefix check; non-reasoning models resolve to ``None``.
-        use_responses_api: Leave ``False`` for Databricks FMAPI / any
-            chat-completions endpoint (the default); set ``True`` only for an
-            endpoint that implements the OpenAI Responses API.
+        use_responses_api: Leave unset to select from ``model``: Databricks Claude
+            uses Chat Completions and GPT-5 uses Responses. Override only for a
+            custom endpoint whose API differs from its model alias.
         tracking_uri / registry_uri: MLflow backends (Databricks-managed + UC).
 
     Returns:

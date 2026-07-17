@@ -47,8 +47,7 @@ interface SpawnVerifyBridgeOptions {
 export function spawnPythonVerifyBridge(options: SpawnVerifyBridgeOptions = {}): VerifyBridge {
   const pythonBin = options.pythonBin ?? process.env.AIL_APPLY_PYTHON_BIN ?? 'python3';
   // The app runs from ail-self-optimizer/; the ail package source is ../src.
-  const srcPath =
-    options.srcPath ?? process.env.AIL_APPLY_SRC_PATH ?? path.resolve(process.cwd(), '..', 'src');
+  const srcPath = options.srcPath ?? process.env.AIL_APPLY_SRC_PATH ?? path.resolve(process.cwd(), '..', 'src');
   const timeoutMs = options.timeoutMs ?? 120_000;
 
   return (input: VerifyInput) =>

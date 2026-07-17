@@ -13,7 +13,7 @@ resources:
         managed_by: dab
       max_concurrent_runs: 1
       queue:
-        enabled: true
+        enabled: false
       timeout_seconds: 21600
       parameters:
         - name: agent_name

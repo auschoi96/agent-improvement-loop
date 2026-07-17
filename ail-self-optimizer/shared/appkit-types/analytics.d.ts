@@ -10,6 +10,8 @@ declare module "@databricks/appkit-ui/react" {
         parameters: {
           /** STRING - use sql.string() */
           agent_name: SQLStringMarker;
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
         };
         result: Array<{
           /** @sqlType STRING */
@@ -34,6 +36,20 @@ declare module "@databricks/appkit-ui/react" {
           basis: string;
           /** @sqlType STRING */
           source: string;
+          /** @sqlType STRING */
+          model_type: string;
+          /** @sqlType STRING */
+          agent_kind: string;
+          /** @sqlType STRING */
+          logged_model_id: string;
+          /** @sqlType STRING */
+          config_name: string;
+          /** @sqlType STRING */
+          config_fingerprint: string;
+          /** @sqlType STRING */
+          config_json: string;
+          /** @sqlType STRING */
+          git_commit: string;
         }>;
       };
     agents: {
@@ -159,6 +175,8 @@ declare module "@databricks/appkit-ui/react" {
         parameters: {
           /** STRING - use sql.string() */
           agent_name: SQLStringMarker;
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
         };
         result: Array<{
           /** @sqlType INT */
@@ -198,12 +216,16 @@ declare module "@databricks/appkit-ui/react" {
         parameters: {
           /** STRING - use sql.string() */
           agent_name: SQLStringMarker;
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
         };
         result: Array<{
           /** @sqlType STRING */
           proposal_id: string;
           /** @sqlType STRING */
           agent_name: string;
+          /** @sqlType STRING */
+          experiment_id: string;
           /** @sqlType STRING */
           status: string;
           /** @sqlType STRING */
@@ -240,6 +262,18 @@ declare module "@databricks/appkit-ui/react" {
           change_evolved_body_ref: string;
           /** @sqlType STRING */
           change_revert_target: string;
+          /** @sqlType STRING */
+          change_local_apply_spec_json: string;
+          /** @sqlType STRING */
+          local_apply_status: string;
+          /** @sqlType STRING */
+          local_apply_error: string;
+          /** @sqlType STRING */
+          local_apply_completed_at: string;
+          /** @sqlType STRING */
+          local_apply_pre_change_ref: string;
+          /** @sqlType STRING */
+          local_apply_validation_output: string;
           /** @sqlType BOOLEAN */
           proof_proved_improvement: boolean;
           /** @sqlType BOOLEAN */
@@ -280,12 +314,17 @@ declare module "@databricks/appkit-ui/react" {
       };
     recent_activity: {
         name: "recent_activity";
-        parameters: Record<string, never>;
+        parameters: {
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
+        };
         result: Array<{
           /** @sqlType STRING */
           proposal_id: string;
           /** @sqlType STRING */
           agent_name: string;
+          /** @sqlType STRING */
+          experiment_id: string;
           /** @sqlType STRING */
           status: string;
           /** @sqlType STRING */
@@ -358,6 +397,8 @@ declare module "@databricks/appkit-ui/react" {
         parameters: {
           /** STRING - use sql.string() */
           agent_name: SQLStringMarker;
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
         };
         result: Array<{
           /** @sqlType STRING */
@@ -405,6 +446,8 @@ declare module "@databricks/appkit-ui/react" {
         parameters: {
           /** STRING - use sql.string() */
           agent_name: SQLStringMarker;
+          /** STRING - use sql.string() */
+          experiment_id: SQLStringMarker;
           /** STRING - use sql.string() */
           baseline_version: SQLStringMarker;
           /** STRING - use sql.string() */

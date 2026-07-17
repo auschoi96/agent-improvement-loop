@@ -32,6 +32,7 @@ from ail.publish_versions import (
     load_registered_agents_full,
     publish_registry,
     publish_version_bundle,
+    register_bundle_logged_models,
 )
 from ail.readiness import ReadinessThresholds, ReadinessTier
 from ail.registry import DEFAULT_REGISTRY, Agent, AgentRegistry
@@ -365,6 +366,53 @@ def test_row_builders_match_column_orders() -> None:
     assert len(_readiness_row(bundle.comparison)) == len(VERSION_READINESS_COLUMNS)
 
 
+def test_coding_agent_versions_capture_configuration_provenance() -> None:
+    bundle = build_phase2_version_bundle(
+        _load_artifact(),
+        agent_name=AGENT,
+        baseline_version=BASE_V,
+        candidate_version=CAND_V,
+        experiment_id="660599403165942",
+        git_commit="abc123",
+    )
+    baseline, candidate = bundle.aggregates
+
+    assert baseline.agent_kind == "coding_agent"
+    assert baseline.model_type == "agent"
+    assert baseline.config["intervention"] == "none"
+    assert candidate.config["intervention"] == "candidate-token-efficiency-skill"
+    assert baseline.git_commit == candidate.git_commit == "abc123"
+    assert baseline.config_fingerprint != candidate.config_fingerprint
+
+
+def test_register_bundle_logged_models_creates_external_agent_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mlflow
+
+    created: list[dict[str, object]] = []
+
+    class _Model:
+        def __init__(self, model_id: str, tags: dict[str, str]) -> None:
+            self.model_id = model_id
+            self.tags = tags
+
+    monkeypatch.setattr(mlflow, "set_tracking_uri", lambda uri: None)
+    monkeypatch.setattr(mlflow, "search_logged_models", lambda **kwargs: [])
+
+    def create_external_model(**kwargs):  # type: ignore[no-untyped-def]
+        created.append(kwargs)
+        return _Model(f"m-{len(created)}", kwargs["tags"])
+
+    monkeypatch.setattr(mlflow, "create_external_model", create_external_model)
+    registered = register_bundle_logged_models(_bundle(), profile="dais-demo")
+
+    assert [aggregate.logged_model_id for aggregate in registered.aggregates] == ["m-1", "m-2"]
+    assert all(call["model_type"] == "agent" for call in created)
+    assert created[1]["tags"]["ail.agent_kind"] == "coding_agent"  # type: ignore[index]
+    assert "configuration_json" in created[1]["params"]  # type: ignore[operator]
+
+
 def test_ddl_creates_the_four_unified_tables() -> None:
     ddl = "\n".join(pv._ddl("cat", "sch"))
     for table in (
@@ -374,6 +422,13 @@ def test_ddl_creates_the_four_unified_tables() -> None:
         "agent_version_readiness",
     ):
         assert f".{table} (" in ddl
+    for column in (
+        "logged_model_id STRING",
+        "config_fingerprint STRING",
+        "config_json STRING",
+        "git_commit STRING",
+    ):
+        assert column in ddl
 
 
 def test_registry_ddl_declares_the_three_source_of_truth_columns() -> None:
@@ -400,10 +455,13 @@ def test_publish_version_bundle_uses_composite_replace_predicates() -> None:
     # one per version (l0) + comparison + readiness = 4 swaps
     assert len(swaps) == 4
     assert any(
-        "agent_name = 'claude_code' AND agent_version = 'v0-baseline-no-skill'" in s for s in swaps
+        "agent_name = 'claude_code' AND experiment_id = '660599403165942' "
+        "AND agent_version = 'v0-baseline-no-skill'" in s
+        for s in swaps
     )
     assert any(
-        "agent_name = 'claude_code' AND agent_version = 'v1-token-efficiency-skill'" in s
+        "agent_name = 'claude_code' AND experiment_id = '660599403165942' "
+        "AND agent_version = 'v1-token-efficiency-skill'" in s
         for s in swaps
     )
     assert any(

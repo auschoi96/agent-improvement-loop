@@ -139,6 +139,25 @@ describe('handleCreateExperiment — fail-closed create', () => {
     expect((captured.body as { outcome: string }).outcome).not.toBe('created');
   });
 
+  it('forwards explicit idempotent reuse only for internal reviewer provisioning', async () => {
+    const { bridge, calls } = recordingBridge({ outcome: 'created', experiment_id: 'review-exp' });
+    const { res, captured } = fakeRes();
+    await handleCreateExperiment(req(AUTH, { name: 'agent-ail-internal', allow_existing: true }), res, bridge);
+    expect(calls[0]).toMatchObject({
+      action: 'create_experiment',
+      name: 'agent-ail-internal',
+      allow_existing: true,
+    });
+    expect(captured.code).toBe(200);
+  });
+
+  it('does not allow an ordinary subject experiment create to reuse an existing name', async () => {
+    const { bridge, calls } = recordingBridge({ outcome: 'created', experiment_id: 'subject-exp' });
+    const { res } = fakeRes();
+    await handleCreateExperiment(req(AUTH, { name: 'ordinary-subject', allow_existing: true }), res, bridge);
+    expect(calls[0].allow_existing).toBeUndefined();
+  });
+
   it('a bridge (engine) failure is an honest 502 error, never a fake creation', async () => {
     const bridge: OnboardingBridge = vi.fn().mockRejectedValue(new Error('onboarding-service exited 1'));
     const { res, captured } = fakeRes();

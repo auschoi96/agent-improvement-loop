@@ -40,6 +40,7 @@ ail-publish-job = "ail.jobs.publish_job:main"
 # and writes the real result to agent_apply_results for the app bridge to read back.
 ail-apply-job = "ail.jobs.apply_job:main"
 ail-onboarding-job = "ail.jobs.onboarding_job:main"
+ail-gepa-job = "ail.jobs.gepa_job:main"
 # One-time, idempotent post-deploy bootstrap: provide-or-create the framework SQL
 # warehouse, grant CAN_USE to the single framework SP, and tag the experiment with
 # the monitoring warehouse. Run as a workspace admin (see docs/DEPLOY.md).
@@ -140,6 +141,9 @@ l3 = ["halo-engine>=0.1.26,<0.2"]
 # is the version verified end-to-end (import + build_memalign_optimizer); <4 caps
 # the major to guard against a future dspy API break under MLflow's MemAlign.
 align = ["dspy>=3.2.1,<4"]
+# Explicitly dispatched coding-agent optimization. Pytest is a runtime dependency
+# here because the frozen comparison fixtures use it as their correctness harness.
+gepa = ["claude-agent-sdk>=0.2.114,<0.3", "dspy>=3.2.1,<4", "pytest>=8,<9"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
@@ -156,6 +160,8 @@ packages = ["src/ail"]
 # and load_task_suite(root=...) resolves <root>/eval/task_suite/<v>/tasks.yaml.
 [tool.hatch.build.targets.wheel.force-include]
 "eval/task_suite" = "ail/_eval_bundle/eval/task_suite"
+"eval/phase2_fixtures" = "ail/_eval_bundle/eval/phase2_fixtures"
+"run_plan.yaml" = "ail/_eval_bundle/run_plan.yaml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

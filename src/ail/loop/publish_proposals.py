@@ -318,7 +318,7 @@ def publish_agent_proposals(
     proposals: list[ProposedAction],
     *,
     agent_name: str,
-    experiment_id: str | None = None,
+    experiment_id: str,
     client: Any,
     warehouse_id: str,
     catalog: str = DEFAULT_CATALOG,
@@ -343,35 +343,22 @@ def publish_agent_proposals(
             "clobbers another agent."
         )
 
-    proposal_experiments = {p.experiment_id for p in proposals if p.experiment_id}
-    if experiment_id and any(exp != experiment_id for exp in proposal_experiments):
+    mismatched_experiments = sorted(
+        {p.experiment_id for p in proposals if p.experiment_id != experiment_id}
+    )
+    if mismatched_experiments:
         raise ValueError(
             f"publish_agent_proposals is scoped to experiment {experiment_id!r} but got "
-            f"{sorted(proposal_experiments)}"
+            f"{mismatched_experiments}; publish each experiment independently so an "
+            "experiment-scoped REPLACE never clobbers another experiment."
         )
-    if experiment_id is None and len(proposal_experiments) > 1:
-        raise ValueError(
-            f"publish_agent_proposals received multiple experiments: {sorted(proposal_experiments)}"
-        )
-    resolved_experiment = experiment_id or next(iter(proposal_experiments), "")
 
     stamp = generated_at or datetime.now(UTC).isoformat()
     fqn = f"`{catalog}`.`{schema}`"
     for ddl in _ddl(catalog, schema):
         _execute(client, warehouse_id, ddl)
 
-    rows = [
-        _proposal_row(
-            p.model_copy(update={"experiment_id": resolved_experiment})
-            if resolved_experiment and not p.experiment_id
-            else p,
-            generated_at=stamp,
-        )
-        for p in proposals
-    ]
-    predicate = f"agent_name = {_lit(agent_name)}"
-    if resolved_experiment:
-        predicate += f" AND experiment_id = {_lit(resolved_experiment)}"
+    rows = [_proposal_row(p, generated_at=stamp) for p in proposals]
     return _atomic_replace_table(
         client,
         warehouse_id,
@@ -379,7 +366,7 @@ def publish_agent_proposals(
         PROPOSALS_TABLE,
         PROPOSAL_COLUMNS,
         rows,
-        predicate,
+        f"agent_name = {_lit(agent_name)} AND experiment_id = {_lit(experiment_id)}",
     )
 
 
@@ -409,7 +396,7 @@ def publish_proposals(
         written[name] = publish_agent_proposals(
             agent_proposals,
             agent_name=name,
-            experiment_id=experiment_id or None,
+            experiment_id=experiment_id,
             client=ws,
             warehouse_id=warehouse_id,
             catalog=catalog,

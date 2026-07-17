@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { useSearchParams } from 'react-router';
 import { useAnalyticsQuery } from '@databricks/appkit-ui/react';
 import { AgentContext, type AgentContextValue, type AgentRow } from './agent-context';
+import { reconcileAgentsState, type AgentsQueryResult, type AgentsState } from './agent-state';
 
 // The selection lives in the URL (?agent=<name>) so every routed view is deep-linkable
 // and a refresh/share restores both the section AND the agent.
@@ -11,32 +12,34 @@ const AGENT_PARAM = 'agent';
 // provider so the sidebar badge, the top-bar switcher, and every page read one source.
 const EMPTY_PARAMS = {};
 
-interface AgentsState {
-  agents: AgentRow[];
-  loading: boolean;
-  error: string | null;
-}
-
 // Isolated subscriber: owns the `agents` analytics query and reports its result up. It
 // renders nothing and sits as a sibling of the app tree, so remounting it via `key`
 // (reloadAgents) forces a fresh subscription/refetch WITHOUT remounting the app —
 // mirroring how the pre-shell App remounted the switcher to pick up a new agent.
-function AgentsSubscriber({ onResult }: { onResult: (state: AgentsState) => void }) {
+function AgentsSubscriber({ onResult }: { onResult: (result: AgentsQueryResult) => void }) {
   const { data, loading, error } = useAnalyticsQuery('agents', EMPTY_PARAMS);
   useEffect(() => {
-    onResult({ agents: (data ?? []) as AgentRow[], loading, error });
+    onResult({ data: data == null ? null : (data as AgentRow[]), loading, error });
   }, [data, loading, error, onResult]);
   return null;
 }
 
 export function AgentProvider({ children }: { children: ReactNode }) {
   const [reloadKey, setReloadKey] = useState(0);
-  const [state, setState] = useState<AgentsState>({ agents: [], loading: true, error: null });
+  const [state, setState] = useState<AgentsState>({
+    agents: [],
+    loading: true,
+    error: null,
+    hasLoaded: false,
+  });
   const [searchParams, setSearchParams] = useSearchParams();
 
   const reloadAgents = useCallback(() => {
-    setState((s) => ({ ...s, loading: true }));
     setReloadKey((k) => k + 1);
+  }, []);
+
+  const receiveAgents = useCallback((result: AgentsQueryResult) => {
+    setState((previous) => reconcileAgentsState(previous, result));
   }, []);
 
   useEffect(() => {
@@ -89,7 +92,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
 
   return (
     <AgentContext.Provider value={value}>
-      <AgentsSubscriber key={reloadKey} onResult={setState} />
+      <AgentsSubscriber key={reloadKey} onResult={receiveAgents} />
       {children}
     </AgentContext.Provider>
   );

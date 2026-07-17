@@ -201,6 +201,38 @@ optimization_target:
 
 `path` must be relative to `target_workspace`; absolute paths and `..` are rejected.
 
+### App dispatcher and job resource
+
+The app's `/optimize` route uses AppKit's resource-scoped Jobs plugin. The deployed
+app receives only the declared `DATABRICKS_JOB_GEPA` binding, and its service
+principal gets `CAN_MANAGE_RUN` on that job. Browser input is schema-validated and
+the job re-resolves the selected registry row, then rejects an `experiment_id` that
+does not match it before model compute begins.
+
+AppKit 0.38.1 discovers the named key from `DATABRICKS_JOB_GEPA` but still validates
+its static single-job manifest alias at startup. `app.yaml` therefore binds both
+`DATABRICKS_JOB_GEPA` and `DATABRICKS_JOB_ID` to the same `gepa-job` resource;
+explicit `jobs.gepa` configuration exposes only the named route.
+
+Status is polled through short Jobs API requests and updates only the dispatcher
+panel; it never reloads the route. The remembered active run is keyed by both agent
+and experiment, so switching an experiment cannot display or apply another
+experiment's candidate. Job output is accepted only from the schema-validated
+`AIL_GEPA_RESULT=` marker. The job has one active-run slot and queueing disabled so
+costly clicks do not accumulate into a backlog.
+
+To run from the UI:
+
+1. Configure `target_workspace`, `optimization_target.path`, and the validation
+   command during onboarding.
+2. Open **Optimize** for the selected agent/experiment.
+3. Choose the metric-call/train-task/holdout bounds and acknowledge the live cost.
+4. Dispatch and monitor the job. A held-out winner appears in **Approvals**; it is
+   still unapplied until a human approves it and the local companion processes it.
+
+The packaged live adapter currently supports only `claude_code`. Other agents fail
+closed before the costly optimizer starts.
+
 ## Cost / fidelity
 
 Every fitness evaluation runs the agent **live** — a baseline arm **and** a candidate
@@ -228,7 +260,7 @@ reported number keeps full fidelity even if the inner search used a proxy.
 pins this: the proxy runs the train tasks, the live adapter runs only the held-out
 tasks.
 
-## Running it (live)
+## Running it directly (live, without the app dispatcher)
 
 ```bash
 AIL_LIVE_GEPA=1 python scripts/run_gepa_optimization.py \

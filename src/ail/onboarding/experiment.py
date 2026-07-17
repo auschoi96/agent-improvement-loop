@@ -88,9 +88,7 @@ class ExperimentClient(Protocol):
         """The experiment named ``name``, or ``None`` if none. Raises on auth."""
         ...
 
-    def create_experiment(
-        self, name: str, *, trace_location: UcTraceLocation | None = None
-    ) -> str:
+    def create_experiment(self, name: str, *, trace_location: UcTraceLocation | None = None) -> str:
         """Create an experiment and return its id. Raises when creation is denied."""
         ...
 
@@ -224,6 +222,7 @@ def create_experiment(
     *,
     client: ExperimentClient,
     trace_location: UcTraceLocation | None = None,
+    allow_existing: bool = False,
 ) -> ExperimentCreation:
     """Create a fresh experiment named ``name`` (fail-closed, honest on denial).
 
@@ -231,8 +230,9 @@ def create_experiment(
     paths**, so a bare name (``my-agent-exp``) is first resolved to
     ``/Users/<current_user>/<name>`` via :meth:`ExperimentClient.workspace_home`
     (an already-absolute name is used as-is — back-compat). Refuses to create when
-    an experiment of that **final, absolute** name already exists (it may be another
-    agent's — never silently reuse it). A creation denied by the workspace is
+    an experiment of that **final, absolute** name already exists unless
+    ``allow_existing`` is explicitly enabled for an idempotent internal-reviewer
+    ensure. A creation denied by the workspace is
     surfaced as :class:`ExperimentPermissionError` with the documented prerequisite;
     a bare name whose workspace home cannot be resolved is an honest
     :class:`ExperimentAccessError` (fail-closed — never created at a guessed path).
@@ -244,6 +244,11 @@ def create_experiment(
     target = _absolute_experiment_path(clean, client=client)
     existing = client.get_experiment_by_name(target)
     if existing is not None:
+        if allow_existing:
+            if trace_location is not None:
+                experiment_id = client.create_experiment(target, trace_location=trace_location)
+                return ExperimentCreation(experiment_id=str(experiment_id), name=target)
+            return ExperimentCreation(experiment_id=existing.experiment_id, name=existing.name)
         raise ValueError(
             f"an experiment named {target!r} already exists (id {existing.experiment_id}); "
             "choose a different name or validate that experiment instead of creating it"
@@ -368,34 +373,31 @@ class MlflowExperimentClient:
             return None
         return ExperimentInfo(experiment_id=str(exp.experiment_id), name=str(exp.name))
 
-    def create_experiment(
-        self, name: str, *, trace_location: UcTraceLocation | None = None
-    ) -> str:
+    def create_experiment(self, name: str, *, trace_location: UcTraceLocation | None = None) -> str:
         try:
             if trace_location is not None:
-                from databricks.sdk import WorkspaceClient
+                import mlflow
+                from mlflow.entities import UnityCatalog
 
-                response = WorkspaceClient(profile=self._profile).api_client.do(
-                    "POST",
-                    "/api/2.0/mlflow/experiments/create",
-                    body={
-                        "name": name,
-                        "trace_location": {
-                            "uc_trace_location": {
-                                "catalog": trace_location.catalog,
-                                "schema": trace_location.schema,
-                                "table_prefix": trace_location.table_prefix,
-                            }
-                        },
-                        "tags": [
-                            {"key": "mlflow.experimentKind", "value": "genai_development"},
-                            {"key": "mlflow.experimentType", "value": "MLFLOW_EXPERIMENT"},
-                        ],
-                    },
+                self._ensure()
+                location = UnityCatalog(
+                    catalog_name=trace_location.catalog,
+                    schema_name=trace_location.schema,
+                    table_prefix=trace_location.table_prefix,
                 )
-                experiment_id = (
-                    response.get("experiment_id") if isinstance(response, dict) else None
-                )
+                try:
+                    experiment = mlflow.set_experiment(
+                        experiment_name=name, trace_location=location
+                    )
+                except Exception as exc:  # noqa: BLE001 - retry one ambiguous SDK deadline
+                    if not _is_deadline_exceeded(exc):
+                        raise
+                    # set_experiment is idempotent: after a create/location timeout it
+                    # finds the experiment and retries only the missing UC link.
+                    experiment = mlflow.set_experiment(
+                        experiment_name=name, trace_location=location
+                    )
+                experiment_id = getattr(experiment, "experiment_id", None)
                 if not experiment_id:
                     raise ExperimentPermissionError(
                         f"Databricks returned no experiment id when creating {name!r}"
@@ -482,6 +484,12 @@ def _is_permission(exc: Exception) -> bool:
         return True
     msg = str(exc).lower()
     return any(marker.lower() in msg for marker in _PERMISSION_MARKERS)
+
+
+def _is_deadline_exceeded(exc: Exception) -> bool:
+    code = _error_code(exc).upper()
+    msg = str(exc).lower()
+    return "DEADLINE" in code or "deadlineexceeded" in msg or "deadline exceeded" in msg
 
 
 def _access_hint(target: str, profile: str | None, exc: Exception) -> str:

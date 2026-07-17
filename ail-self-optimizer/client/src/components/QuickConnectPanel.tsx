@@ -11,6 +11,7 @@ import {
   Label,
   Textarea,
 } from '@databricks/appkit-ui/react';
+import { postOnboardingJson } from '../lib/onboarding-api';
 
 interface BootstrapResponse {
   outcome: string;
@@ -22,28 +23,6 @@ interface BootstrapResponse {
   error?: string | null;
   request_id?: string;
   run_id?: number;
-}
-
-async function waitForBootstrap(initial: Response): Promise<{ response: Response; body: BootstrapResponse }> {
-  let response = initial;
-  let body = (await response.json().catch(() => ({}))) as BootstrapResponse;
-  const deadline = Date.now() + 15 * 60_000;
-  while (response.ok && body.outcome === 'pending' && body.request_id && body.run_id != null) {
-    if (Date.now() >= deadline) {
-      return {
-        response,
-        body: { outcome: 'error', error: 'Setup did not finish within 15 minutes.' },
-      };
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 3_000));
-    response = await fetch('/api/onboarding/status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request_id: body.request_id, run_id: body.run_id }),
-    });
-    body = (await response.json().catch(() => ({}))) as BootstrapResponse;
-  }
-  return { response, body };
 }
 
 export function QuickConnectPanel({
@@ -67,18 +46,13 @@ export function QuickConnectPanel({
     setBusy(true);
     setResult(null);
     try {
-      const started = await fetch('/api/onboarding/bootstrap', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agent_name: name.trim(),
-          requirements_text: objective.trim(),
-          ...(targetWorkspace.trim() ? { target_workspace: targetWorkspace.trim() } : {}),
-        }),
+      const { ok, body } = await postOnboardingJson<BootstrapResponse>('/api/onboarding/bootstrap', {
+        agent_name: name.trim(),
+        requirements_text: objective.trim(),
+        ...(targetWorkspace.trim() ? { target_workspace: targetWorkspace.trim() } : {}),
       });
-      const { response, body } = await waitForBootstrap(started);
       setResult(body);
-      if (response.ok && body.outcome === 'registered' && body.agent_name) onRegistered(body.agent_name);
+      if (ok && body.outcome === 'registered' && body.agent_name) onRegistered(body.agent_name);
     } catch {
       setResult({ outcome: 'error', error: 'Network error while setting up the agent.' });
     } finally {
@@ -165,7 +139,7 @@ export function QuickConnectPanel({
                 {(result.authored_judges ?? []).join(', ') || 'none required'}.
               </>
             ) : (
-              result.error ?? 'Setup failed.'
+              (result.error ?? 'Setup failed.')
             )}
           </div>
         )}

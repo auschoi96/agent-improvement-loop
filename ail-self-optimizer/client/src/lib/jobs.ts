@@ -38,6 +38,7 @@ export interface JobsActivityResult {
 export interface RecentActivityRow {
   proposal_id: string;
   agent_name: string;
+  experiment_id: string;
   status: string;
   action_kind: string;
   risk_class: string;

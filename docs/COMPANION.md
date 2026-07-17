@@ -67,6 +67,9 @@ Each tick delegates to `ail.jobs.agent_executor.run`, which:
   verifies the project-relative target plus seed/candidate hashes and exact diff,
   snapshots the original, rewrites atomically, and runs the registered validation
   command. A conflict applies nothing; failed validation restores the original;
+- scopes GEPA polling and terminal updates by both `agent_name` and
+  `experiment_id`, so a selected agent cannot consume a similarly named proposal
+  from another experiment;
 - records the commit in `agent_executor_commits` and advances the proposal status.
 
 Optional planning cadence:

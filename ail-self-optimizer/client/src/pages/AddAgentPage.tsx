@@ -35,7 +35,8 @@ export function AddAgentPage() {
       )}
       {!showAdvanced && (
         <p className="text-sm text-muted-foreground">
-          Already have MLflow or OTEL traces? Use advanced setup to connect the existing experiment and include its history.
+          Already have MLflow or OTEL traces? Use advanced setup to connect the existing experiment and include its
+          history.
         </p>
       )}
       {showAdvanced && (

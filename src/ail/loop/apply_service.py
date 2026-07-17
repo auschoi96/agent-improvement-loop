@@ -531,9 +531,7 @@ def _approve_gepa_for_local_companion(
         risk_class=proposal.risk_class.value,
         status=ProposalStatus.APPROVED.value,
         reason=decision.reason,
-        summary=(
-            f"approved local rewrite of {spec.target_path}; waiting for the local companion"
-        ),
+        summary=(f"approved local rewrite of {spec.target_path}; waiting for the local companion"),
     )
 
 
@@ -845,6 +843,7 @@ def load_pending_proposal(
     warehouse_id: str,
     agent_name: str,
     proposal_id: str,
+    experiment_id: str,
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
 ) -> ProposedAction | None:
@@ -856,7 +855,9 @@ def load_pending_proposal(
     fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
     sql = (
         f"SELECT * FROM {fqn} WHERE agent_name = {_lit(agent_name)} "
-        f"AND proposal_id = {_lit(proposal_id)} AND status = {_lit(ProposalStatus.PENDING.value)} "
+        f"AND experiment_id = {_lit(experiment_id)} "
+        f"AND proposal_id = {_lit(proposal_id)} "
+        f"AND status = {_lit(ProposalStatus.PENDING.value)} "
         "LIMIT 1"
     )
     rows = _query_rows(client, warehouse_id, sql)
@@ -1085,6 +1086,7 @@ def mark_proposal_status(
     client: Any,
     warehouse_id: str,
     agent_name: str,
+    experiment_id: str,
     proposal_id: str,
     status: ProposalStatus,
     catalog: str = DEFAULT_CATALOG,
@@ -1092,12 +1094,13 @@ def mark_proposal_status(
 ) -> None:
     """Advance a proposal's ``status`` in ``agent_proposed_actions`` (only if pending).
 
-    An in-place ``UPDATE`` scoped to the single ``(agent_name, proposal_id)`` row so
-    the queue's SELECT (which orders pending first) drops the decided proposal on
-    refresh. The controller *owns* this table via an atomic agent-scoped REPLACE, so
-    a subsequent controller cycle re-materializes the pending set — the durable
-    decision record lives in :data:`DECISIONS_TABLE` (and, for an apply, the lineage
-    timeline), never solely in this ephemeral status.
+    An in-place ``UPDATE`` scoped to the single
+    ``(agent_name, experiment_id, proposal_id)`` row so the queue's SELECT (which
+    orders pending first) drops the decided proposal on refresh. The controller
+    *owns* this table via an atomic experiment-scoped REPLACE, so a subsequent
+    controller cycle re-materializes the pending set — the durable decision record
+    lives in :data:`DECISIONS_TABLE` (and, for an apply, the lineage timeline), never
+    solely in this ephemeral status.
     """
     fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
     local_state = (
@@ -1109,7 +1112,8 @@ def mark_proposal_status(
         client,
         warehouse_id,
         f"UPDATE {fqn} SET status = {_lit(status.value)}{local_state} "
-        f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
+        f"WHERE agent_name = {_lit(agent_name)} AND experiment_id = {_lit(experiment_id)} "
+        f"AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.PENDING.value)}",
     )
 
@@ -1199,11 +1203,20 @@ def run_decision(
     try:
         resolved_catalog, resolved_schema = resolve_catalog_schema(catalog, schema)
         client = _build_workspace_client(profile)
+        agent = _resolve_agent(
+            agent_name,
+            registry_path,
+            client=client,
+            warehouse_id=wh,
+            catalog=resolved_catalog,
+            schema=resolved_schema,
+        )
         proposal = load_pending_proposal(
             client=client,
             warehouse_id=wh,
             agent_name=agent_name,
             proposal_id=proposal_id,
+            experiment_id=agent.experiment_id,
             catalog=resolved_catalog,
             schema=resolved_schema,
         )
@@ -1219,7 +1232,6 @@ def run_decision(
                 outcome=ApplyServiceOutcome.REFUSED,
             )
 
-        agent = _resolve_agent(agent_name, registry_path)
         registry_client = build_registry_client(
             profile, catalog=resolved_catalog, schema=resolved_schema
         )
@@ -1253,6 +1265,7 @@ def run_decision(
                 client=client,
                 warehouse_id=wh,
                 agent_name=agent_name,
+                experiment_id=agent.experiment_id,
                 proposal_id=proposal_id,
                 status=status,
                 catalog=resolved_catalog,
@@ -1289,11 +1302,29 @@ def run_decision(
         )
 
 
-def _resolve_agent(agent_name: str, registry_path: str | None) -> Any:
+def _resolve_agent(
+    agent_name: str,
+    registry_path: str | None,
+    *,
+    client: Any,
+    warehouse_id: str,
+    catalog: str,
+    schema: str,
+) -> Any:
+    """Resolve the live UC registry by default, with an explicit local-file override."""
+    from ail.jobs.multi_agent import resolve_registered_agent
     from ail.registry import load_registry
 
     path = registry_path or os.environ.get("AIL_AGENT_REGISTRY")
-    return load_registry(path).get(agent_name)
+    if path:
+        return load_registry(path).get(agent_name)
+    return resolve_registered_agent(
+        agent_name,
+        client=client,
+        warehouse_id=warehouse_id,
+        catalog=catalog,
+        schema=schema,
+    )
 
 
 def _error_result(

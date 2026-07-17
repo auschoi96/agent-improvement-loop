@@ -52,8 +52,11 @@ Run (seed the Phase-2 controlled result for the Claude Code agent)::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -152,6 +155,13 @@ class AgentVersionAggregate(_Contract):
     experiment_id: str | None = None
     source: str = SOURCE_PHASE2
     basis: str = BASIS_PROMOTE
+    model_type: str = "agent"
+    agent_kind: str = "coding_agent"
+    logged_model_id: str | None = None
+    config_name: str = ""
+    config_fingerprint: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+    git_commit: str | None = None
     n_traces: int = 0
     n_traces_total: int = 0
     input_tokens: float = 0.0
@@ -178,6 +188,7 @@ class VersionComparison(_Contract):
 
     schema_version: str = SCHEMA_VERSION
     agent_name: str
+    experiment_id: str | None = None
     baseline_version: str
     candidate_version: str
     objective_metric: str = "total_tokens"
@@ -271,6 +282,56 @@ def _reconstruct_redundant(rate: float, total_tool_calls: float) -> float:
     return round(rate * total_tool_calls)
 
 
+def _config_fingerprint(config: Mapping[str, Any]) -> str:
+    """Stable short fingerprint for one coding-agent configuration snapshot."""
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _coding_agent_config(
+    artifact: Phase2Artifact, *, candidate: bool, git_commit: str | None
+) -> dict[str, Any]:
+    """The reproducible configuration/provenance available for a coding-agent arm.
+
+    Coding agents are external processes, so there is no honest MLflow model artifact
+    to package. The useful version boundary is the launcher configuration: named
+    intervention, source revision, frozen-suite identity, and comparison objective.
+    Unknowns such as a base model are omitted rather than guessed.
+    """
+    name = artifact.candidate_config if candidate else artifact.baseline_config
+    config: dict[str, Any] = {
+        "agent_kind": "coding_agent",
+        "configuration": name,
+        "intervention": name if candidate else "none",
+        "objective_metric": artifact.objective_metric,
+        "minimum_objective_change_pct": artifact.min_token_reduction_pct,
+        "suite_version": artifact.suite_version,
+        "suite_content_hash": artifact.suite_content_hash,
+    }
+    if git_commit:
+        config["git_commit"] = git_commit
+    return config
+
+
+def _current_git_commit() -> str | None:
+    """Best-effort source revision for version provenance; never fabricates one."""
+    env_commit = os.environ.get("GIT_COMMIT", "").strip()
+    if env_commit:
+        return env_commit
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
 def _aggregate_version(
     outcomes: list[TaskOutcome],
     *,
@@ -278,6 +339,9 @@ def _aggregate_version(
     agent_name: str,
     agent_version: str,
     experiment_id: str | None,
+    config: dict[str, Any],
+    logged_model_id: str | None,
+    git_commit: str | None,
     n_traces_total: int,
     generated_at: str | None,
 ) -> AgentVersionAggregate:
@@ -304,6 +368,11 @@ def _aggregate_version(
         agent_name=agent_name,
         agent_version=agent_version,
         experiment_id=experiment_id,
+        logged_model_id=logged_model_id,
+        config_name=str(config.get("configuration") or agent_version),
+        config_fingerprint=_config_fingerprint(config),
+        config=config,
+        git_commit=git_commit,
         n_traces=n,
         n_traces_total=n_traces_total,
         input_tokens=input_tokens,
@@ -405,6 +474,8 @@ def build_phase2_version_bundle(
     baseline_version: str,
     candidate_version: str,
     experiment_id: str | None = None,
+    logged_model_ids: Mapping[str, str] | None = None,
+    git_commit: str | None = None,
     thresholds: ReadinessThresholds | None = None,
     generated_at: str | None = None,
 ) -> VersionPublishBundle:
@@ -420,6 +491,9 @@ def build_phase2_version_bundle(
     stamp = generated_at or artifact.generated_at or datetime.now(UTC).isoformat()
     promote = _promote_outcomes(artifact)
     n_total = artifact.n_tasks
+    model_ids = logged_model_ids or {}
+    baseline_config = _coding_agent_config(artifact, candidate=False, git_commit=git_commit)
+    candidate_config = _coding_agent_config(artifact, candidate=True, git_commit=git_commit)
 
     baseline_agg = _aggregate_version(
         promote,
@@ -427,6 +501,9 @@ def build_phase2_version_bundle(
         agent_name=agent_name,
         agent_version=baseline_version,
         experiment_id=experiment_id,
+        config=baseline_config,
+        logged_model_id=model_ids.get(baseline_version),
+        git_commit=git_commit,
         n_traces_total=n_total,
         generated_at=stamp,
     )
@@ -436,6 +513,9 @@ def build_phase2_version_bundle(
         agent_name=agent_name,
         agent_version=candidate_version,
         experiment_id=experiment_id,
+        config=candidate_config,
+        logged_model_id=model_ids.get(candidate_version),
+        git_commit=git_commit,
         n_traces_total=n_total,
         generated_at=stamp,
     )
@@ -493,6 +573,7 @@ def build_phase2_version_bundle(
 
     comparison = VersionComparison(
         agent_name=agent_name,
+        experiment_id=experiment_id,
         baseline_version=baseline_version,
         candidate_version=candidate_version,
         objective_metric=objective_metric,
@@ -514,6 +595,80 @@ def build_phase2_version_bundle(
         notes=notes,
     )
     return VersionPublishBundle(aggregates=[baseline_agg, candidate_agg], comparison=comparison)
+
+
+def register_bundle_logged_models(
+    bundle: VersionPublishBundle, *, profile: str | None = None
+) -> VersionPublishBundle:
+    """Register coding-agent configs as idempotent MLflow external agent versions.
+
+    ``create_external_model`` is the honest LoggedModel representation here: Claude
+    Code/Codex configuration is not a serializable MLflow Model artifact, but its
+    parameters, provenance, metrics, and future traces still belong to one version.
+    Re-publishing the same agent/version/fingerprint reuses the existing LoggedModel.
+    """
+    import mlflow
+
+    if profile:
+        mlflow.set_tracking_uri(f"databricks://{profile}")
+
+    by_experiment: dict[str, list[Any]] = {}
+    updated: list[AgentVersionAggregate] = []
+    for aggregate in bundle.aggregates:
+        experiment_id = aggregate.experiment_id
+        if not experiment_id:
+            updated.append(aggregate)
+            continue
+        if experiment_id not in by_experiment:
+            by_experiment[experiment_id] = list(
+                mlflow.search_logged_models(
+                    experiment_ids=[experiment_id],
+                    max_results=50,
+                    output_format="list",
+                )
+            )
+
+        tags = {
+            "ail.agent": aggregate.agent_name,
+            "ail.agent_version": aggregate.agent_version,
+            "ail.agent_kind": aggregate.agent_kind,
+            "ail.config_fingerprint": aggregate.config_fingerprint,
+            "ail.source": aggregate.source,
+        }
+        existing = next(
+            (
+                model
+                for model in by_experiment[experiment_id]
+                if all(
+                    str((getattr(model, "tags", {}) or {}).get(key, "")) == value
+                    for key, value in tags.items()
+                )
+            ),
+            None,
+        )
+        if existing is None:
+            raw_name = f"{aggregate.agent_name}-{aggregate.agent_version}"
+            model_name = "".join(
+                char if char.isalnum() or char in "._-" else "-" for char in raw_name
+            )[:250]
+            params = {
+                "configuration": aggregate.config_name,
+                "config_fingerprint": aggregate.config_fingerprint,
+                "configuration_json": json.dumps(aggregate.config, sort_keys=True),
+            }
+            if aggregate.git_commit:
+                params["git_commit"] = aggregate.git_commit
+            existing = mlflow.create_external_model(
+                name=model_name,
+                experiment_id=experiment_id,
+                model_type=aggregate.model_type,
+                tags=tags,
+                params=params,
+            )
+            by_experiment[experiment_id].append(existing)
+        updated.append(aggregate.model_copy(update={"logged_model_id": str(existing.model_id)}))
+
+    return bundle.model_copy(update={"aggregates": updated})
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +695,13 @@ VERSION_L0_COLUMNS: list[str] = [
     "experiment_id",
     "source",
     "basis",
+    "model_type",
+    "agent_kind",
+    "logged_model_id",
+    "config_name",
+    "config_fingerprint",
+    "config_json",
+    "git_commit",
     "n_traces",
     "n_traces_total",
     "input_tokens",
@@ -557,6 +719,7 @@ VERSION_L0_COLUMNS: list[str] = [
 
 VERSION_COMPARISON_COLUMNS: list[str] = [
     "agent_name",
+    "experiment_id",
     "baseline_version",
     "candidate_version",
     "metric_tier",
@@ -573,6 +736,7 @@ VERSION_COMPARISON_COLUMNS: list[str] = [
 
 VERSION_READINESS_COLUMNS: list[str] = [
     "agent_name",
+    "experiment_id",
     "baseline_version",
     "candidate_version",
     "objective_metric",
@@ -623,6 +787,13 @@ def _version_l0_row(agg: AgentVersionAggregate) -> list[Any]:
         agg.experiment_id,
         agg.source,
         agg.basis,
+        agg.model_type,
+        agg.agent_kind,
+        agg.logged_model_id,
+        agg.config_name,
+        agg.config_fingerprint,
+        json.dumps(agg.config, sort_keys=True),
+        agg.git_commit,
         agg.n_traces,
         agg.n_traces_total,
         agg.input_tokens,
@@ -645,6 +816,7 @@ def _comparison_rows(comparison: VersionComparison) -> list[list[Any]]:
         rows.append(
             [
                 comparison.agent_name,
+                comparison.experiment_id,
                 comparison.baseline_version,
                 comparison.candidate_version,
                 "L0",
@@ -666,6 +838,7 @@ def _readiness_row(comparison: VersionComparison) -> list[Any]:
     r = comparison.readiness
     return [
         comparison.agent_name,
+        comparison.experiment_id,
         comparison.baseline_version,
         comparison.candidate_version,
         comparison.objective_metric,
@@ -728,6 +901,13 @@ def _ddl(catalog: str, schema: str) -> list[str]:
             experiment_id STRING,
             source STRING,
             basis STRING,
+            model_type STRING,
+            agent_kind STRING,
+            logged_model_id STRING,
+            config_name STRING,
+            config_fingerprint STRING,
+            config_json STRING,
+            git_commit STRING,
             n_traces INT,
             n_traces_total INT,
             input_tokens DOUBLE,
@@ -745,6 +925,7 @@ def _ddl(catalog: str, schema: str) -> list[str]:
         COMMENT 'Per (agent, version) L0 aggregate over counted PROMOTE traces; cost ESTIMATE.'""",
         f"""CREATE TABLE IF NOT EXISTS {fqn}.{VERSION_COMPARISON_TABLE} (
             agent_name STRING,
+            experiment_id STRING,
             baseline_version STRING,
             candidate_version STRING,
             metric_tier STRING,
@@ -761,6 +942,7 @@ def _ddl(catalog: str, schema: str) -> list[str]:
         COMMENT 'Per (agent, baseline_version, candidate_version, metric) version delta.'""",
         f"""CREATE TABLE IF NOT EXISTS {fqn}.{VERSION_READINESS_TABLE} (
             agent_name STRING,
+            experiment_id STRING,
             baseline_version STRING,
             candidate_version STRING,
             objective_metric STRING,
@@ -1021,6 +1203,11 @@ def publish_version_bundle(
 
     cmp = bundle.comparison
     for agg in bundle.aggregates:
+        experiment_predicate = (
+            "experiment_id IS NULL"
+            if agg.experiment_id is None
+            else f"experiment_id = {_lit(agg.experiment_id)}"
+        )
         _atomic_replace_table(
             client,
             warehouse_id,
@@ -1028,11 +1215,18 @@ def publish_version_bundle(
             VERSION_L0_TABLE,
             VERSION_L0_COLUMNS,
             [_version_l0_row(agg)],
-            f"agent_name = {_lit(agg.agent_name)} AND agent_version = {_lit(agg.agent_version)}",
+            f"agent_name = {_lit(agg.agent_name)} AND {experiment_predicate} "
+            f"AND agent_version = {_lit(agg.agent_version)}",
         )
 
+    comparison_experiment_predicate = (
+        "experiment_id IS NULL"
+        if cmp.experiment_id is None
+        else f"experiment_id = {_lit(cmp.experiment_id)}"
+    )
     comparison_predicate = (
         f"agent_name = {_lit(cmp.agent_name)} "
+        f"AND {comparison_experiment_predicate} "
         f"AND baseline_version = {_lit(cmp.baseline_version)} "
         f"AND candidate_version = {_lit(cmp.candidate_version)}"
     )
@@ -1067,8 +1261,9 @@ def publish_phase2_seed(
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
     registry_path: str | Path | None = None,
+    register_logged_models: bool = True,
 ) -> VersionPublishBundle:
-    """Seed the unified tables from a committed Phase-2 artifact (no live MLflow).
+    """Seed unified tables and optionally register MLflow external agent versions.
 
     Reads the committed :class:`~ail.optimize.phase2.Phase2Artifact` JSON, looks the
     agent's experiment up in the registry (for provenance), builds the per-version
@@ -1090,7 +1285,17 @@ def publish_phase2_seed(
         baseline_version=baseline_version,
         candidate_version=candidate_version,
         experiment_id=experiment_id,
+        git_commit=_current_git_commit(),
     )
+
+    if register_logged_models:
+        try:
+            bundle = register_bundle_logged_models(bundle, profile=profile)
+        except Exception as exc:  # noqa: BLE001 - metrics publish remains useful
+            print(
+                "warning: MLflow coding-agent version registration failed; "
+                f"publishing comparison metadata without model ids: {type(exc).__name__}: {exc}"
+            )
 
     client = _build_workspace_client(profile)
     publish_registry(
@@ -1139,6 +1344,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--catalog", default=DEFAULT_CATALOG)
     parser.add_argument("--schema", default=DEFAULT_SCHEMA)
+    parser.add_argument(
+        "--skip-logged-model-registration",
+        action="store_true",
+        help="Publish comparison tables without creating/reusing MLflow external agent versions.",
+    )
     args = parser.parse_args(argv)
 
     if not args.warehouse_id:
@@ -1155,6 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
         catalog=args.catalog,
         schema=args.schema,
         registry_path=registry_path,
+        register_logged_models=not args.skip_logged_model_registration,
     )
     return 0
 

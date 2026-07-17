@@ -333,11 +333,25 @@ def _run_verify_once(args: argparse.Namespace, *, client: Any, warehouse_id: str
     (e.g. a pre-migration table missing the verify_* columns) from crashing the poll.
     """
 
+    if args.experiment:
+        experiment_id = args.experiment
+    else:
+        agent = agent_executor._resolve_agent(
+            args.agent,
+            args.registry,
+            warehouse_id=warehouse_id,
+            catalog=args.catalog,
+            schema=args.schema,
+            client=client,
+        )
+        experiment_id = agent.experiment_id
+
     def _select() -> list[dict[str, Any]]:
         return select_pending_verify_requests(
             client=client,
             warehouse_id=warehouse_id,
             agent_name=args.agent,
+            experiment_id=experiment_id,
             catalog=args.catalog,
             schema=args.schema,
         )
@@ -362,6 +376,7 @@ def _run_verify_once(args: argparse.Namespace, *, client: Any, warehouse_id: str
             client=client,
             warehouse_id=warehouse_id,
             agent_name=args.agent,
+            experiment_id=experiment_id,
             catalog=args.catalog,
             schema=args.schema,
             **kwargs,

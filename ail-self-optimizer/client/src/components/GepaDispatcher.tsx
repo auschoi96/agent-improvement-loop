@@ -46,23 +46,24 @@ const DEFAULT_METRIC_CALLS = 6;
 const DEFAULT_HOLDOUT_FRACTION = 0.4;
 const DEFAULT_MAX_TRAIN_TASKS = 2;
 
-function storageKey(agentName: string): string {
-  return `ail.gepa.active-run.${agentName}`;
+function storageKey(agentName: string, experimentId: string): string {
+  return `ail.gepa.active-run.${agentName}.${experimentId}`;
 }
 
-function readStoredRun(agentName: string): number | null {
+function readStoredRun(agentName: string, experimentId: string): number | null {
   try {
-    const value = Number(window.localStorage.getItem(storageKey(agentName)));
+    const value = Number(window.localStorage.getItem(storageKey(agentName, experimentId)));
     return Number.isSafeInteger(value) && value > 0 ? value : null;
   } catch {
     return null;
   }
 }
 
-function storeRun(agentName: string, runId: number | null): void {
+function storeRun(agentName: string, experimentId: string, runId: number | null): void {
   try {
-    if (runId === null) window.localStorage.removeItem(storageKey(agentName));
-    else window.localStorage.setItem(storageKey(agentName), String(runId));
+    const key = storageKey(agentName, experimentId);
+    if (runId === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, String(runId));
   } catch {
     // Storage is an optional continuity aid; polling still works in this mount.
   }
@@ -167,7 +168,7 @@ export function GepaDispatcher({ agent }: { agent: AgentRow }) {
   const [maxTrainTasks, setMaxTrainTasks] = useState(DEFAULT_MAX_TRAIN_TASKS);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [runId, setRunId] = useState<number | null>(() => readStoredRun(agent.agent_name));
+  const [runId, setRunId] = useState<number | null>(() => readStoredRun(agent.agent_name, agent.experiment_id));
   const [run, setRun] = useState<GepaRun | null>(null);
   const [candidate, setCandidate] = useState<GepaCandidateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -202,7 +203,7 @@ export function GepaDispatcher({ agent }: { agent: AgentRow }) {
         setRun(latest);
         setError(null);
         if (isTerminalGepaRun(latest)) {
-          storeRun(agent.agent_name, null);
+          storeRun(agent.agent_name, agent.experiment_id, null);
           if (isSuccessfulGepaRun(latest)) {
             const output = await fetchGepaOutput(runId);
             if (cancelled) return;
@@ -228,7 +229,7 @@ export function GepaDispatcher({ agent }: { agent: AgentRow }) {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [agent.agent_name, runId]);
+  }, [agent.agent_name, agent.experiment_id, runId]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -245,7 +246,7 @@ export function GepaDispatcher({ agent }: { agent: AgentRow }) {
         holdoutFraction,
         maxTrainTasks,
       });
-      storeRun(agent.agent_name, id);
+      storeRun(agent.agent_name, agent.experiment_id, id);
       setRunId(id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'GEPA dispatch failed');
@@ -255,7 +256,7 @@ export function GepaDispatcher({ agent }: { agent: AgentRow }) {
   };
 
   const reset = () => {
-    storeRun(agent.agent_name, null);
+    storeRun(agent.agent_name, agent.experiment_id, null);
     setRunId(null);
     setRun(null);
     setCandidate(null);

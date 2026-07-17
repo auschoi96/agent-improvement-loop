@@ -23,24 +23,111 @@ const METRIC_LABELS: Record<string, string> = {
 
 const metricLabel = (metric: string): string => METRIC_LABELS[metric] ?? metric;
 
-// The per-metric delta cards. A separate component so its query parameters (which
-// depend on the chosen baseline/candidate versions) can be memoized in isolation.
-function MetricDeltas({
+const parseConfig = (raw: string | null | undefined): Record<string, unknown> => {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+};
+
+const configValue = (value: unknown): string => {
+  if (value === null || value === undefined || value === '') return 'not captured';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+};
+
+function ConfigurationDiff({
   agentName,
+  experimentId,
   baselineVersion,
   candidateVersion,
 }: {
   agentName: string;
+  experimentId: string;
+  baselineVersion: string;
+  candidateVersion: string;
+}) {
+  const params = useMemo(
+    () => ({ agent_name: sql.string(agentName), experiment_id: sql.string(experimentId) }),
+    [agentName, experimentId]
+  );
+  const { data, loading, error } = useAnalyticsQuery('agent_versions', params);
+  if (loading) return <Skeleton className="h-44 w-full" />;
+  if (error) return <div className="text-destructive bg-destructive/10 p-3 rounded-md">Error: {error}</div>;
+
+  const baseline = data?.find((version) => version.agent_version === baselineVersion);
+  const candidate = data?.find((version) => version.agent_version === candidateVersion);
+  if (!baseline || !candidate) return null;
+
+  const baselineConfig = parseConfig(baseline.config_json);
+  const candidateConfig = parseConfig(candidate.config_json);
+  const keys = Array.from(new Set([...Object.keys(baselineConfig), ...Object.keys(candidateConfig)])).sort();
+
+  return (
+    <Card className="shadow-sm">
+      <CardHeader>
+        <CardTitle>Coding-agent configuration</CardTitle>
+        <CardDescription>
+          External MLflow agent versions capture launcher configuration and provenance; an active model ID links future
+          traces to the exact version that produced them.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-[minmax(8rem,1fr)_minmax(0,2fr)_minmax(0,2fr)] gap-x-3 gap-y-2 text-xs">
+          <div className="font-medium text-muted-foreground">Field</div>
+          <div className="font-medium">{baselineVersion}</div>
+          <div className="font-medium">{candidateVersion}</div>
+          {keys.map((key) => {
+            const before = configValue(baselineConfig[key]);
+            const after = configValue(candidateConfig[key]);
+            const changed = before !== after;
+            return (
+              <div key={key} className="contents">
+                <div className="text-muted-foreground break-words">{key.replaceAll('_', ' ')}</div>
+                <div className="font-mono break-all">{before}</div>
+                <div className={`font-mono break-all ${changed ? 'text-blue-600 dark:text-blue-400' : ''}`}>
+                  {after}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+          <Badge variant="outline">baseline MLflow ID: {baseline.logged_model_id || 'not registered'}</Badge>
+          <Badge variant="outline">candidate MLflow ID: {candidate.logged_model_id || 'not registered'}</Badge>
+          <Badge variant="outline">
+            fingerprints: {baseline.config_fingerprint} → {candidate.config_fingerprint}
+          </Badge>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// The per-metric delta cards. A separate component so its query parameters (which
+// depend on the chosen baseline/candidate versions) can be memoized in isolation.
+function MetricDeltas({
+  agentName,
+  experimentId,
+  baselineVersion,
+  candidateVersion,
+}: {
+  agentName: string;
+  experimentId: string;
   baselineVersion: string;
   candidateVersion: string;
 }) {
   const params = useMemo(
     () => ({
       agent_name: sql.string(agentName),
+      experiment_id: sql.string(experimentId),
       baseline_version: sql.string(baselineVersion),
       candidate_version: sql.string(candidateVersion),
     }),
-    [agentName, baselineVersion, candidateVersion]
+    [agentName, experimentId, baselineVersion, candidateVersion]
   );
   const { data, loading, error } = useAnalyticsQuery('version_metric_deltas', params);
 
@@ -90,8 +177,11 @@ function MetricDeltas({
   );
 }
 
-export function VersionComparison({ agentName }: { agentName: string }) {
-  const params = useMemo(() => ({ agent_name: sql.string(agentName) }), [agentName]);
+export function VersionComparison({ agentName, experimentId }: { agentName: string; experimentId: string }) {
+  const params = useMemo(
+    () => ({ agent_name: sql.string(agentName), experiment_id: sql.string(experimentId) }),
+    [agentName, experimentId]
+  );
   const { data, loading, error } = useAnalyticsQuery('version_comparisons', params);
 
   if (loading) return <Skeleton className="h-48 w-full" />;
@@ -144,6 +234,13 @@ export function VersionComparison({ agentName }: { agentName: string }) {
         )}
       </div>
 
+      <ConfigurationDiff
+        agentName={agentName}
+        experimentId={experimentId}
+        baselineVersion={cmp.baseline_version}
+        candidateVersion={cmp.candidate_version}
+      />
+
       {/* Headline objective card. */}
       <Card className="shadow-sm">
         <CardHeader>
@@ -166,6 +263,7 @@ export function VersionComparison({ agentName }: { agentName: string }) {
 
       <MetricDeltas
         agentName={agentName}
+        experimentId={experimentId}
         baselineVersion={cmp.baseline_version}
         candidateVersion={cmp.candidate_version}
       />

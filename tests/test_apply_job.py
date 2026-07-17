@@ -17,6 +17,7 @@ param-adapter contract:
 
 from __future__ import annotations
 
+import types
 from typing import Any
 
 import pytest
@@ -194,6 +195,11 @@ def test_run_decision_refuses_non_pending_proposal(monkeypatch: pytest.MonkeyPat
     on.
     """
     monkeypatch.setattr(apply_service, "_build_workspace_client", lambda _p: object())
+    monkeypatch.setattr(
+        apply_service,
+        "_resolve_agent",
+        lambda *args, **kwargs: types.SimpleNamespace(experiment_id="exp-subject"),
+    )
     monkeypatch.setattr(apply_service, "load_pending_proposal", lambda **_: None)
 
     result = run_decision(

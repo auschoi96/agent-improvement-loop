@@ -20,8 +20,11 @@ import {
 // which version is the CHAMPION. A force-registered non-improving version is flagged
 // with a warning badge + the recorded reason and is NEVER styled as an improvement —
 // that honesty is the whole point of the audit trail.
-export function LineageTimeline({ agentName }: { agentName: string }) {
-  const params = useMemo(() => ({ agent_name: sql.string(agentName) }), [agentName]);
+export function LineageTimeline({ agentName, experimentId }: { agentName: string; experimentId: string }) {
+  const params = useMemo(
+    () => ({ agent_name: sql.string(agentName), experiment_id: sql.string(experimentId) }),
+    [agentName, experimentId]
+  );
   const { data, loading, error } = useAnalyticsQuery('prompt_lineage', params);
 
   if (loading) {

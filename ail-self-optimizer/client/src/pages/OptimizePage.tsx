@@ -10,7 +10,7 @@ export function OptimizePage() {
       <RequireAgent>
         {(agent) => (
           <PanelBoundary title="GEPA dispatcher failed to load">
-            <GepaDispatcher key={agent.agent_name} agent={agent} />
+            <GepaDispatcher key={`${agent.agent_name}:${agent.experiment_id}`} agent={agent} />
           </PanelBoundary>
         )}
       </RequireAgent>

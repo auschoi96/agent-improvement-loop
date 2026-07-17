@@ -31,6 +31,14 @@ env:
     value: job
   - name: AIL_ONBOARDING_JOB_ID
     valueFrom: onboarding-job
+  - name: DATABRICKS_JOB_GEPA
+    valueFrom: gepa-job
+  # AppKit 0.38.1 discovers the named GEPA key above, but its static Jobs plugin
+  # manifest also validates the single-job alias at startup. Bind both names to
+  # the same declared resource; explicit `jobs.gepa` config keeps only the named
+  # key exposed by the plugin.
+  - name: DATABRICKS_JOB_ID
+    valueFrom: gepa-job
   # Select the Node-native labeling transport (docs/LABELING_UI.md). Generic
   # literal, correct for every deployment: the Node-only deployed image can't
   # spawn the Python labeling engine, so the labeling routes talk to the

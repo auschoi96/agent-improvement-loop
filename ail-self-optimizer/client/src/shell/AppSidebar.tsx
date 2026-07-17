@@ -26,6 +26,7 @@ import {
   GitCompareArrows,
   LayoutDashboard,
   Plus,
+  Sparkles,
   Tags,
   type LucideProps,
 } from 'lucide-react';
@@ -44,6 +45,7 @@ import type { ProposedActionRow } from '../lib/approvals';
 const ICONS: Record<NavKey, ComponentType<LucideProps>> = {
   overview: LayoutDashboard,
   compare: GitCompareArrows,
+  optimize: Sparkles,
   approvals: ClipboardCheck,
   labeling: Tags,
   activity: Activity,
@@ -55,8 +57,11 @@ const ICONS: Record<NavKey, ComponentType<LucideProps>> = {
 // The Approvals pending-count badge. Reuses the SAME proposed_actions query and the
 // SAME isPending predicate the queue uses (via pendingCount), so the badge can never
 // disagree with the queue. Mounted only when an agent is selected. No new query.
-function ApprovalsBadge({ agentName }: { agentName: string }) {
-  const params = useMemo(() => ({ agent_name: sql.string(agentName) }), [agentName]);
+function ApprovalsBadge({ agentName, experimentId }: { agentName: string; experimentId: string }) {
+  const params = useMemo(
+    () => ({ agent_name: sql.string(agentName), experiment_id: sql.string(experimentId) }),
+    [agentName, experimentId]
+  );
   const { data } = useAnalyticsQuery('proposed_actions', params);
   const count = pendingCount((data ?? null) as ProposedActionRow[] | null);
   if (count === 0) return null;
@@ -68,11 +73,13 @@ function NavMenuItem({
   pathname,
   search,
   agentName,
+  experimentId,
 }: {
   item: NavItem;
   pathname: string;
   search: string;
   agentName: string | null;
+  experimentId: string | null;
 }) {
   const Icon = ICONS[item.key];
   return (
@@ -83,7 +90,9 @@ function NavMenuItem({
           <span>{item.label}</span>
         </Link>
       </SidebarMenuButton>
-      {item.key === 'approvals' && agentName && <ApprovalsBadge agentName={agentName} />}
+      {item.key === 'approvals' && agentName && experimentId && (
+        <ApprovalsBadge agentName={agentName} experimentId={experimentId} />
+      )}
     </SidebarMenuItem>
   );
 }
@@ -92,6 +101,7 @@ export function AppSidebar() {
   const { pathname } = useLocation();
   const { selected } = useAgent();
   const agentName = selected?.agent_name ?? null;
+  const experimentId = selected?.experiment_id ?? null;
   const search = agentSearch(agentName);
 
   return (
@@ -123,7 +133,14 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               {PRIMARY_NAV.map((item) => (
-                <NavMenuItem key={item.key} item={item} pathname={pathname} search={search} agentName={agentName} />
+                <NavMenuItem
+                  key={item.key}
+                  item={item}
+                  pathname={pathname}
+                  search={search}
+                  agentName={agentName}
+                  experimentId={experimentId}
+                />
               ))}
             </SidebarMenu>
           </SidebarGroupContent>
@@ -134,7 +151,14 @@ export function AppSidebar() {
         <SidebarSeparator />
         <SidebarMenu>
           {HELP_NAV.map((item) => (
-            <NavMenuItem key={item.key} item={item} pathname={pathname} search={search} agentName={agentName} />
+            <NavMenuItem
+              key={item.key}
+              item={item}
+              pathname={pathname}
+              search={search}
+              agentName={agentName}
+              experimentId={experimentId}
+            />
           ))}
         </SidebarMenu>
       </SidebarFooter>

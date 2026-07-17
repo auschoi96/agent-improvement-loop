@@ -84,15 +84,18 @@ def _candidate(seed: str = "# Seed\n", evolved: str = "# Better\n") -> GepaOptim
 
 def _proposal(candidate: GepaOptimizationResult) -> ProposedAction:
     path = ".claude/skills/token/SKILL.md"
-    diff = "\n".join(
-        difflib.unified_diff(
-            candidate.seed_skill_body.splitlines(),
-            candidate.evolved_skill_body.splitlines(),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-            lineterm="",
+    diff = (
+        "\n".join(
+            difflib.unified_diff(
+                candidate.seed_skill_body.splitlines(),
+                candidate.evolved_skill_body.splitlines(),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+                lineterm="",
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
     spec = LocalApplySpec(
         target_kind=LocalApplyTargetKind.CLAUDE_SKILL,
         target_path=path,

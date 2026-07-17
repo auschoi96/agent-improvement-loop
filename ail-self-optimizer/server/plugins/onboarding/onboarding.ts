@@ -99,6 +99,10 @@ function numberField(body: Record<string, unknown>, key: string): number | undef
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
 
+function trueField(body: Record<string, unknown>, key: string): true | undefined {
+  return body[key] === true ? true : undefined;
+}
+
 // Page 2/3 source: the fixed goal catalog + the data gates a selection needs. The
 // gate/floor facts come from the Python engine (ail.onboarding.goals), so the app
 // never re-derives readiness thresholds in TS.
@@ -147,6 +151,7 @@ export async function handleCreateExperiment(
     trace_catalog: process.env.AIL_TRACE_CATALOG || process.env.AIL_CATALOG,
     trace_schema: process.env.AIL_TRACE_SCHEMA || 'mlflow_traces',
     trace_table_prefix: optionalStringField(body, 'trace_table_prefix'),
+    allow_existing: name.endsWith('-ail-internal') ? trueField(body, 'allow_existing') : undefined,
   });
 }
 
@@ -259,10 +264,7 @@ export async function handleBootstrapAgent(
   });
 }
 
-export async function handleOnboardingStatus(
-  req: OnboardingHttpRequest,
-  res: OnboardingHttpResponse
-): Promise<void> {
+export async function handleOnboardingStatus(req: OnboardingHttpRequest, res: OnboardingHttpResponse): Promise<void> {
   const actor = readActor(req);
   if (!actor) return unauthorized(res);
   const body = (req.body ?? {}) as Record<string, unknown>;

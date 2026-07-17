@@ -500,6 +500,7 @@ def test_publish_agent_proposals_is_agent_scoped() -> None:
     n = publish_agent_proposals(
         proposals,
         agent_name="claude_code",
+        experiment_id="660599403165942",
         client=client,
         warehouse_id="wh",
         catalog="cat",
@@ -524,7 +525,11 @@ def test_publish_agent_proposals_rejects_mixed_agents() -> None:
     client = _FakeClient()
     with pytest.raises(ValueError, match="scoped to agent 'claude_code'"):
         publish_agent_proposals(
-            [*proposals, other], agent_name="claude_code", client=client, warehouse_id="wh"
+            [*proposals, other],
+            agent_name="claude_code",
+            experiment_id="660599403165942",
+            client=client,
+            warehouse_id="wh",
         )
 
 

@@ -26,6 +26,9 @@ variables:
   schema:
     description: Schema (within --catalog) that holds l0_session_metrics / l0_corpus_summary / l0_diagnosis.
     default: ''
+  trace_schema:
+    description: Unity Catalog schema used for MLflow Traces-in-Unity-Catalog experiments.
+    default: mlflow_traces
   publish_cron:
     description: >-
       Quartz cron for the refresh schedule (sec min hour day-of-month month day-of-week).
@@ -42,6 +45,9 @@ variables:
     default: claude_code
   onboarding_goal_llm_endpoint:
     description: Chat endpoint used to turn Quick Connect requirements into structured goals.
+    default: databricks-claude-sonnet-4-6
+  gepa_agent_model:
+    description: Claude coding-agent model used by the explicitly dispatched GEPA job.
     default: databricks-claude-sonnet-4-6
   objective_metric:
     description: Objective metric used to steer RLM goal rubrics and local companion planning.
@@ -95,25 +101,28 @@ variables:
   # (objective_metric etc.) but runs on its own model, schedule, and pause switch.
   continuous_rlm_judge_model:
     description: >-
-      HALO judge serving endpoint for the standalone scheduled RLM job. Defaults to the
-      most powerful VIABLE judge: databricks-gpt-5-5-pro (Databricks Claude endpoints
-      reject HALO's always-on parallel_tool_calls; gpt-5-6 does not exist on the gateway).
-    default: databricks-gpt-5-5-pro
+      HALO judge serving endpoint. Claude Opus 4.8 uses Databricks Chat Completions;
+      the reviewer removes the unsupported OpenAI-only request fields.
+    default: databricks-claude-opus-4-8
   continuous_rlm_reasoning_effort:
     description: >-
       Explicit HALO reasoning-effort override for the standalone RLM job (minimal | low |
       medium | high | xhigh). Empty (the default), 'none', or 'auto' (any case) all mean
-      NO override => auto-resolve from the judge model, so databricks-gpt-5-5-pro gets
-      xhigh despite HALO's hyphen-blind prefix check (setting 'none' does NOT disable
-      reasoning — it reads as auto).
+      NO override => use the model/provider default. Setting 'none' means no explicit
+      override; it does not disable Claude reasoning.
     default: ''
-  continuous_rlm_cron:
+  continuous_rlm_min_time_between_triggers_seconds:
     description: >-
-      Quartz cron for the standalone RLM job (sec min hour day-of-month month day-of-week).
-      Default every five minutes. A schedule, not a trace-arrival trigger: the trace store is a VIEW.
-    default: '0 */5 * * * ?'
+      Debounce floor for the RLM trace-table update trigger. This limits trigger
+      churn; the run itself drains every eligible trace before exiting.
+    default: 60
+  continuous_rlm_wait_after_last_change_seconds:
+    description: >-
+      Quiet period after the last OTEL spans-table update before starting an RLM drain.
+      A short delay coalesces all spans belonging to one completed trace.
+    default: 61
   continuous_rlm_pause_status:
-    description: UNPAUSED (the standalone RLM schedule is live) or PAUSED (deployed-but-dormant).
+    description: UNPAUSED (the trace-arrival trigger is live) or PAUSED (deployed-but-dormant).
     default: UNPAUSED
   auto_align_cron:
     description: >-
@@ -175,7 +184,7 @@ variables:
     description: >-
       MemAlign guideline-distillation model URI (empty => MLflow's default
       MemAlign). Set to drive the reflection model through the gateway explicitly.
-    default: databricks:/databricks-claude-sonnet-4-6
+    default: databricks:/databricks-claude-opus-4-8
   auto_align_embedding_model:
     description: MemAlign episodic-memory embedding model URI (only used with auto_align_reflection_lm).
     default: databricks:/databricks-gte-large-en

@@ -18,6 +18,7 @@ import {
   creationDetails,
   registerMessage,
   requirementsPlanView,
+  requirementsForGoals,
   previewRequirementsMessage,
   confirmRequirementsMessage,
   resolvedFromValidation,
@@ -44,15 +45,17 @@ describe('toggleGoal', () => {
 });
 
 describe('stepValidation — fail-closed per step', () => {
-  it('experiment step needs a resolved FRESH experiment', () => {
+  it('experiment step needs a resolved FRESH experiment and agent name', () => {
     expect(stepValidation(stateAt('experiment')).ok).toBe(false);
     expect(stepValidation(stateAt('experiment', { resolved: { ...FRESH, fresh: false } })).ok).toBe(false);
-    expect(stepValidation(stateAt('experiment', { resolved: FRESH })).ok).toBe(true);
+    expect(stepValidation(stateAt('experiment', { resolved: FRESH })).ok).toBe(false);
+    expect(stepValidation(stateAt('experiment', { resolved: FRESH, agentName: 'my_agent' })).ok).toBe(true);
   });
 
   it('goals step needs at least one goal', () => {
     expect(stepValidation(stateAt('goals')).ok).toBe(false);
     expect(canAdvance(stateAt('goals', { goals: ['cost'] }))).toBe(true);
+    expect(canAdvance(stateAt('goals', { goalConfig: { objective_metric: 'custom_quality' } }))).toBe(true);
   });
 
   it('data-gate step needs explicit acceptance', () => {
@@ -286,6 +289,45 @@ describe('dataGateView — renders Python gate facts verbatim (no TS thresholds/
       selected: [{ ...req.selected[0], requires_labels: false, summary: 'PY_SUMMARY_WINS' }],
     };
     expect(dataGateView(flipped).perGoal[0].summary).toBe('PY_SUMMARY_WINS');
+  });
+});
+
+describe('requirementsForGoals — instant gate projection from Python catalog facts', () => {
+  it('updates the selected gates without another response and preserves Python strings verbatim', () => {
+    const base: RequirementsResponse = {
+      outcome: 'requirements',
+      thresholds: {
+        baseline_min_traces: 10,
+        prove_min_traces: 50,
+        quality_min_labels: 20,
+        scored_coverage_floor: 0.5,
+      },
+      catalog: [
+        {
+          key: 'accuracy',
+          label: 'Accuracy',
+          objective_metric: 'correctness',
+          scorer: 'MemAlign judge (correctness)',
+          scorer_kind: 'memalign_judge',
+          requires_quality: true,
+          requires_labels: true,
+          guardrail_judges: ['correctness'],
+          optional_quality_judge: null,
+          description: 'PY_DESCRIPTION',
+          gates: [{ name: 'human_labels', label: 'Human labels', needed: 'PY_NEED_LABELS', threshold: 20 }],
+          summary: 'PY_GOAL_SUMMARY',
+        },
+      ],
+      selected: [],
+      union_gates: [],
+      requires_labels: false,
+      summary: '',
+    };
+
+    const selected = requirementsForGoals(base, ['accuracy']);
+    expect(selected?.union_gates[0].needed).toBe('PY_NEED_LABELS');
+    expect(selected?.selected[0].summary).toBe('PY_GOAL_SUMMARY');
+    expect(selected?.requires_labels).toBe(true);
   });
 });
 

@@ -697,7 +697,15 @@ export function restLabelingBridge(options: RestBridgeOptions = {}): LabelingBri
     } catch (err) {
       const guidance = `deployed labeling unavailable — ${errText(err)} Use the MLflow Traces UI to label.`;
       return input.action === 'label'
-        ? { outcome: 'error', experiment_id: input.experiment_id, trace_id: input.trace_id ?? '', name: input.name ?? '', value: input.value, labeler: input.actor, error: guidance }
+        ? {
+            outcome: 'error',
+            experiment_id: input.experiment_id,
+            trace_id: input.trace_id ?? '',
+            name: input.name ?? '',
+            value: input.value,
+            labeler: input.actor,
+            error: guidance,
+          }
         : { outcome: 'error', error: guidance };
     }
 

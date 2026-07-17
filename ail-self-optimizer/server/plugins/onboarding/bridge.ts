@@ -37,6 +37,7 @@ export interface OnboardingAction {
   trace_catalog?: string;
   trace_schema?: string;
   trace_table_prefix?: string;
+  allow_existing?: boolean;
 }
 
 // The JSON ail.onboarding.service prints — a typed onboarding result. Kept open
@@ -153,12 +154,12 @@ export interface OnboardingJobClient {
     job_parameters: Record<string, string>;
     idempotency_token?: string;
   }): Promise<{ run_id?: number }>;
-  getRun(req: { run_id: number }): Promise<{ state?: RunStateLike }>;
-  executeStatement(req: {
-    warehouse_id: string;
-    statement: string;
-    wait_timeout?: string;
-  }): Promise<{
+  getRun(req: { run_id: number }): Promise<{
+    state?: RunStateLike;
+    tasks?: Array<{ run_id?: number }>;
+  }>;
+  getRunOutput(req: { run_id: number }): Promise<{ logs?: string }>;
+  executeStatement(req: { warehouse_id: string; statement: string; wait_timeout?: string }): Promise<{
     statement_id?: string;
     status?: { state?: string; error?: { message?: string } };
     result?: { data_array?: string[][] };
@@ -179,9 +180,26 @@ function onboardingClient(): OnboardingJobClient {
   return {
     runNow: (req) => workspace.jobs.runNow(req),
     getRun: (req) => workspace.jobs.getRun(req),
+    getRunOutput: (req) => workspace.jobs.getRunOutput(req),
     executeStatement: (req) => workspace.statementExecution.executeStatement(req),
     getStatement: (req) => workspace.statementExecution.getStatement(req),
   };
+}
+
+function resultFromTaskLogs(logs: string | undefined): OnboardingResult | null {
+  if (!logs) return null;
+  const lines = logs.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(line) as OnboardingResult;
+      if (typeof parsed.outcome === 'string') return parsed;
+    } catch {
+      // Warnings and ordinary logs may contain braces; only a parseable result wins.
+    }
+  }
+  return null;
 }
 
 async function readOnboardingResult(
@@ -249,12 +267,27 @@ export async function readJobOnboardingStatus(
   const run = await client.getRun({ run_id: runId });
   const lifecycle = run.state?.life_cycle_state;
   if (lifecycle && TERMINAL_STATES.has(lifecycle)) {
+    // The Job can become SUCCESS milliseconds before the result-table INSERT is
+    // visible to this warehouse read. Keep polling through that read-after-write
+    // window; a genuine missing result will hit the client's bounded 15-minute
+    // timeout instead of surfacing a false terminal error immediately.
+    if (lifecycle === 'TERMINATED' && run.state?.result_state === 'SUCCESS') {
+      const taskRunIds = (run.tasks ?? []).flatMap((task) => (task.run_id == null ? [] : [task.run_id])).reverse();
+      for (const taskRunId of taskRunIds) {
+        try {
+          const output = await client.getRunOutput({ run_id: taskRunId });
+          const result = resultFromTaskLogs(output.logs);
+          if (result) return result;
+        } catch {
+          // The durable result-table read remains primary. If task output is briefly
+          // unavailable, preserve the bounded pending behavior and retry both paths.
+        }
+      }
+      return { outcome: 'pending', request_id: requestId, run_id: runId };
+    }
     return {
       outcome: 'error',
-      error:
-        lifecycle === 'TERMINATED' && run.state?.result_state === 'SUCCESS'
-          ? 'onboarding job succeeded without writing a result'
-          : `onboarding job ended ${lifecycle}/${run.state?.result_state ?? '—'}: ${run.state?.state_message ?? ''}`,
+      error: `onboarding job ended ${lifecycle}/${run.state?.result_state ?? '—'}: ${run.state?.state_message ?? ''}`,
     };
   }
   return { outcome: 'pending', request_id: requestId, run_id: runId };

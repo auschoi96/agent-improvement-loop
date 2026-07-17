@@ -183,15 +183,18 @@ def _render_target(kind: LocalApplyTargetKind, raw: str, candidate: str) -> tupl
 
 
 def _review_diff(path: str, seed: str, candidate: str) -> str:
-    return "\n".join(
-        difflib.unified_diff(
-            seed.splitlines(),
-            candidate.splitlines(),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-            lineterm="",
+    return (
+        "\n".join(
+            difflib.unified_diff(
+                seed.splitlines(),
+                candidate.splitlines(),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+                lineterm="",
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -223,9 +226,7 @@ def apply_approved_gepa(
 ) -> GepaLocalApplyResult:
     """Apply the exact approved GEPA artifact locally, rolling back on validation failure."""
     if proposal.status is not ProposalStatus.APPROVED:
-        raise GepaApplyConflict(
-            f"proposal {proposal.proposal_id!r} is not approved (fail-closed)"
-        )
+        raise GepaApplyConflict(f"proposal {proposal.proposal_id!r} is not approved (fail-closed)")
     if proposal.action_kind is not ActionKind.GEPA_PROMPT:
         raise GepaApplyConflict("local GEPA apply only accepts gepa_prompt proposals")
     if proposal.change.kind is not ChangeKind.EVOLVED_BODY_REF:
@@ -247,9 +248,7 @@ def apply_approved_gepa(
         )
     candidate = getattr(result, spec.artifact_field, None)
     if not isinstance(candidate, str) or not candidate:
-        raise GepaApplyConflict(
-            f"approved artifact has no non-empty {spec.artifact_field!r} field"
-        )
+        raise GepaApplyConflict(f"approved artifact has no non-empty {spec.artifact_field!r} field")
     if _sha256(result.seed_skill_body) != spec.baseline_sha256:
         raise GepaApplyConflict("downloaded artifact seed hash differs from the approved baseline")
     if _sha256(candidate) != spec.candidate_sha256:
@@ -274,9 +273,7 @@ def apply_approved_gepa(
     )
     _atomic_write(target, rewritten)
     validate = validator or _default_validator
-    ok, output = validate(
-        list(spec.validation_command), workspace, spec.validation_timeout_seconds
-    )
+    ok, output = validate(list(spec.validation_command), workspace, spec.validation_timeout_seconds)
     if not ok:
         try:
             restore_snapshot(pre, client=volume_client)

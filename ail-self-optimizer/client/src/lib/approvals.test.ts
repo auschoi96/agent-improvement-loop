@@ -24,6 +24,7 @@ function row(overrides: Partial<Record<keyof ProposedActionRow, unknown>> = {}):
   const base: ProposedActionRow = {
     proposal_id: 'p1',
     agent_name: 'claude_code',
+    experiment_id: '660599403165942',
     status: 'pending',
     action_kind: 'metric_view',
     risk_class: 'additive_asset',
@@ -248,7 +249,12 @@ describe('verifyEvidence — Tier-2 proof shown honestly (fail-closed)', () => {
 
   it('blocked is shown AS a block — never dressed up as verified', () => {
     const e = verifyEvidence(
-      row({ verify_status: 'blocked', proof_proved_improvement: false, proof_correctness_held: false, proof_n_block: 2 })
+      row({
+        verify_status: 'blocked',
+        proof_proved_improvement: false,
+        proof_correctness_held: false,
+        proof_n_block: 2,
+      })
     );
     expect(e?.tone).toBe('error');
     expect(e?.label).toMatch(/BLOCK/);

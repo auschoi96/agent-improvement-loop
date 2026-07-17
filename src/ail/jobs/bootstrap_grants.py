@@ -102,6 +102,11 @@ class BootstrapResult:
     #: to migrate pre-existing tables to their writer-declared schema (empty when
     #: nothing needed migrating — a fresh workspace or an already-migrated one).
     columns_reconciled: list[str] = field(default_factory=list)
+    #: Spans tables newly added to the arrival-triggered RLM job's ``table_update``
+    #: trigger this run (empty when no ``rlm_job_id`` was supplied, the registry is
+    #: empty, or every agent's table was already watched). The deploy heal that keeps
+    #: the DAB-managed trigger from reverting to its single-table YAML value on redeploy.
+    rlm_trigger_tables_added: list[str] = field(default_factory=list)
 
 
 def validate_workspace_values(
@@ -240,6 +245,7 @@ def bootstrap(
     schema: str = "",
     create_warehouse: bool = False,
     allow_reference_workspace: bool = False,
+    rlm_job_id: int | None = None,
     client: Any | None = None,
     mlflow_client: MlflowClient | None = None,
 ) -> BootstrapResult:
@@ -264,6 +270,12 @@ def bootstrap(
         allow_reference_workspace: Explicit opt-in for the owner-only reference
             workspace redeploy path. Bypasses only the reference-default check;
             empty, placeholder, and unresolved bundle values remain fatal.
+        rlm_job_id: The arrival-triggered continuous-RLM job id. When supplied, the
+            bootstrap re-reconciles that job's ``table_update`` trigger to watch every
+            registered agent's ``*_otel_spans`` table (add-only) — the deploy heal that
+            counters the DAB reverting the trigger to its single-table YAML value on each
+            redeploy. ``None``/omitted => skip the heal (a deploy that did not wire the
+            id keeps today's behavior). Fail-soft: a heal failure is logged, never fatal.
         client: Databricks ``WorkspaceClient`` (injectable for tests).
         mlflow_client: ``MlflowClient`` passed through to
             :func:`configure_monitoring_warehouse` (injectable for tests).
@@ -324,6 +336,16 @@ def bootstrap(
         set_env=False,
     )
 
+    # Deploy heal for the arrival-triggered RLM job: the DAB reverts its table_update
+    # trigger to the single YAML table on every deploy, so re-add every registered
+    # agent's *_otel_spans table here (add-only). Runs AFTER ensure_app_tables so the
+    # agent_registry table exists to read. Fail-soft: the trigger heal is an
+    # optimization on top of an already-deployed, registry-driven job — a Jobs API
+    # failure must not fail the bootstrap (warehouse/tables/grants already succeeded).
+    rlm_trigger_tables_added = _heal_rlm_trigger(
+        client, resolved_id, rlm_job_id=rlm_job_id, catalog=catalog, schema=schema
+    )
+
     return BootstrapResult(
         warehouse_id=resolved_id,
         warehouse_created=created,
@@ -331,7 +353,45 @@ def bootstrap(
         tables_ensured=tables_ensured,
         monitoring=monitoring,
         columns_reconciled=columns_reconciled,
+        rlm_trigger_tables_added=rlm_trigger_tables_added,
     )
+
+
+def _heal_rlm_trigger(
+    client: Any,
+    warehouse_id: str,
+    *,
+    rlm_job_id: int | None,
+    catalog: str,
+    schema: str,
+) -> list[str]:
+    """Re-add every registered agent's spans table to the RLM trigger (deploy heal).
+
+    Reads the full registry through the shared fail-closed loader and unions each
+    agent's ``*_otel_spans`` table into the RLM job's ``table_update`` trigger. Returns
+    the tables newly added (empty on skip / nothing-to-do). Fail-soft: a missing job id
+    is a quiet skip, and any read/reconcile failure is logged and swallowed so a healthy
+    warehouse/tables/grants bootstrap is never reported as failed for a trigger nicety.
+    """
+    if rlm_job_id is None:
+        return []
+    try:
+        from ail.jobs.rlm_trigger import reconcile_rlm_trigger_tables
+        from ail.publish_versions import load_registered_agents_full
+
+        agents = load_registered_agents_full(
+            client=client, warehouse_id=warehouse_id, catalog=catalog, schema=schema
+        )
+        if not agents:
+            return []
+        result = reconcile_rlm_trigger_tables(client, rlm_job_id=rlm_job_id, agents=agents)
+    except Exception as exc:  # noqa: BLE001 - the heal is best-effort; never fail the bootstrap
+        print(
+            f"[ail.jobs.bootstrap_grants] RLM trigger heal skipped "
+            f"(bootstrap otherwise succeeded): {type(exc).__name__}: {exc}"
+        )
+        return []
+    return list(result.added)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -386,6 +446,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Owner-only escape hatch: permit the known reference workspace values. "
         "Empty, placeholder, and unresolved bundle values are still refused.",
     )
+    parser.add_argument(
+        "--rlm-job-id",
+        default=os.environ.get("AIL_RLM_JOB_ID", ""),
+        help="Arrival-triggered continuous-RLM job id. When set, re-reconcile its "
+        "table_update trigger to watch every registered agent's *_otel_spans table "
+        "(the deploy heal against DAB reverting the trigger). Empty => skip the heal.",
+    )
     args = parser.parse_args(argv)
     if args.create_warehouse and (args.warehouse_id or "").strip():
         parser.error("--create-warehouse cannot be combined with --warehouse-id")
@@ -394,6 +461,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    rlm_job_id: int | None = None
+    raw_rlm = (args.rlm_job_id or "").strip()
+    if raw_rlm:
+        try:
+            rlm_job_id = int(raw_rlm)
+        except ValueError:
+            # A malformed id is a wiring mistake, not a reason to abort a deploy
+            # bootstrap: warn and skip the trigger heal (leaving today's behavior).
+            print(
+                f"[ail.jobs.bootstrap_grants] --rlm-job-id={raw_rlm!r} is not an int; "
+                "skipping RLM trigger heal."
+            )
     result = bootstrap(
         experiment_id=args.experiment,
         # Empty strings are still collapsed before bootstrap so the guard reports
@@ -407,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
         schema=args.schema,
         create_warehouse=args.create_warehouse,
         allow_reference_workspace=args.allow_reference_workspace,
+        rlm_job_id=rlm_job_id,
     )
     action = "created" if result.warehouse_created else "reused"
     grant = result.granted_sp_id or "(skipped — no framework_sp_id)"
@@ -420,6 +500,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     for alter in result.columns_reconciled:
         print(f"[ail.jobs.bootstrap_grants] migrated: {alter}")
+    if result.rlm_trigger_tables_added:
+        print(
+            "[ail.jobs.bootstrap_grants] RLM trigger now also watches: "
+            + ", ".join(result.rlm_trigger_tables_added)
+        )
     if args.create_warehouse:
         print(f"[ail.jobs.bootstrap_grants] warehouse_id={result.warehouse_id}")
     return 0

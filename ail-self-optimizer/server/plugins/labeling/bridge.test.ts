@@ -147,7 +147,13 @@ const LABEL: LabelingAction = {
 interface DimResult {
   outcome: string;
   label_floor?: number;
-  dimensions?: Array<{ name: string; labels_so_far: number; label_floor?: number; remaining?: number; complete?: boolean }>;
+  dimensions?: Array<{
+    name: string;
+    labels_so_far: number;
+    label_floor?: number;
+    remaining?: number;
+    complete?: boolean;
+  }>;
   traces?: Array<{ trace_id: string; labeled: Record<string, boolean> }>;
   scanned?: number;
   error?: string;

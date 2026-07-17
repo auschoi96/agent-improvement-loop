@@ -247,9 +247,7 @@ class LocalApplySpec(_Model):
         text = value.strip().replace("\\", "/")
         path = PurePosixPath(text)
         if not text or path.is_absolute() or text in {".", ".."} or ".." in path.parts:
-            raise ValueError(
-                "target_path must be a non-empty project-relative path without '..'"
-            )
+            raise ValueError("target_path must be a non-empty project-relative path without '..'")
         return str(path)
 
     @field_validator(
@@ -492,9 +490,7 @@ class ProposedAction(_Model):
     schema_version: str = SCHEMA_VERSION
     proposal_id: str
     agent_name: str
-    #: Dedicated subject experiment. Empty only for legacy/offline fixtures; all
-    #: production publishers set it from the resolved Agent registry entry.
-    experiment_id: str = ""
+    experiment_id: str
     action_kind: ActionKind
     risk_class: RiskClass
     status: ProposalStatus = ProposalStatus.PENDING

@@ -99,7 +99,7 @@ describe('readinessGateLines — TWO-TIER: every threshold is the Python value, 
   it('falls closed PER GATE when a threshold field is missing or non-finite — others still render', () => {
     // A partial/malformed thresholds object: one field missing, one NaN.
     const partial = JSON.parse(
-      JSON.stringify({ ...SENTINEL, prove_min_traces: undefined, scored_coverage_floor: NaN }),
+      JSON.stringify({ ...SENTINEL, prove_min_traces: undefined, scored_coverage_floor: NaN })
     ) as Thresholds;
     const by = Object.fromEntries(readinessGateLines(partial).map((l) => [l.key, l]));
     // The bad gates show the neutral placeholder, never "undefined"/"NaN%".

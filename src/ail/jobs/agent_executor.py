@@ -164,6 +164,8 @@ def list_gepa_proposals(
     client: Any,
     warehouse_id: str,
     *,
+    agent_name: str,
+    experiment_id: str,
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
 ) -> list[ProposedAction]:
@@ -172,6 +174,8 @@ def list_gepa_proposals(
     sql = (
         f"SELECT * FROM {fqn} "
         f"WHERE action_kind = {_lit(ActionKind.GEPA_PROMPT.value)} "
+        f"AND agent_name = {_lit(agent_name)} "
+        f"AND experiment_id = {_lit(experiment_id)} "
         f"AND status = {_lit(ProposalStatus.APPROVED.value)} "
         "AND local_apply_status = 'waiting_for_companion'"
     )
@@ -285,6 +289,7 @@ def mark_gepa_local_state(
     warehouse_id: str,
     *,
     agent_name: str,
+    experiment_id: str,
     proposal_id: str,
     local_status: str,
     completed_at: str,
@@ -305,7 +310,9 @@ def mark_gepa_local_state(
         f"local_apply_completed_at = {_lit(completed_at)}, "
         f"local_apply_pre_change_ref = {_lit(pre_change_ref)}, "
         f"local_apply_validation_output = {_lit(validation_output)} "
-        f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
+        f"WHERE agent_name = {_lit(agent_name)} "
+        f"AND experiment_id = {_lit(experiment_id)} "
+        f"AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.APPROVED.value)} "
         "AND local_apply_status = 'waiting_for_companion'"
     )
@@ -571,6 +578,8 @@ def run(args: argparse.Namespace) -> int:
             list_gepa_proposals(
                 client,
                 args.warehouse_id,
+                agent_name=agent.agent_name,
+                experiment_id=agent.experiment_id,
                 catalog=args.catalog,
                 schema=args.schema,
             )
@@ -884,6 +893,7 @@ def _record_gepa_terminal(
             client,
             args.warehouse_id,
             agent_name=proposal.agent_name,
+            experiment_id=proposal.experiment_id,
             proposal_id=proposal.proposal_id,
             local_status=local_status,
             completed_at=completed_at,
@@ -896,9 +906,7 @@ def _record_gepa_terminal(
         )
         return None
     except GuardedUpdateError as exc:
-        print(
-            f"{_TAG}   GEPA STATE UNRECORDED {proposal.proposal_id} (reconcile): {exc}"
-        )
+        print(f"{_TAG}   GEPA STATE UNRECORDED {proposal.proposal_id} (reconcile): {exc}")
         return str(exc)
 
 

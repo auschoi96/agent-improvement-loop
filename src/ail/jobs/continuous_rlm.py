@@ -1,9 +1,9 @@
-"""Databricks Job entrypoint for the scheduled continuous RLM review.
+"""Databricks Job entrypoint for trace-arrival continuous RLM review.
 
-Fired on a schedule (``resources/continuous_rlm.job.yml``), not a trace-arrival
-trigger: the UC-backed trace store is a VIEW, so a ``table_update`` trigger is
-infeasible. Each firing runs one bounded :func:`ail.l3.continuous.run_continuous_rlm`
-pass — sampling, idempotency, and the fail-closed failed-review marker all live there.
+Fired by a table-update trigger on the managed UC ``*_otel_spans`` Delta table
+(``resources/continuous_rlm.job.yml``). Each firing runs bounded
+:func:`ail.l3.continuous.run_continuous_rlm` batches until no eligible trace remains.
+Sampling, idempotency, and the fail-closed failed-review marker all live there.
 
 Registry-driven multi-agent: with no ``--experiment`` it runs REGISTRY MODE — it
 reads every agent from the UC ``agent_registry`` (via :mod:`ail.jobs.multi_agent`)
@@ -17,12 +17,9 @@ ARE the legitimate goal source.
 
 Two things this wrapper owns:
 
-* **Model + effort.** ``--judge-model`` defaults to ``databricks-gpt-5-5-pro`` — the
-  most powerful *viable* HALO judge (Databricks Claude endpoints reject HALO's always-on
-  ``parallel_tool_calls``; ``gpt-5-6`` does not exist on the gateway). Effort is
-  auto-resolved from the model by :func:`ail.l3.reviewer.resolve_reasoning_effort`
-  (so this alias gets ``xhigh`` despite HALO's hyphen-blind prefix check); pass an
-  explicit ``--reasoning-effort`` to override.
+* **Model + FMAPI shape.** ``--judge-model`` defaults to
+  ``databricks-claude-opus-4-8``. HALO uses Databricks Chat Completions for Claude
+  and omits OpenAI-only fields that Claude FMAPI rejects.
 * **Goal-steering.** When ``--objective-metric`` is set, the review rubric is derived
   from the operator-configured goal (:func:`ail.l3.goal_rubric.rubric_from_goal`) so
   HALO judges and recommends in service of what the user is optimizing for. An empty
@@ -47,8 +44,8 @@ from ail.l3.reviewer import normalize_reasoning_effort
 from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
 from ail.registry import Agent
 
-#: Most powerful VIABLE HALO judge on the Databricks gateway (see module docstring).
-DEFAULT_JUDGE_MODEL = "databricks-gpt-5-5-pro"
+#: HALO judge on the Databricks gateway (see module docstring).
+DEFAULT_JUDGE_MODEL = "databricks-claude-opus-4-8"
 
 
 # Neutral goal defaults for REGISTRY mode. Used for a goal_config key an agent left
@@ -155,7 +152,7 @@ def _build_rubric(knobs: dict[str, Any]) -> ReviewRubric:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run one bounded scheduled RLM/HALO pass over recent MLflow traces. "
+        description="Drain unreviewed MLflow traces with bounded RLM/HALO batches. "
         "With no --experiment it runs REGISTRY MODE over every agent in agent_registry "
         "(each agent's own experiment + goal_config); pass --experiment to review JUST "
         "that one experiment (single-agent override)."
@@ -188,7 +185,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=str.lower,
         choices=["", "none", "auto", "minimal", "low", "medium", "high", "xhigh"],
         help="Explicit HALO reasoning-effort override. Empty / 'none' / 'auto' (any case) "
-        "=> no override, auto-resolve from --judge-model (databricks-gpt-5-5-pro => xhigh).",
+        "=> no override; Databricks Claude uses its provider-side reasoning default.",
     )
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--max-reviews", type=int, default=2)
@@ -274,34 +271,69 @@ def _run_rlm_for(
         f"rubric={rubric.rubric_id} sample_rate={args.sample_rate} "
         f"max_reviews={args.max_reviews}"
     )
-    report = run_continuous_rlm(
-        experiment,
-        judge_model=args.judge_model,
-        sql_warehouse_id=args.warehouse_id,
-        max_results=args.max_results,
-        max_reviews=args.max_reviews,
-        sample_rate=args.sample_rate,
-        min_tokens=args.min_tokens,
-        rubric=rubric,
-        reviewer_experiment_id=reviewer_experiment,
-        max_turns=args.max_turns,
-        temperature=args.temperature,
-        reasoning_effort=reasoning_effort,
-        retry_failed=True,
-        max_workers=args.max_workers,
-        enable_code_sandbox=args.code_sandbox == "auto",
-    )
+    attempted_trace_ids: set[str] = set()
+    total_selected = 0
+    total_reviewed = 0
+    total_failed = 0
+    batch = 0
+    while True:
+        batch += 1
+        report = run_continuous_rlm(
+            experiment,
+            judge_model=args.judge_model,
+            sql_warehouse_id=args.warehouse_id,
+            max_results=args.max_results,
+            max_reviews=args.max_reviews,
+            sample_rate=args.sample_rate,
+            min_tokens=args.min_tokens,
+            rubric=rubric,
+            reviewer_experiment_id=reviewer_experiment,
+            max_turns=args.max_turns,
+            temperature=args.temperature,
+            reasoning_effort=reasoning_effort,
+            retry_failed=True,
+            exclude_trace_ids=attempted_trace_ids,
+            max_workers=args.max_workers,
+            enable_code_sandbox=args.code_sandbox == "auto",
+        )
+        print(
+            "[ail.jobs.continuous_rlm] "
+            f"batch={batch} scanned={report.n_scanned} "
+            f"already_reviewed={report.n_already_reviewed} "
+            f"reviewer_traces_skipped={report.n_reviewer_traces_skipped} "
+            f"sampled_out={report.n_sampled_out} selected={report.n_selected} "
+            f"reviewed={report.n_reviewed} failed={report.n_failed}"
+        )
+        total_selected += report.n_selected
+        total_reviewed += report.n_reviewed
+        total_failed += report.n_failed
+        outcomes = list(getattr(report, "outcomes", []) or [])
+        before = len(attempted_trace_ids)
+        attempted_trace_ids.update(str(outcome.trace_id) for outcome in outcomes)
+
+        if report.n_selected == 0:
+            break
+        if len(attempted_trace_ids) == before:
+            # Defensive seam for a malformed/reporting-only implementation: a
+            # selected batch with no outcome ids cannot make provable progress.
+            # Exit rather than spin forever; the task failure rule below preserves
+            # observability when everything selected failed.
+            print(
+                "[ail.jobs.continuous_rlm] selected work produced no trace outcomes; "
+                "stopping the drain to avoid an infinite loop",
+                file=sys.stderr,
+            )
+            break
+
     print(
         "[ail.jobs.continuous_rlm] "
-        f"scanned={report.n_scanned} already_reviewed={report.n_already_reviewed} "
-        f"reviewer_traces_skipped={report.n_reviewer_traces_skipped} "
-        f"sampled_out={report.n_sampled_out} selected={report.n_selected} "
-        f"reviewed={report.n_reviewed} failed={report.n_failed}"
+        f"drain_complete batches={batch} unique_attempted={len(attempted_trace_ids)} "
+        f"selected={total_selected} reviewed={total_reviewed} failed={total_failed}"
     )
     # A Databricks task must not report SUCCESS when HALO selected work but every
     # review failed. The per-trace failure markers remain attached for diagnosis,
     # while the non-zero exit makes the broken optimization loop visible to Jobs.
-    if report.n_selected > 0 and report.n_reviewed == 0:
+    if total_selected > 0 and total_reviewed == 0:
         print(
             "[ail.jobs.continuous_rlm] all selected HALO reviews failed; "
             "failing the task so the outage is observable",

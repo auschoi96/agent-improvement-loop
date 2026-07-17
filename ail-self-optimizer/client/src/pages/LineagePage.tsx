@@ -13,7 +13,7 @@ export function LineagePage() {
       <RequireAgent>
         {(agent) => (
           <PanelBoundary title="Lineage timeline failed to load">
-            <LineageTimeline agentName={agent.agent_name} />
+            <LineageTimeline agentName={agent.agent_name} experimentId={agent.experiment_id} />
           </PanelBoundary>
         )}
       </RequireAgent>

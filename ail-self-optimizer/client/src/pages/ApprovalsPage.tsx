@@ -13,7 +13,7 @@ export function ApprovalsPage() {
       <RequireAgent>
         {(agent) => (
           <PanelBoundary title="Approval queue failed to load">
-            <ApprovalQueue agentName={agent.agent_name} />
+            <ApprovalQueue agentName={agent.agent_name} experimentId={agent.experiment_id} />
           </PanelBoundary>
         )}
       </RequireAgent>
