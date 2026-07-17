@@ -175,6 +175,8 @@ export function OnboardingWizard({
         annotationsTable: state.annotationsTable,
         goalConfig: state.goalConfig,
         reviewerExperimentId: state.reviewerExperimentId,
+        optimizationTargetPath: state.optimizationTargetPath,
+        optimizationValidationCommand: state.optimizationValidationCommand,
       })
     )
       .then(({ status, body }) => {
@@ -632,6 +634,33 @@ function RegisterStep({ state, patch, result }: StepProps & { result: RegisterRe
         </p>
       </div>
 
+      <div className="space-y-2 rounded-md border p-3">
+        <p className="text-sm font-medium">Approved GEPA rewrite target (optional)</p>
+        <Label htmlFor="optimization-target-path">Project-relative prompt or Claude skill file</Label>
+        <Input
+          id="optimization-target-path"
+          className="w-full max-w-xl"
+          value={state.optimizationTargetPath}
+          placeholder=".claude/skills/my-agent/SKILL.md"
+          onChange={(e) => patch({ optimizationTargetPath: e.target.value })}
+          disabled={done}
+        />
+        <Label htmlFor="optimization-validation-command">Validation command</Label>
+        <Input
+          id="optimization-validation-command"
+          className="w-full max-w-xl"
+          value={state.optimizationValidationCommand}
+          placeholder="python -m pytest -q"
+          onChange={(e) => patch({ optimizationValidationCommand: e.target.value })}
+          disabled={done}
+        />
+        <p className="text-xs text-muted-foreground">
+          Both fields are required to enable the last mile. The hosted app only records the reviewed target; your local
+          companion verifies the original hash, snapshots it, applies the exact MLflow artifact, runs this command, and
+          rolls back on failure. Absolute paths and parent traversal are refused.
+        </p>
+      </div>
+
       <Message message={message} />
     </div>
   );
@@ -695,7 +724,9 @@ function RequirementsMode({
 
   const parsedTarget = Number(targetInput);
   const targetValid = targetInput.trim() !== '' && Number.isFinite(parsedTarget);
-  const canConfirm = Boolean(preview) && targetValid && !confirming && !confirmed;
+  const localTargetComplete =
+    Boolean(state.optimizationTargetPath.trim()) === Boolean(state.optimizationValidationCommand.trim());
+  const canConfirm = Boolean(preview) && targetValid && localTargetComplete && !confirming && !confirmed;
 
   async function runConfirm() {
     if (!resolved) return;
@@ -723,6 +754,8 @@ function RequirementsMode({
             annotationsTable: state.annotationsTable,
             goalConfig: body.goal_config,
             reviewerExperimentId: state.reviewerExperimentId,
+            optimizationTargetPath: state.optimizationTargetPath,
+            optimizationValidationCommand: state.optimizationValidationCommand,
           })
         );
         setRegisterResult(registered.body);
@@ -764,6 +797,27 @@ function RequirementsMode({
           placeholder="/path/to/your/agent/repo"
           disabled={confirmed}
         />
+      </div>
+
+      <div className="space-y-2 rounded-md border p-3">
+        <p className="text-sm font-medium">Approved GEPA rewrite target (optional)</p>
+        <Input
+          aria-label="Project-relative GEPA target"
+          value={state.optimizationTargetPath}
+          onChange={(e) => patch({ optimizationTargetPath: e.target.value })}
+          placeholder=".claude/skills/my-agent/SKILL.md"
+          disabled={confirmed}
+        />
+        <Input
+          aria-label="GEPA validation command"
+          value={state.optimizationValidationCommand}
+          onChange={(e) => patch({ optimizationValidationCommand: e.target.value })}
+          placeholder="python -m pytest -q"
+          disabled={confirmed}
+        />
+        <p className="text-xs text-muted-foreground">
+          The local companion applies only this project-relative file and rolls it back if validation fails.
+        </p>
       </div>
 
       <div className="space-y-2">

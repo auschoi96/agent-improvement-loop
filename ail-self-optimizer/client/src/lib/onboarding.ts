@@ -226,6 +226,10 @@ export interface WizardState {
   // The repo/path the open-ended executor edits — REQUIRED for the executor to run
   // this agent (an AGENT_TASK against an agent with no target_workspace fails closed).
   targetWorkspace: string;
+  // Explicit project-relative file that an approved GEPA candidate may rewrite.
+  // The companion resolves it under targetWorkspace and verifies hashes before use.
+  optimizationTargetPath: string;
+  optimizationValidationCommand: string;
   // The fully-qualified OTEL annotations table the memory-distiller job reads —
   // REQUIRED for the memory job (it skips an agent with no annotations_table).
   annotationsTable: string;
@@ -246,6 +250,8 @@ export const initialWizardState: WizardState = {
   accepted: false,
   agentName: '',
   targetWorkspace: '',
+  optimizationTargetPath: '',
+  optimizationValidationCommand: '',
   annotationsTable: '',
   goalConfig: null,
 };
@@ -280,6 +286,9 @@ export function stepValidation(state: WizardState): StepValidation {
     case 'register':
       if (!state.agentName.trim()) return { ok: false, reason: 'Enter a unique agent name.' };
       if (!state.reviewerExperimentId.trim()) return { ok: false, reason: 'Create the isolated reviewer experiment.' };
+      if (Boolean(state.optimizationTargetPath.trim()) !== Boolean(state.optimizationValidationCommand.trim())) {
+        return { ok: false, reason: 'Provide both the GEPA target path and its validation command, or leave both blank.' };
+      }
       return { ok: true, reason: null };
     default:
       return { ok: false, reason: 'Unknown step.' };
@@ -317,6 +326,8 @@ export interface RegisterExtras {
   annotationsTable?: string;
   goalConfig?: Record<string, unknown> | null;
   reviewerExperimentId?: string;
+  optimizationTargetPath?: string;
+  optimizationValidationCommand?: string;
 }
 
 export interface RegisterBody {
@@ -327,6 +338,11 @@ export interface RegisterBody {
   annotations_table?: string;
   goal_config?: Record<string, unknown>;
   reviewer_experiment_id?: string;
+  optimization_target?: {
+    kind: 'claude_skill';
+    path: string;
+    validation_command: string;
+  };
 }
 
 export const registerBody = (
@@ -349,6 +365,15 @@ export const registerBody = (
   if (extras.goalConfig) body.goal_config = extras.goalConfig;
   const reviewerExperimentId = extras.reviewerExperimentId?.trim();
   if (reviewerExperimentId) body.reviewer_experiment_id = reviewerExperimentId;
+  const optimizationTargetPath = extras.optimizationTargetPath?.trim();
+  const optimizationValidationCommand = extras.optimizationValidationCommand?.trim();
+  if (optimizationTargetPath && optimizationValidationCommand) {
+    body.optimization_target = {
+      kind: 'claude_skill',
+      path: optimizationTargetPath,
+      validation_command: optimizationValidationCommand,
+    };
+  }
   return body;
 };
 

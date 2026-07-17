@@ -60,6 +60,13 @@ from ail.executor import (
     produce_preview,
     revert_committed_change,
 )
+from ail.executor.gepa_apply import (
+    GepaApplyConflict,
+    GepaApplyRecordError,
+    GepaLocalApplyError,
+    GepaValidationFailed,
+    apply_approved_gepa,
+)
 from ail.jobs.companion_planner import resolve_static_auth
 from ail.jobs.multi_agent import resolve_registered_agent
 from ail.loop.apply_service import DECISIONS_TABLE, _query_rows, _row_to_proposal
@@ -74,8 +81,10 @@ __all__ = [
     "COMMIT_COLUMNS",
     "GuardedUpdateError",
     "list_agent_task_proposals",
+    "list_gepa_proposals",
     "write_preview",
     "mark_committed",
+    "mark_gepa_local_state",
     "latest_approver",
     "record_commit",
     "load_commit_record",
@@ -147,6 +156,24 @@ def list_agent_task_proposals(
         f"SELECT * FROM {fqn} "
         f"WHERE action_kind = {_lit(ActionKind.AGENT_TASK.value)} "
         f"AND status = {_lit(status.value)}"
+    )
+    return [_row_to_proposal(row) for row in _query_rows(client, warehouse_id, sql)]
+
+
+def list_gepa_proposals(
+    client: Any,
+    warehouse_id: str,
+    *,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+) -> list[ProposedAction]:
+    """Read approved GEPA rewrites that are waiting for the local companion."""
+    fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
+    sql = (
+        f"SELECT * FROM {fqn} "
+        f"WHERE action_kind = {_lit(ActionKind.GEPA_PROMPT.value)} "
+        f"AND status = {_lit(ProposalStatus.APPROVED.value)} "
+        "AND local_apply_status = 'waiting_for_companion'"
     )
     return [_row_to_proposal(row) for row in _query_rows(client, warehouse_id, sql)]
 
@@ -250,6 +277,43 @@ def mark_committed(
         f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
         f"AND status = {_lit(ProposalStatus.APPROVED.value)}",
         what=f"status-mark for proposal {proposal_id!r}",
+    )
+
+
+def mark_gepa_local_state(
+    client: Any,
+    warehouse_id: str,
+    *,
+    agent_name: str,
+    proposal_id: str,
+    local_status: str,
+    completed_at: str,
+    error: str | None = None,
+    pre_change_ref: str | None = None,
+    validation_output: str | None = None,
+    applied: bool = False,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+) -> int:
+    """Record the fail-closed local GEPA terminal state with a guarded update."""
+    fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
+    proposal_status = ProposalStatus.APPLIED.value if applied else ProposalStatus.APPROVED.value
+    statement = (
+        f"UPDATE {fqn} SET status = {_lit(proposal_status)}, "
+        f"local_apply_status = {_lit(local_status)}, "
+        f"local_apply_error = {_lit(error)}, "
+        f"local_apply_completed_at = {_lit(completed_at)}, "
+        f"local_apply_pre_change_ref = {_lit(pre_change_ref)}, "
+        f"local_apply_validation_output = {_lit(validation_output)} "
+        f"WHERE agent_name = {_lit(agent_name)} AND proposal_id = {_lit(proposal_id)} "
+        f"AND status = {_lit(ProposalStatus.APPROVED.value)} "
+        "AND local_apply_status = 'waiting_for_companion'"
+    )
+    return _run_guarded_update(
+        client,
+        warehouse_id,
+        statement,
+        what=f"GEPA local-state UPDATE for proposal {proposal_id!r}",
     )
 
 
@@ -503,9 +567,19 @@ def run(args: argparse.Namespace) -> int:
             catalog=args.catalog,
             schema=args.schema,
         )
+        gepa_approved = (
+            list_gepa_proposals(
+                client,
+                args.warehouse_id,
+                catalog=args.catalog,
+                schema=args.schema,
+            )
+            if agent.optimization_target is not None
+            else []
+        )
     except Exception as exc:  # noqa: BLE001 - surface honestly; do nothing on an unknown state
         print(
-            f"{_TAG} ERROR: could not read AGENT_TASK proposals "
+            f"{_TAG} ERROR: could not read AGENT_TASK proposals or GEPA local approvals "
             f"({type(exc).__name__}: {exc}); doing nothing (fail-closed)."
         )
         return 2
@@ -514,7 +588,8 @@ def run(args: argparse.Namespace) -> int:
     already = len(pending) - len(to_preview)
     print(
         f"{_TAG} --- POLL --- pending AGENT_TASK={len(pending)} "
-        f"(to preview={len(to_preview)}, already previewed={already}); approved={len(approved)}"
+        f"(to preview={len(to_preview)}, already previewed={already}); "
+        f"approved AGENT_TASK={len(approved)}; approved GEPA={len(gepa_approved)}"
     )
 
     if args.dry_run:
@@ -522,6 +597,12 @@ def run(args: argparse.Namespace) -> int:
             print(f"{_TAG}   WOULD PREVIEW {p.proposal_id} — plan: {(p.change.plan or '')[:120]!r}")
         for p in approved:
             print(f"{_TAG}   WOULD COMMIT {p.proposal_id} — ref: {p.change.produced_change_ref!r}")
+        for p in gepa_approved:
+            spec = p.change.local_apply_spec
+            print(
+                f"{_TAG}   WOULD APPLY GEPA {p.proposal_id} — "
+                f"target: {spec.target_path if spec else '<missing spec>'}"
+            )
         print(f"{_TAG} DRY-RUN: no agent run, no snapshot, no commit, no row write.")
         return 0
 
@@ -530,6 +611,7 @@ def run(args: argparse.Namespace) -> int:
 
     _run_previews(to_preview, agent, client, volume_client, runner, args)
     _run_commits(approved, agent, client, volume_client, args)
+    _run_gepa_commits(gepa_approved, agent, client, volume_client, args)
     return 0
 
 
@@ -655,6 +737,169 @@ def _run_commits(
             f"{_TAG}   COMMITTED {p.proposal_id}: {res.n_files} file(s) applied to "
             f"{res.target_workspace} (approver={approver}, revert_point={res.pre_change_ref})"
         )
+
+
+def _run_gepa_commits(
+    approved: list[ProposedAction],
+    agent: Agent,
+    client: Any,
+    volume_client: Any,
+    args: argparse.Namespace,
+) -> None:
+    """Apply approved GEPA artifacts locally; conflicts/validation failures stop closed."""
+    print(f"{_TAG} --- GEPA LOCAL APPLY ({len(approved)} approved) ---")
+    for proposal in approved:
+        approver = latest_approver(
+            client,
+            args.warehouse_id,
+            agent_name=proposal.agent_name,
+            proposal_id=proposal.proposal_id,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
+        completed_at = datetime.now(UTC).isoformat()
+        if not approver:
+            error = "no authenticated approve decision was found; refusing local apply"
+            _record_gepa_terminal(
+                client,
+                proposal,
+                args,
+                local_status="conflict",
+                completed_at=completed_at,
+                error=error,
+            )
+            print(f"{_TAG}   GEPA CONFLICT {proposal.proposal_id}: {error}")
+            continue
+
+        def _recorder(record: CommittedChangeRecord) -> None:
+            record_commit(
+                record,
+                client=client,
+                warehouse_id=args.warehouse_id,
+                catalog=args.catalog,
+                schema=args.schema,
+            )
+
+        try:
+            result = apply_approved_gepa(
+                proposal,
+                agent,
+                volume_client=volume_client,
+                volume_root=args.volume_root,
+                commit_recorder=_recorder,
+                approver=approver,
+                committed_at=completed_at,
+            )
+        except GepaApplyConflict as exc:
+            _record_gepa_terminal(
+                client,
+                proposal,
+                args,
+                local_status="conflict",
+                completed_at=completed_at,
+                error=str(exc),
+            )
+            print(f"{_TAG}   GEPA CONFLICT {proposal.proposal_id}: {exc}")
+            continue
+        except GepaValidationFailed as exc:
+            _record_gepa_terminal(
+                client,
+                proposal,
+                args,
+                local_status="failed_validation",
+                completed_at=completed_at,
+                error=str(exc),
+                pre_change_ref=exc.pre_change_ref,
+                validation_output=exc.output,
+            )
+            print(
+                f"{_TAG}   GEPA VALIDATION FAILED {proposal.proposal_id}; original restored: {exc}"
+            )
+            continue
+        except GepaApplyRecordError as exc:
+            # Candidate is live + validated. Mark applied_unrecorded so the queue never
+            # retries the same mutation while making reconciliation explicit.
+            _record_gepa_terminal(
+                client,
+                proposal,
+                args,
+                local_status="applied_unrecorded",
+                completed_at=completed_at,
+                error=str(exc),
+                pre_change_ref=exc.result.pre_change_ref,
+                validation_output=exc.result.validation_output,
+                applied=True,
+            )
+            print(f"{_TAG}   GEPA APPLIED-BUT-UNRECORDED {proposal.proposal_id}: {exc}")
+            continue
+        except (GepaLocalApplyError, SnapshotError) as exc:
+            _record_gepa_terminal(
+                client,
+                proposal,
+                args,
+                local_status="failed",
+                completed_at=completed_at,
+                error=str(exc),
+            )
+            print(f"{_TAG}   GEPA APPLY FAILED {proposal.proposal_id}: {exc}")
+            continue
+
+        state_error = _record_gepa_terminal(
+            client,
+            proposal,
+            args,
+            local_status="applied",
+            completed_at=completed_at,
+            pre_change_ref=result.pre_change_ref,
+            validation_output=result.validation_output,
+            applied=True,
+        )
+        if state_error:
+            print(
+                f"{_TAG}   GEPA APPLIED-BUT-UNRECORDED {proposal.proposal_id}: "
+                f"validated file is live, but state did not advance: {state_error}"
+            )
+            continue
+        print(
+            f"{_TAG}   GEPA APPLIED {proposal.proposal_id}: {result.target_path} "
+            f"(approver={approver}, revert_point={result.pre_change_ref})"
+        )
+
+
+def _record_gepa_terminal(
+    client: Any,
+    proposal: ProposedAction,
+    args: argparse.Namespace,
+    *,
+    local_status: str,
+    completed_at: str,
+    error: str | None = None,
+    pre_change_ref: str | None = None,
+    validation_output: str | None = None,
+    applied: bool = False,
+) -> str | None:
+    """Persist the companion terminal state; fail loud if the guarded write misses."""
+    try:
+        mark_gepa_local_state(
+            client,
+            args.warehouse_id,
+            agent_name=proposal.agent_name,
+            proposal_id=proposal.proposal_id,
+            local_status=local_status,
+            completed_at=completed_at,
+            error=error,
+            pre_change_ref=pre_change_ref,
+            validation_output=validation_output,
+            applied=applied,
+            catalog=args.catalog,
+            schema=args.schema,
+        )
+        return None
+    except GuardedUpdateError as exc:
+        print(
+            f"{_TAG}   GEPA STATE UNRECORDED {proposal.proposal_id} (reconcile): {exc}"
+        )
+        return str(exc)
 
 
 def _advance_committed(

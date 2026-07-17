@@ -86,6 +86,38 @@ before/after impact shows in the app, and you **revert** anything that did not h
 separate **advisory-memory distiller** turns the same feedback into governed
 `agent_memory` guidelines an agent can consult.
 
+### What happens when you run GEPA
+
+The Optimize page dispatches a bounded Databricks Job. This repository uses
+**GEPA Optimize Anything directly** (`gepa.optimize` with a custom adapter), not
+`mlflow.genai.optimize_prompts`, because the artifact is a coding-agent skill body
+and the fitness function must run a two-arm baseline/candidate comparison that fails
+closed on execution or correctness regressions.
+
+If the evolved body beats the seed on the held-out split, the job logs the candidate
+to the agent's reviewer MLflow experiment and creates a pending Approval containing
+the exact local diff, project-relative target, seed/candidate hashes, held-out
+evidence, and validation command. Approving it does **not** let the hosted app write
+your computer. It changes the proposal to `approved / waiting_for_companion`.
+The local companion then downloads that exact MLflow artifact, checks that the target
+still matches the approved seed hash, snapshots it, rewrites it atomically, runs the
+approved validation command, and records the commit. A hash conflict, escaped path,
+artifact mismatch, or failed validation stops closed; failed validation restores the
+snapshot.
+
+Important caveats:
+
+- GEPA job execution currently supports the packaged `claude_code` adapter. Codex
+  and arbitrary coding-agent adapters are rejected before costly work starts.
+- Onboarding must configure `target_workspace` plus a project-relative
+  `optimization_target` and validation command before GEPA can be dispatched.
+- The local companion must be running to finish an approved rewrite. If it is
+  offline, the proposal remains approved and unapplied.
+- Only a changed candidate with a strictly positive held-out improvement becomes an
+  Approval. Non-winners remain MLflow artifacts and are never offered as safe applies.
+- The companion applies the stored reviewed artifact; it never re-runs GEPA after
+  approval and never asks a model to choose a path at apply time.
+
 ## Status
 
 **Built, cross-reviewed, merged, and deployed.** Every change was independently

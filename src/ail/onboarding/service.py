@@ -80,7 +80,7 @@ from ail.onboarding.goals import (
 )
 from ail.publish import DEFAULT_CATALOG, DEFAULT_SCHEMA
 from ail.publish_versions import REGISTRY_TABLE, publish_registry
-from ail.registry import Agent, AgentRegistry
+from ail.registry import Agent, AgentRegistry, OptimizationTarget
 from ail.requirements import (
     RequirementsExtractionError,
     RequirementsNotConfirmedError,
@@ -347,6 +347,7 @@ def register_agent(
     reviewer_experiment_id: str | None = None,
     annotations_table: str | None = None,
     target_workspace: str | None = None,
+    optimization_target: OptimizationTarget | None = None,
 ) -> RegisterResult:
     """Register one agent by **reusing** :func:`ail.publish_versions.publish_registry`.
 
@@ -421,6 +422,7 @@ def register_agent(
         goal_config=goal_config,
         annotations_table=annotations_table,
         target_workspace=target_workspace,
+        optimization_target=optimization_target,
     )
     publish_registry(
         AgentRegistry(agents=[agent]),
@@ -1198,6 +1200,7 @@ def run_register(
     reviewer_experiment_id: str | None = None,
     annotations_table: str | None = None,
     target_workspace: str | None = None,
+    optimization_target: OptimizationTarget | None = None,
 ) -> RegisterResult:
     """Register an agent live (fail-closed; a write failure is ERROR, never registered).
 
@@ -1246,6 +1249,7 @@ def run_register(
             reviewer_experiment_id=reviewer_experiment_id,
             annotations_table=annotations_table,
             target_workspace=target_workspace,
+            optimization_target=optimization_target,
         )
     except Exception as exc:  # noqa: BLE001 - any infra failure is an honest ERROR, never a fake register
         return RegisterResult(
@@ -1319,6 +1323,26 @@ def _coerce_optional_str(raw: Any, field: str) -> tuple[str | None, str | None]:
         text = raw.strip()
         return (text or None), None
     return None, f"{field} must be a string (a fully-qualified name), not a {type(raw).__name__}"
+
+
+def _coerce_optimization_target(
+    raw: Any,
+) -> tuple[OptimizationTarget | None, str | None]:
+    """Validate the optional local GEPA target before any registry write."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, None
+    value: Any = raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None, "optimization_target must be a JSON object"
+    if not isinstance(value, dict):
+        return None, "optimization_target must be a JSON object"
+    try:
+        return OptimizationTarget.model_validate(value), None
+    except ValueError as exc:
+        return None, f"invalid optimization_target: {exc}"
 
 
 def run_action(payload: dict[str, Any]) -> BaseModel:
@@ -1424,6 +1448,11 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
         )
         if re_err is not None:
             return _register_refused(name, exp, goal_keys, actor, re_err)
+        optimization_target, ot_err = _coerce_optimization_target(
+            payload.get("optimization_target")
+        )
+        if ot_err is not None:
+            return _register_refused(name, exp, goal_keys, actor, ot_err)
         return run_register(
             agent_name=name,
             experiment_id=exp,
@@ -1437,6 +1466,7 @@ def run_action(payload: dict[str, Any]) -> BaseModel:
             reviewer_experiment_id=reviewer_experiment_id,
             annotations_table=annotations_table,
             target_workspace=target_workspace,
+            optimization_target=optimization_target,
         )
     return ErrorResult(action=action, error=f"unknown onboarding action {action!r}")
 

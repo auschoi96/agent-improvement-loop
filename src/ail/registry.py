@@ -30,17 +30,21 @@ see :mod:`ail.cohorts`.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterator
-from pathlib import Path
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ail.cohorts import Cohort, TagFilter
 
 __all__ = [
     "TAG_AGENT_VERSION",
     "Agent",
+    "OptimizationTarget",
+    "OptimizationTargetKind",
     "AgentRegistry",
     "DEFAULT_REGISTRY",
     "CLAUDE_CODE_EXPERIMENT_ID",
@@ -66,6 +70,52 @@ class _Config(BaseModel):
     """Base for registry models: forbid unknown fields so a config typo is loud."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class OptimizationTargetKind(StrEnum):
+    """Supported local target forms for an approved optimizer candidate."""
+
+    CLAUDE_SKILL = "claude_skill"
+    PROMPT_FILE = "prompt_file"
+    AGENTS_MD = "agents_md"
+
+
+class OptimizationTarget(_Config):
+    """Explicit project-relative rewrite target and validation command."""
+
+    kind: OptimizationTargetKind = OptimizationTargetKind.CLAUDE_SKILL
+    path: str
+    validation_command: list[str] = Field(min_length=1)
+    validation_timeout_seconds: int = Field(default=600, ge=1, le=3600)
+
+    @field_validator("path")
+    @classmethod
+    def _relative_path(cls, value: str) -> str:
+        text = value.strip().replace("\\", "/")
+        path = PurePosixPath(text)
+        if not text or path.is_absolute() or text in {".", ".."} or ".." in path.parts:
+            raise ValueError(
+                "optimization target path must be project-relative and cannot contain '..'"
+            )
+        return str(path)
+
+    @field_validator("validation_command", mode="before")
+    @classmethod
+    def _parse_command(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return shlex.split(value)
+            except ValueError as exc:
+                raise ValueError(f"invalid validation command: {exc}") from exc
+        return value
+
+    @field_validator("validation_command")
+    @classmethod
+    def _non_empty_command(cls, value: list[str]) -> list[str]:
+        command = [str(part).strip() for part in value]
+        if not command or any(not part for part in command):
+            raise ValueError("validation_command must contain non-empty argv entries")
+        return command
 
 
 class Agent(_Config):
@@ -114,6 +164,7 @@ class Agent(_Config):
     annotations_table: str | None = None
     tag_filter: dict[str, str] | None = None
     target_workspace: str | None = None
+    optimization_target: OptimizationTarget | None = None
 
     def cohort(self) -> Cohort:
         """The :class:`~ail.cohorts.Cohort` selecting this agent's traces.
@@ -187,6 +238,19 @@ DEFAULT_REGISTRY = AgentRegistry(
                 "claude_code_otel_annotations"
             ),
             target_workspace="/Users/austin.choi/PycharmProjects2/agent-improvement-loop",
+            optimization_target=OptimizationTarget(
+                kind=OptimizationTargetKind.CLAUDE_SKILL,
+                path="src/ail/optimize/assets/skills/token-efficient-execution/SKILL.md",
+                validation_command=[
+                    "python",
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "tests/test_optimize_lever.py",
+                    "tests/test_gepa_runner.py",
+                ],
+                validation_timeout_seconds=900,
+            ),
         )
     ]
 )

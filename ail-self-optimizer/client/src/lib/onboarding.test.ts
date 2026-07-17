@@ -94,6 +94,8 @@ describe('request builders — trim, correct shape, no actor', () => {
     const body = registerBody('my_agent', 'exp-1', ['cost'], {
       targetWorkspace: '  /Workspace/Repos/me/my_agent ',
       annotationsTable: ' catalog.schema.otel_annotations ',
+      optimizationTargetPath: ' .claude/skills/agent/SKILL.md ',
+      optimizationValidationCommand: ' python -m pytest -q ',
     });
     expect(body).toEqual({
       agent_name: 'my_agent',
@@ -101,6 +103,11 @@ describe('request builders — trim, correct shape, no actor', () => {
       goals: ['cost'],
       target_workspace: '/Workspace/Repos/me/my_agent',
       annotations_table: 'catalog.schema.otel_annotations',
+      optimization_target: {
+        kind: 'claude_skill',
+        path: '.claude/skills/agent/SKILL.md',
+        validation_command: 'python -m pytest -q',
+      },
     });
     expect('actor' in body).toBe(false);
   });

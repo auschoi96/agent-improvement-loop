@@ -33,6 +33,12 @@ export interface ProposedActionRow {
   change_diff: string;
   change_evolved_body_ref: string;
   change_revert_target: string;
+  change_local_apply_spec_json: string;
+  local_apply_status: string;
+  local_apply_error: string;
+  local_apply_completed_at: string;
+  local_apply_pre_change_ref: string;
+  local_apply_validation_output: string;
   // proof
   proof_proved_improvement: boolean;
   proof_correctness_held: boolean;
@@ -121,11 +127,45 @@ export interface ChangeView {
 // The concrete change under review, picking whichever payload field the change kind
 // populated (the human approves exactly what ships).
 export function changeUnderReview(row: ProposedActionRow): ChangeView {
+  if (row.action_kind === 'gepa_prompt' && row.change_diff) {
+    return { label: 'Proposed local prompt / skill rewrite diff', body: row.change_diff };
+  }
   if (row.change_sql) return { label: 'Metric-view CREATE SQL', body: row.change_sql };
   if (row.change_diff) return { label: 'Skill / instruction diff', body: row.change_diff };
   if (row.change_evolved_body_ref) return { label: 'GEPA-evolved body reference', body: row.change_evolved_body_ref };
   if (row.change_revert_target) return { label: 'Revert target', body: row.change_revert_target };
   return { label: 'Change', body: row.change_summary || '(no change body recorded)' };
+}
+
+export interface LocalApplySpecView {
+  target_kind: string;
+  target_path: string;
+  artifact_uri: string;
+  baseline_sha256: string;
+  candidate_sha256: string;
+  validation_command: string[];
+  validation_timeout_seconds: number;
+  holdout_evolved_savings_pct?: number | null;
+  holdout_seed_savings_pct?: number | null;
+  holdout_savings_delta_pct?: number | null;
+  holdout_task_ids?: string[];
+}
+
+export function localApplySpec(row: ProposedActionRow): LocalApplySpecView | null {
+  if (!row.change_local_apply_spec_json) return null;
+  try {
+    const value = JSON.parse(row.change_local_apply_spec_json) as Partial<LocalApplySpecView>;
+    if (
+      typeof value.target_path !== 'string' ||
+      typeof value.artifact_uri !== 'string' ||
+      !Array.isArray(value.validation_command)
+    ) {
+      return null;
+    }
+    return value as LocalApplySpecView;
+  } catch {
+    return null;
+  }
 }
 
 // Pending first (they need a decision), then most-recently-created — mirrors the
@@ -203,6 +243,11 @@ export function decisionMessage(resp: DecisionResponse): { tone: DecisionTone; t
         resp.summary;
       return { tone: 'success', text: `Applied${detail ? ` — ${detail}` : ''}.` };
     }
+    case 'approved':
+      return {
+        tone: 'success',
+        text: 'Approved — waiting for the local companion to verify, snapshot, rewrite, and validate the reviewed artifact.',
+      };
     case 'rejected':
       return { tone: 'success', text: 'Rejected — recorded; nothing was applied.' };
     case 'refused':

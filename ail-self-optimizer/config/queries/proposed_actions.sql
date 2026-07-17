@@ -32,6 +32,12 @@ SELECT
   change_diff,
   change_evolved_body_ref,
   change_revert_target,
+  change_local_apply_spec_json,
+  local_apply_status,
+  local_apply_error,
+  local_apply_completed_at,
+  local_apply_pre_change_ref,
+  local_apply_validation_output,
   -- proof (frozen-suite WITH/WITHOUT, correctness held). For an evidence-first
   -- proposal these are NULL until a reviewer runs the opt-in Tier-2 "verify on my
   -- suite" (below), whose result the companion poll handler writes back into them.

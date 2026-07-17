@@ -52,6 +52,8 @@ from ail.loop.proposals import (
     ActionKind,
     ChangeKind,
     GateStatus,
+    LocalApplySpec,
+    LocalApplyTargetKind,
     ProofSummary,
     ProposalStatus,
     ProposedAction,
@@ -236,6 +238,34 @@ def _agent_task_proposal(
     return _proposal(ActionKind.AGENT_TASK, change)
 
 
+def _gepa_local_proposal(*, with_spec: bool = True) -> ProposedAction:
+    spec = (
+        LocalApplySpec(
+            target_kind=LocalApplyTargetKind.CLAUDE_SKILL,
+            target_path=".claude/skills/token/SKILL.md",
+            artifact_uri="runs:/run-1/gepa/gepa_candidate.json",
+            artifact_path="gepa/gepa_candidate.json",
+            baseline_sha256="a" * 64,
+            candidate_sha256="b" * 64,
+            validation_command=["python", "-m", "pytest", "-q"],
+            mlflow_run_id="run-1",
+            reviewer_experiment_id="reviewer-1",
+        )
+        if with_spec
+        else None
+    )
+    return _proposal(
+        ActionKind.GEPA_PROMPT,
+        ProposedChange(
+            kind=ChangeKind.EVOLVED_BODY_REF,
+            summary="local GEPA rewrite",
+            diff="--- a/SKILL.md\n+++ b/SKILL.md\n@@ -1 +1 @@\n-old\n+new\n",
+            evolved_body_ref="runs:/run-1/gepa/gepa_candidate.json",
+            local_apply_spec=spec,
+        ),
+    )
+
+
 def _approve(p: ProposedAction, *, approver: str = "reviewer@databricks.com") -> ApprovalDecision:
     return ApprovalDecision(
         proposal_id=p.proposal_id,
@@ -299,6 +329,29 @@ def test_approve_applies_records_decision_and_advances_status() -> None:
     assert len(h.decisions) == 1
     assert h.decisions[0].approver == "reviewer@databricks.com"
     assert result.decision_recorded is True
+
+
+def test_gepa_approve_waits_for_local_companion_and_applies_nothing_hosted() -> None:
+    h = Harness()
+    proposal = _gepa_local_proposal()
+    result = _decide(proposal, _approve(proposal), h=h)
+
+    assert result.outcome is ApplyServiceOutcome.APPROVED
+    assert result.status == ProposalStatus.APPROVED.value
+    assert h.status_calls == [("claude_code", "prop-1", ProposalStatus.APPROVED)]
+    assert result.decision_recorded is True
+    assert not h.any_capability_called
+    assert h.lineage_records == []
+
+
+def test_gepa_approve_without_bound_local_spec_refuses() -> None:
+    h = Harness()
+    proposal = _gepa_local_proposal(with_spec=False)
+    result = _decide(proposal, _approve(proposal), h=h)
+    assert result.outcome is ApplyServiceOutcome.REFUSED
+    assert "no immutable local_apply_spec" in (result.refused_reason or "")
+    assert h.status_calls == []
+    assert not h.any_capability_called
 
 
 def test_reject_records_reason_and_calls_no_capability() -> None:

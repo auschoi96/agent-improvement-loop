@@ -62,6 +62,11 @@ Each tick delegates to `ail.jobs.agent_executor.run`, which:
   `agent_proposed_actions`;
 - commits `APPROVED` `AGENT_TASK` proposals by applying the stored change-set; it does
   not re-run the agent at commit time;
+- applies `APPROVED` `GEPA_PROMPT` proposals only when they carry the immutable local
+  apply spec created by the GEPA job. It downloads the reviewed MLflow artifact,
+  verifies the project-relative target plus seed/candidate hashes and exact diff,
+  snapshots the original, rewrites atomically, and runs the registered validation
+  command. A conflict applies nothing; failed validation restores the original;
 - records the commit in `agent_executor_commits` and advances the proposal status.
 
 Optional planning cadence:
@@ -112,7 +117,7 @@ python -m ail.companion execute \
 ```
 
 This is the same one-pass behavior used by `poll`: preview pending `AGENT_TASK`
-proposals and commit approved ones.
+proposals, commit approved agent tasks, and finish approved GEPA local rewrites.
 
 ### `prove`
 

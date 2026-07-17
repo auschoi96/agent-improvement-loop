@@ -45,9 +45,10 @@ __all__ = [
     "PROPOSAL_COLUMNS",
     "publish_agent_proposals",
     "publish_proposals",
+    "insert_proposal_if_absent",
 ]
 
-SCHEMA_VERSION = "ail.loop.proposals/v1"
+SCHEMA_VERSION = "ail.loop.proposals/v1.1"
 
 #: The single unified table lane 3's approval queue reads (SELECT-only).
 PROPOSALS_TABLE = "agent_proposed_actions"
@@ -56,6 +57,7 @@ PROPOSALS_TABLE = "agent_proposed_actions"
 #: never drift (the :mod:`ail.publish` convention).
 PROPOSAL_COLUMNS: list[str] = [
     "agent_name",
+    "experiment_id",
     "proposal_id",
     "schema_version",
     "status",
@@ -87,6 +89,14 @@ PROPOSAL_COLUMNS: list[str] = [
     "change_plan",
     "change_preview_diff",
     "change_produced_change_ref",
+    # reviewed local-apply contract + companion lifecycle. The hosted app only
+    # advances approval; these fields are executed/updated by the local companion.
+    "change_local_apply_spec_json",
+    "local_apply_status",
+    "local_apply_error",
+    "local_apply_completed_at",
+    "local_apply_pre_change_ref",
+    "local_apply_validation_output",
     # proof
     "proof_objective_metric",
     "proof_proved_improvement",
@@ -162,6 +172,7 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
     )
     return [
         p.agent_name,
+        p.experiment_id,
         p.proposal_id,
         p.schema_version,
         p.status.value,
@@ -188,6 +199,12 @@ def _proposal_row(p: ProposedAction, *, generated_at: str | None) -> list[Any]:
         c.plan,
         c.preview_diff,
         c.produced_change_ref,
+        c.local_apply_spec.model_dump_json() if c.local_apply_spec is not None else None,
+        "awaiting_approval" if c.local_apply_spec is not None else None,
+        None,
+        None,
+        None,
+        None,
         *proof_cols,
         g.readiness_tier,
         g.can_prove_improvement,
@@ -234,6 +251,7 @@ def _ddl(catalog: str, schema: str) -> list[str]:
         "COMMENT 'Agent self-optimization loop: L0 deterministic metrics (Tier A).'",
         f"""CREATE TABLE IF NOT EXISTS {fqn}.{PROPOSALS_TABLE} (
             agent_name STRING,
+            experiment_id STRING,
             proposal_id STRING,
             schema_version STRING,
             status STRING,
@@ -260,6 +278,12 @@ def _ddl(catalog: str, schema: str) -> list[str]:
             change_plan STRING,
             change_preview_diff STRING,
             change_produced_change_ref STRING,
+            change_local_apply_spec_json STRING,
+            local_apply_status STRING,
+            local_apply_error STRING,
+            local_apply_completed_at STRING,
+            local_apply_pre_change_ref STRING,
+            local_apply_validation_output STRING,
             proof_objective_metric STRING,
             proof_proved_improvement BOOLEAN,
             proof_correctness_held BOOLEAN,
@@ -294,6 +318,7 @@ def publish_agent_proposals(
     proposals: list[ProposedAction],
     *,
     agent_name: str,
+    experiment_id: str | None = None,
     client: Any,
     warehouse_id: str,
     catalog: str = DEFAULT_CATALOG,
@@ -318,12 +343,35 @@ def publish_agent_proposals(
             "clobbers another agent."
         )
 
+    proposal_experiments = {p.experiment_id for p in proposals if p.experiment_id}
+    if experiment_id and any(exp != experiment_id for exp in proposal_experiments):
+        raise ValueError(
+            f"publish_agent_proposals is scoped to experiment {experiment_id!r} but got "
+            f"{sorted(proposal_experiments)}"
+        )
+    if experiment_id is None and len(proposal_experiments) > 1:
+        raise ValueError(
+            f"publish_agent_proposals received multiple experiments: {sorted(proposal_experiments)}"
+        )
+    resolved_experiment = experiment_id or next(iter(proposal_experiments), "")
+
     stamp = generated_at or datetime.now(UTC).isoformat()
     fqn = f"`{catalog}`.`{schema}`"
     for ddl in _ddl(catalog, schema):
         _execute(client, warehouse_id, ddl)
 
-    rows = [_proposal_row(p, generated_at=stamp) for p in proposals]
+    rows = [
+        _proposal_row(
+            p.model_copy(update={"experiment_id": resolved_experiment})
+            if resolved_experiment and not p.experiment_id
+            else p,
+            generated_at=stamp,
+        )
+        for p in proposals
+    ]
+    predicate = f"agent_name = {_lit(agent_name)}"
+    if resolved_experiment:
+        predicate += f" AND experiment_id = {_lit(resolved_experiment)}"
     return _atomic_replace_table(
         client,
         warehouse_id,
@@ -331,7 +379,7 @@ def publish_agent_proposals(
         PROPOSALS_TABLE,
         PROPOSAL_COLUMNS,
         rows,
-        f"agent_name = {_lit(agent_name)}",
+        predicate,
     )
 
 
@@ -351,16 +399,17 @@ def publish_proposals(
     every agent's slice is replaced independently. Builds a workspace client (the
     :mod:`ail.publish` way) when one is not injected. Returns ``{agent_name: rows}``.
     """
-    by_agent: dict[str, list[ProposedAction]] = defaultdict(list)
+    by_agent: dict[tuple[str, str], list[ProposedAction]] = defaultdict(list)
     for p in proposals:
-        by_agent[p.agent_name].append(p)
+        by_agent[(p.agent_name, p.experiment_id)].append(p)
 
     ws = client if client is not None else _build_workspace_client(profile)
     written: dict[str, int] = {}
-    for name, agent_proposals in by_agent.items():
+    for (name, experiment_id), agent_proposals in by_agent.items():
         written[name] = publish_agent_proposals(
             agent_proposals,
             agent_name=name,
+            experiment_id=experiment_id or None,
             client=ws,
             warehouse_id=warehouse_id,
             catalog=catalog,
@@ -368,3 +417,38 @@ def publish_proposals(
             generated_at=generated_at,
         )
     return written
+
+
+def insert_proposal_if_absent(
+    proposal: ProposedAction,
+    *,
+    client: Any,
+    warehouse_id: str,
+    catalog: str = DEFAULT_CATALOG,
+    schema: str = DEFAULT_SCHEMA,
+    generated_at: str | None = None,
+) -> bool:
+    """Insert one externally-produced proposal without replacing the agent slice.
+
+    The GEPA job runs independently of the controller publisher. Reusing the
+    publisher's agent-scoped ``REPLACE`` would erase unrelated pending/decided rows,
+    so this path uses a guarded ``INSERT ... WHERE NOT EXISTS`` keyed by
+    ``(agent_name, experiment_id, proposal_id)``. Repeating persistence for the same
+    MLflow run is therefore idempotent and never resets an approved/applied row.
+    """
+    stamp = generated_at or datetime.now(UTC).isoformat()
+    for ddl in _ddl(catalog, schema):
+        _execute(client, warehouse_id, ddl)
+    row = _proposal_row(proposal, generated_at=stamp)
+    fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
+    columns = ", ".join(PROPOSAL_COLUMNS)
+    values = ", ".join(_lit(v) for v in row)
+    statement = (
+        f"INSERT INTO {fqn} ({columns}) SELECT {values} "
+        f"WHERE NOT EXISTS (SELECT 1 FROM {fqn} "
+        f"WHERE agent_name = {_lit(proposal.agent_name)} "
+        f"AND experiment_id = {_lit(proposal.experiment_id)} "
+        f"AND proposal_id = {_lit(proposal.proposal_id)})"
+    )
+    _execute(client, warehouse_id, statement)
+    return True
