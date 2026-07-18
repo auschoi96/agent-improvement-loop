@@ -128,10 +128,8 @@ export function outcomeTone(status: string | null | undefined): OutcomeTone {
 
 // --- Un-instrumented optimizers (explicit "not tracked yet") ------------------------
 
-// GEPA / RLM-HALO / MemAlign / asset-generation do NOT run as tracked Databricks jobs
-// today — nothing records their runs — so the page states that honestly instead of
-// showing a fake progress bar or a zero-filled row. This is the single source of that
-// copy so the component stays a thin renderer.
+// Remaining capabilities without a dedicated tracked job. RLM, MemAlign, and the
+// recommendation planner are real Databricks Jobs and appear in the run section.
 export interface UntrackedOptimizer {
   key: string;
   name: string;

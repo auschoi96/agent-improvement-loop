@@ -81,7 +81,7 @@ variables:
     default: '8'
   rlm_max_workers:
     description: Bounded parallel HALO reviews per firing.
-    default: '4'
+    default: '1'
   rlm_min_tokens:
     description: Token floor for RLM candidates; 0 includes small traces.
     default: '0'
@@ -191,6 +191,42 @@ variables:
   auto_align_embedding_dim:
     description: Output dimension of the configured MemAlign embedding model.
     default: '1024'
+  recommendation_planner_model:
+    description: Claude model used by the hosted recommendation-planning agent.
+    default: databricks-claude-opus-4-8
+  recommendation_planner_cron:
+    description: Five-minute cadence for turning new RLM/judge feedback into approvals.
+    default: '0 3/5 * * * ?'
+  recommendation_planner_pause_status:
+    description: UNPAUSED keeps the human approval queue converging from new feedback.
+    default: UNPAUSED
+  recommendation_planner_max_turns:
+    description: Maximum Claude Agent SDK turns per recommendation-planner firing.
+    default: '20'
+  recommendation_planner_max_assessments:
+    description: Maximum oldest-first RLM/judge assessments durably ingested per firing.
+    default: '500'
+  recommendation_planner_min_traces:
+    description: Completed RLM subject traces buffered before one cohort planning pass.
+    default: '10'
+  recommendation_planner_max_traces:
+    description: Maximum completed subject traces frozen into one bounded planning cohort.
+    default: '25'
+  recommendation_judge_grace_minutes:
+    description: Minutes after RLM completion before planning with available judge feedback.
+    default: '30'
+  recommendation_planner_max_recommendations:
+    description: Top-priority approval cards emitted per completed trace cohort.
+    default: '3'
+  recommendation_pattern_min_current_traces:
+    description: Normal current-cohort distinct-trace support required for a new card.
+    default: '3'
+  recommendation_pattern_min_total_traces:
+    description: Cross-cohort distinct-trace support required for a new card.
+    default: '5'
+  recommendation_pattern_min_cohorts:
+    description: Cross-cohort recurrence floor required with total trace support.
+    default: '2'
   # Advisory-memory distiller — the standalone scheduled ail-advisory-memory-distiller
   # job (resources/memory_distiller.job.yml). WRITE side only; the Lakebase sync +
   # read/injection side are separate. Reuses the shared catalog/schema/experiment_id/

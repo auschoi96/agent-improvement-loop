@@ -399,10 +399,10 @@ def run(args: argparse.Namespace) -> int:
     """Execute one evidence-first companion run; return a process exit code.
 
     Returns ``0`` on a completed run (proposals published, or the empty set published
-    to clear a superseded slice — unless ``--dry-run``). Returns ``2`` fail-closed when
+    as a queue-preserving no-op — unless ``--dry-run``). Returns ``2`` fail-closed when
     the **agent cannot be resolved** (no ``--experiment`` and not in the registry) or the
     **evidence or readiness could not be read**: it prints an honest error and publishes
-    **nothing** (it never clears the agent's slice on an unknown state, and never
+    **nothing** (it never mutates the approval queue on an unknown state, and never
     fabricates a proposal or a guessed experiment).
     """
     if args.warehouse_id:
@@ -479,9 +479,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"{_TAG} DRY-RUN: not publishing ({len(proposals)} proposal(s) would be written).")
         return 0
 
-    # Publish: agent-scoped atomic REPLACE of this agent's whole pending slice (so a
-    # superseded proposal disappears and the write is idempotent). Published even when
-    # empty — to clear a slice whose evidence no longer holds — but ONLY because the
+    # Publish: append new proposal ids without touching existing pending/decided rows.
+    # Published even when empty — a queue-preserving no-op — but ONLY because the
     # cycle above ran successfully (a read failure returned 2 above without reaching here).
     n_written = _publish(proposals, agent=agent, args=args)
     for p in proposals:

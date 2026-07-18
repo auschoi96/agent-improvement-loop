@@ -2,7 +2,7 @@
 
 Auth (``resolve_job_auth``) and the whole review pass (``run_continuous_rlm``) are
 stubbed, so the wrapper's own responsibilities are exercised without a workspace,
-HALO, or a model: the ``databricks-gpt-5-5-pro`` judge default, goal-derived-rubric
+HALO, or a model: the ``databricks-claude-opus-4-8`` judge default, goal-derived-rubric
 vs. default-rubric fallback, and the reasoning-effort passthrough.
 """
 
@@ -43,7 +43,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 class TestJudgeModelDefault:
-    def test_defaults_to_gpt_5_5_pro(self, captured: dict[str, Any]) -> None:
+    def test_defaults_to_databricks_claude_opus_4_8(self, captured: dict[str, Any]) -> None:
         rc = job.main(
             [
                 "--experiment=EXP1",
@@ -53,8 +53,8 @@ class TestJudgeModelDefault:
             ]
         )
         assert rc == 0
-        assert job.DEFAULT_JUDGE_MODEL == "databricks-gpt-5-5-pro"
-        assert captured["kwargs"]["judge_model"] == "databricks-gpt-5-5-pro"
+        assert job.DEFAULT_JUDGE_MODEL == "databricks-claude-opus-4-8"
+        assert captured["kwargs"]["judge_model"] == "databricks-claude-opus-4-8"
         assert captured["kwargs"]["enable_code_sandbox"] is False
 
     def test_fails_when_all_selected_reviews_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,13 +223,13 @@ def test_requires_warehouse_id(monkeypatch: pytest.MonkeyPatch) -> None:
         job.main(["--experiment=EXP1"])
 
 
-def test_single_firing_drains_bounded_batches_until_quiet(
+def test_single_firing_drains_bounded_batches_only_to_per_run_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from types import SimpleNamespace
 
     monkeypatch.setattr(job, "resolve_job_auth", lambda **kw: "minted")
-    calls: list[set[str]] = []
+    calls: list[tuple[set[str], int]] = []
 
     def report(trace_ids: list[str]) -> Any:
         return SimpleNamespace(
@@ -243,10 +243,10 @@ def test_single_firing_drains_bounded_batches_until_quiet(
             outcomes=[SimpleNamespace(trace_id=trace_id) for trace_id in trace_ids],
         )
 
-    batches = iter([report(["t1", "t2"]), report(["t3"]), report([])])
+    batches = iter([report(["t1", "t2"]), report(["t3"])])
 
     def fake_run(_experiment_id: str, **kwargs: Any) -> Any:
-        calls.append(set(kwargs["exclude_trace_ids"]))
+        calls.append((set(kwargs["exclude_trace_ids"]), kwargs["max_reviews"]))
         return next(batches)
 
     monkeypatch.setattr(job, "run_continuous_rlm", fake_run)
@@ -257,12 +257,12 @@ def test_single_firing_drains_bounded_batches_until_quiet(
             "--reviewer-experiment=REV1",
             "--warehouse-id=wh-1",
             "--objective-metric=",
-            "--max-reviews=2",
+            "--max-reviews=3",
         ]
     )
 
     assert rc == 0
-    assert calls == [set(), {"t1", "t2"}, {"t1", "t2", "t3"}]
+    assert calls == [(set(), 3), ({"t1", "t2"}, 1)]
 
 
 # -- registry (multi-agent) mode -------------------------------------------

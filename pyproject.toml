@@ -41,6 +41,7 @@ ail-publish-job = "ail.jobs.publish_job:main"
 ail-apply-job = "ail.jobs.apply_job:main"
 ail-onboarding-job = "ail.jobs.onboarding_job:main"
 ail-gepa-job = "ail.jobs.gepa_job:main"
+ail-recommendation-planner = "ail.jobs.recommendation_planner:main"
 # One-time, idempotent post-deploy bootstrap: provide-or-create the framework SQL
 # warehouse, grant CAN_USE to the single framework SP, and tag the experiment with
 # the monitoring warehouse. Run as a workspace admin (see docs/DEPLOY.md).

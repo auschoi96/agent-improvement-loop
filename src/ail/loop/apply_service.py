@@ -256,10 +256,30 @@ def decide_on_proposal(
       is LIVE; status is advanced to ``applied`` and the decision recorded, but the
       lineage timeline record failed — surfaced for reconciliation.
     """
-    # GEPA local rewrites have a hard trust boundary: hosted compute records the
-    # approval but never resolves or writes a laptop path. The approved row is then
-    # consumed by the local companion. A legacy GEPA proposal without the immutable
-    # local-apply spec is refused rather than falling through to prompt-registry apply.
+    # Open-ended AGENT_TASK changes are produced in a local sandbox before approval.
+    # Hosted compute records authorization for the exact stored preview, then the
+    # local companion commits it; the app never writes the user's workspace.
+    if proposal.action_kind is ActionKind.AGENT_TASK and decision.decision is DecisionKind.APPROVE:
+        try:
+            approved = _approve_agent_task_for_local_companion(proposal, decision)
+        except ApplyRefused as exc:
+            refused = _refused_result(proposal, decision, reason=exc.reason)
+            _persist(
+                refused,
+                proposal=proposal,
+                decision_writer=decision_writer,
+                status_writer=None,
+            )
+            return refused
+        _persist(
+            approved,
+            proposal=proposal,
+            decision_writer=decision_writer,
+            status_writer=status_writer,
+        )
+        return approved
+
+    # GEPA local rewrites have the same hosted/local trust boundary.
     if proposal.action_kind is ActionKind.GEPA_PROMPT and decision.decision is DecisionKind.APPROVE:
         try:
             approved = _approve_gepa_for_local_companion(
@@ -532,6 +552,46 @@ def _approve_gepa_for_local_companion(
         status=ProposalStatus.APPROVED.value,
         reason=decision.reason,
         summary=(f"approved local rewrite of {spec.target_path}; waiting for the local companion"),
+    )
+
+
+def _approve_agent_task_for_local_companion(
+    proposal: ProposedAction,
+    decision: ApprovalDecision,
+) -> ApplyServiceResult:
+    """Authorize the exact sandboxed AGENT_TASK preview for local commit."""
+    if decision.proposal_id != proposal.proposal_id:
+        raise ApplyRefused(
+            f"decision targets {decision.proposal_id!r}, not proposal {proposal.proposal_id!r}"
+        )
+    if proposal.status is not ProposalStatus.PENDING:
+        raise ApplyRefused(
+            f"proposal {proposal.proposal_id!r} is {proposal.status.value!r}, not pending"
+        )
+    if not (proposal.change.plan or "").strip():
+        raise ApplyRefused("AGENT_TASK has no implementation plan (fail-closed)")
+    if not (proposal.change.preview_diff or "").strip():
+        raise ApplyRefused(
+            "AGENT_TASK has no concrete sandbox preview yet; wait for the local companion "
+            "before approving (fail-closed)"
+        )
+    if not (proposal.change.produced_change_ref or "").strip():
+        raise ApplyRefused(
+            "AGENT_TASK has no stored produced-change reference; the exact preview cannot "
+            "be committed safely (fail-closed)"
+        )
+    return ApplyServiceResult(
+        outcome=ApplyServiceOutcome.APPROVED,
+        proposal_id=proposal.proposal_id,
+        agent_name=proposal.agent_name,
+        decision=DecisionKind.APPROVE,
+        approver=decision.approver,
+        decided_at=decision.decided_at,
+        action_kind=proposal.action_kind.value,
+        risk_class=proposal.risk_class.value,
+        status=ProposalStatus.APPROVED.value,
+        reason=decision.reason,
+        summary="approved the stored sandbox preview; waiting for the local companion to commit",
     )
 
 

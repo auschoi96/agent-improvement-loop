@@ -94,7 +94,7 @@ logger = logging.getLogger(__name__)
 #: (:data:`ail.optimize.gepa_runner.DEFAULT_REFLECTION_LM`), so Lane B, GEPA, and
 #: the L3 judge all default to the same Databricks endpoint. No hardcoded host —
 #: the deploy client resolves the workspace from ambient auth.
-DEFAULT_PLANNER_MODEL = "databricks:/databricks-claude-sonnet-4-6"
+DEFAULT_PLANNER_MODEL = "databricks:/databricks-claude-opus-4-8"
 
 #: Below this confidence a proposed plan entry is dropped (fail-closed: a
 #: low-confidence guess is not surfaced as a decision). A caller may raise or lower

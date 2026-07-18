@@ -494,7 +494,7 @@ def _two_proposals() -> list:  # type: ignore[type-arg]
     return proposals
 
 
-def test_publish_agent_proposals_is_agent_scoped() -> None:
+def test_publish_agent_proposals_appends_without_replacing_queue() -> None:
     proposals = _two_proposals()
     client = _FakeClient()
     n = publish_agent_proposals(
@@ -508,15 +508,13 @@ def test_publish_agent_proposals_is_agent_scoped() -> None:
     )
     assert n == 2
     stmts = client.statement_execution.statements
-    swaps = [s for s in stmts if "REPLACE WHERE" in s]
-    # exactly one agent-scoped swap, predicate is the agent (not per-proposal)
-    assert len(swaps) == 1
-    assert "REPLACE WHERE agent_name = 'claude_code'" in swaps[0]
-    assert "proposal_id" not in swaps[0].split("REPLACE WHERE")[1].split("SELECT")[0]
-    # both proposals' ids landed in the staged rows
-    staged = "\n".join(s for s in stmts if "INSERT INTO" in s and "_stg_" in s)
+    assert not any("REPLACE WHERE" in statement for statement in stmts)
+    inserts = [statement for statement in stmts if "INSERT INTO" in statement]
+    assert len(inserts) == 2
+    staged = "\n".join(inserts)
     for p in proposals:
         assert p.proposal_id in staged
+    assert all("WHERE NOT EXISTS" in statement for statement in inserts)
 
 
 def test_publish_agent_proposals_rejects_mixed_agents() -> None:
@@ -533,7 +531,7 @@ def test_publish_agent_proposals_rejects_mixed_agents() -> None:
         )
 
 
-def test_publish_proposals_writes_one_slice_per_agent() -> None:
+def test_publish_proposals_appends_each_agent_independently() -> None:
     a = _two_proposals()[0]  # claude_code
     b = a.model_copy(update={"agent_name": "other_agent"})
     client = _FakeClient()
@@ -541,11 +539,10 @@ def test_publish_proposals_writes_one_slice_per_agent() -> None:
         [a, b], warehouse_id="wh", catalog="cat", schema="sch", client=client
     )
     assert written == {"claude_code": 1, "other_agent": 1}
-    swaps = [s for s in client.statement_execution.statements if "REPLACE WHERE" in s]
-    assert any("agent_name = 'claude_code'" in s for s in swaps)
-    assert any("agent_name = 'other_agent'" in s for s in swaps)
-    # no swap ever names two agents (each is its own atomic slice)
-    assert not any("claude_code" in s and "other_agent" in s for s in swaps)
+    inserts = [s for s in client.statement_execution.statements if "INSERT INTO" in s]
+    assert any("agent_name = 'claude_code'" in s for s in inserts)
+    assert any("agent_name = 'other_agent'" in s for s in inserts)
+    assert not any("REPLACE WHERE" in s for s in client.statement_execution.statements)
 
 
 def test_proposal_row_matches_column_order() -> None:

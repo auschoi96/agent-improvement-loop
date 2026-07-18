@@ -66,6 +66,10 @@ class AssessmentRow:
     comment: str
     created_at: str
     source_signal: str
+    #: Raw assessment metadata. For ``rlm_review`` this carries ``verdict_json``
+    #: (including HALO recommendations/failure modes); judge rows carry scorer
+    #: provenance. Kept as JSON text so existing memory consumers remain simple.
+    metadata_json: str = ""
 
 
 def source_signal_for(name: str) -> str:
@@ -85,6 +89,8 @@ def build_assessment_query(
     *,
     since_created_at: str | None = None,
     max_results: int = 500,
+    judge_names: frozenset[str] | None = None,
+    ascending: bool = False,
 ) -> str:
     """The ``SELECT`` that returns distillable RLM + judge FEEDBACK, newest first.
 
@@ -95,7 +101,8 @@ def build_assessment_query(
     ``annotations_table`` is a trusted, operator-configured identifier (a bundle
     var), never model output.
     """
-    judge_list = ", ".join(f"'{_escape(n)}'" for n in sorted(JUDGE_ASSESSMENT_NAMES))
+    judges = JUDGE_ASSESSMENT_NAMES if judge_names is None else judge_names
+    judge_list = ", ".join(f"'{_escape(n)}'" for n in sorted(judges)) or "''"
     excluded_list = ", ".join(f"'{_escape(n)}'" for n in sorted(_EXCLUDED_NAMES))
     where = [
         "deleted_at IS NULL",
@@ -109,10 +116,11 @@ def build_assessment_query(
     where_sql = "\n  AND ".join(where)
     return (
         "SELECT name, target_id, CAST(value AS STRING) AS value_str, "
-        "COALESCE(comment, '') AS comment, CAST(created_at AS STRING) AS created_at\n"
+        "COALESCE(comment, '') AS comment, CAST(metadata AS STRING) AS metadata_json, "
+        "CAST(created_at AS STRING) AS created_at\n"
         f"FROM {annotations_table}\n"
         f"WHERE {where_sql}\n"
-        "ORDER BY created_at DESC\n"
+        f"ORDER BY created_at {'ASC' if ascending else 'DESC'}\n"
         f"LIMIT {int(max_results)}"
     )
 
@@ -124,6 +132,8 @@ def read_assessments(
     annotations_table: str,
     since_created_at: str | None = None,
     max_results: int = 500,
+    judge_names: frozenset[str] | None = None,
+    ascending: bool = False,
 ) -> list[AssessmentRow]:
     """Read distillable RLM + judge assessments since ``since_created_at``.
 
@@ -136,7 +146,11 @@ def read_assessments(
     from ail.jobs.bootstrap_tables import _read_rows
 
     query = build_assessment_query(
-        annotations_table, since_created_at=since_created_at, max_results=max_results
+        annotations_table,
+        since_created_at=since_created_at,
+        max_results=max_results,
+        judge_names=judge_names,
+        ascending=ascending,
     )
     rows = _read_rows(client, warehouse_id, query)
     out: list[AssessmentRow] = []
@@ -153,6 +167,7 @@ def read_assessments(
                 comment=str(row.get("comment") or ""),
                 created_at=str(row.get("created_at") or ""),
                 source_signal=source_signal_for(str(name)),
+                metadata_json=str(row.get("metadata_json") or ""),
             )
         )
     return out

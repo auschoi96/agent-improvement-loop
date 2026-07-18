@@ -27,6 +27,7 @@ export interface ProposedActionRow {
   trigger_threshold: number;
   trigger_n_traces: number;
   trigger_judge_name: string;
+  trigger_asset_type: string;
   // what
   change_kind: string;
   change_summary: string;
@@ -34,6 +35,9 @@ export interface ProposedActionRow {
   change_diff: string;
   change_evolved_body_ref: string;
   change_revert_target: string;
+  change_plan: string;
+  change_preview_diff: string;
+  change_produced_change_ref: string;
   change_local_apply_spec_json: string;
   local_apply_status: string;
   local_apply_error: string;
@@ -79,6 +83,7 @@ const ACTION_KIND_LABELS: Record<string, string> = {
   instruction_update: 'Instruction update',
   gepa_prompt: 'GEPA-evolved prompt',
   revert: 'Revert',
+  agent_task: 'Agent recommendation',
 };
 
 export const actionKindLabel = (kind: string): string => ACTION_KIND_LABELS[kind] ?? kind;
@@ -108,6 +113,11 @@ export function proofSummary(row: ProposedActionRow): string {
   if (proven && correct) {
     return `Proven: ${savings} on ${row.objective_metric}, correctness held · ${counts}`;
   }
+  if (row.action_kind === 'agent_task') {
+    return row.change_preview_diff
+      ? 'Prediction only · local companion produced the concrete preview below for human review'
+      : 'Prediction only · waiting for the local companion to produce a concrete preview';
+  }
   return `NOT proven / correctness not held — should never have been proposed (fail-closed) · ${counts}`;
 }
 
@@ -128,6 +138,12 @@ export interface ChangeView {
 // The concrete change under review, picking whichever payload field the change kind
 // populated (the human approves exactly what ships).
 export function changeUnderReview(row: ProposedActionRow): ChangeView {
+  if (row.action_kind === 'agent_task' && row.change_preview_diff) {
+    return { label: 'Concrete sandbox preview', body: row.change_preview_diff };
+  }
+  if (row.action_kind === 'agent_task' && row.change_plan) {
+    return { label: 'Recommended implementation plan (preview pending)', body: row.change_plan };
+  }
   if (row.action_kind === 'gepa_prompt' && row.change_diff) {
     return { label: 'Proposed local prompt / skill rewrite diff', body: row.change_diff };
   }

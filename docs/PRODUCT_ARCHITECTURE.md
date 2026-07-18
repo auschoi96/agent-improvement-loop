@@ -17,10 +17,11 @@ deployer runs their own instance.
 ## 2. The loop, in one breath
 
 An agent's traces flow into Databricks. An **evaluation layer (LLM judges + RLM), shaped by the
-user's stated goals,** scores every trace and writes the feedback onto the trace. A **local agent
-reads that feedback and proposes concrete improvements — each with evidence — into the app.** The
-user **approves** what they want; a **local agent executes it** (versioned, revertible). The user
-**watches real before/after impact** and **reverts** anything that didn't help.
+user's stated goals,** scores every trace and writes the feedback onto the trace. A **hosted
+Databricks planner reviews configurable multi-trace cohorts, durable pattern memory, and the
+existing queue** before proposing evidence-backed improvements into the app. The user **approves**
+what they want; a **local agent executes it** (versioned, revertible). The user **watches real
+before/after impact** and **reverts** anything that didn't help.
 
 No mandatory proving, no cycle orchestrator, no automated promotion gates.
 **The human is the gate; evidence informs the call.**
@@ -41,7 +42,10 @@ it didn't help.
 
 - **Databricks (model-only, hosted/scheduled):** judges, RLM, judge-authoring, MemAlign
   alignment, L0 metrics + publish, and **the app**.
-- **Local companion (deployer-run, Claude Agent SDK):** the **planner, executor, and prover**.
+- **Databricks recommendation-planner Job (Claude Agent SDK):** reads RLM + judge feedback and
+  appends categorized recommendations to the approval queue.
+- **Local companion (deployer-run, Claude Agent SDK):** the **executor and opt-in prover**; it
+  previews/commits approved recommendations against the local workspace.
   Runs on any normal machine the deployer controls (**not** Databricks serverless — the Agent SDK
   bundles its own runtime and needs to execute locally). Polls UC for work, writes results to UC.
 - **UC Delta tables = the shared surface.** The app coordinates the companion via a request table:
@@ -86,19 +90,21 @@ own agents. Not a multi-org SaaS.
 ### RLM (HALO)
 - Reviews traces on a **schedule**, **steered by the user's stated goals** (parameterized, not a
   fixed rubric).
-- Runs on **`databricks-gpt-5-5-pro` (GPT-5.5 Pro)** — the most powerful viable model. Opus/Claude
-  is blocked (HALO always sends `parallel_tool_calls`, which Databricks Claude endpoints reject);
-  GPT-5.6 does not exist on the gateway.
+- Runs on **`databricks-claude-opus-4-8`** through Databricks FMAPI. The HALO adapter follows the
+  endpoint's accepted request shape rather than sending unsupported OpenAI-only fields.
 
 ### Feedback
 All judge scores and RLM findings are written **onto the traces** as assessments — accessible to
 the app and to the labeling flow. (Reviewer runs stay in their own traces so the subject trace's
 token metric is never polluted.)
 
-## 7. Agent layer (local companion, Claude Agent SDK)
+## 7. Planning and execution agents (Claude Agent SDK)
 
-- **Planner** — reads the judge + RLM evidence → produces **evidence-backed proposals** into UC.
-  Does **not** prove.
+- **Hosted planner** — a scheduled Databricks Job. It waits for a configurable minimum of ten
+  completed subject traces, reads their judge + RLM evidence as one cohort, evolves durable
+  pattern/decision memory, compares against the existing approval queue, and produces only the
+  top distinct **evidence-backed proposals** into UC. It does **not** prove or reject approvals.
+  See [RECOMMENDATION_MEMORY.md](RECOMMENDATION_MEMORY.md).
 - **Executor** — an **open-ended, smart agent**. It reads the feedback, decides the best course of
   action, and does **whatever is needed**: create / adjust / delete tables, metric views, skills,
   tools, examples, caches, and anything else. **Not** a fixed action list. It produces a
@@ -172,7 +178,7 @@ and runs it vs. the champion.
 | 4. Build & freeze your suite | Pick traces / author tasks, set checks, freeze | app + DB | net-new |
 | 5. Watch it collect | Readiness panel: traces in, judges + RLM scoring, "N traces / M labels — X to go" | DB jobs; app shows | mostly exists |
 | 6. Label when prompted | Label flagged traces (names match judges) → at the floor, auto-align → judge trusted; agreement trend | app + DB | net-new (labeling UI + trigger) |
-| 7. Review proposals | Queue of evidence-backed recommendations (judge + RLM say why) | companion (planner) → app | queue exists; planner net-new |
+| 7. Review proposals | Queue of evidence-backed recommendations (judge + RLM say why) | Databricks planner Job → app | queue accumulates until the human decides |
 | 8. Verify (optional) | "Prove on my suite" → prover runs candidate vs. baseline → delta as added evidence | companion (prover) | prover exists; button net-new |
 | 9. Approve → execute | Approve → executor agent makes the change (versioned, revertible) | companion (executor) | apply exists; open-ended agent net-new |
 | 10. See impact & revert | Before/after by agent version; revert if it didn't help | app + DB | exists |
@@ -193,11 +199,11 @@ not required.**
 - **Exists / reuse:** trace logging; base judges + MLflow monitoring; RLM/HALO logic; L0 metrics +
   publish; the app (leaderboard, comparison, approval queue, lineage, onboarding wizard, activity);
   MLflow Prompt Registry versioning; the apply engine; the frozen-suite + prover machinery.
-- **Extend:** goal input steers RLM; RLM wired to GPT-5.5 Pro; readiness + labeling surfaced in the
-  app.
+- **Extend:** goal input steers RLM; RLM wired to Databricks Claude Opus 4.8; readiness + labeling
+  surfaced in the app.
 - **Net-new:** judge-authoring (NL → `{{trace}}` judge + matched label schema); auto-align trigger;
-  labeling UI; the local companion (planner); the open-ended executor agent; the "verify on my
-  suite" button + companion wiring; the user-facing suite builder; UC-Volume snapshot versioning
+  labeling UI; durable hosted-planner decision memory; the open-ended executor agent; the "verify
+  on my suite" button + companion wiring; the user-facing suite builder; UC-Volume snapshot versioning
   for arbitrary file change-sets; the companion one-command bootstrap.
 
 ## 13. Open items

@@ -149,7 +149,7 @@ def _poll_args(extra: list[str]) -> argparse.Namespace:
 
 def test_poll_planning_is_enabled_by_default() -> None:
     args = companion._poll_parser().parse_args(["--warehouse-id", "wh"])
-    assert args.plan_every == 1
+    assert args.plan_every == 0
 
 
 def test_executor_argv_registry_is_optional() -> None:

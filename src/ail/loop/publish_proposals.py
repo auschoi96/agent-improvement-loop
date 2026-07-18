@@ -7,16 +7,9 @@ unified Delta table, ``agent_proposed_actions``, that lane 3 reads **SELECT-only
 to populate the Proposals view (the app stays read-only; lane 3 owns the
 authenticated approve/reject write-path).
 
-Mirroring :mod:`ail.publish` / :mod:`ail.publish_versions`:
-
-* **Reuse, no re-implementation.** The atomic staging→``REPLACE WHERE`` swap, the
-  SQL literal rendering, the warehouse client, and the catalog/schema defaults all
-  come from :mod:`ail.publish` — this module only shapes flat rows and the DDL.
-* **Agent-scoped atomic REPLACE.** The table is keyed by ``(agent_name,
-  proposal_id)``, but the swap predicate is ``agent_name = '…'``: publishing one
-  agent's proposals replaces *that agent's whole pending set* (so a superseded
-  proposal disappears) and **never** touches another agent's rows. Each agent is
-  published in its own atomic transaction.
+Writes are queue-preserving: each proposal is inserted only when its
+``(agent_name, experiment_id, proposal_id)`` key is absent. A planner firing never
+deletes unrelated pending recommendations and never resets decided/history rows.
 * **Inert by construction.** A row carries the change body (SQL/diff/ref/target)
   and its proof + gate status — it does **not** apply anything. The apply happens
   only on human approval in lane 3.
@@ -33,7 +26,6 @@ from ail.loop.proposals import ProposedAction
 from ail.publish import (
     DEFAULT_CATALOG,
     DEFAULT_SCHEMA,
-    _atomic_replace_table,
     _build_workspace_client,
     _execute,
     _lit,
@@ -325,13 +317,10 @@ def publish_agent_proposals(
     schema: str = DEFAULT_SCHEMA,
     generated_at: str | None = None,
 ) -> int:
-    """Write **one agent's** proposals, replacing that agent's slice atomically.
+    """Append **one agent's** proposals to its durable approval queue.
 
-    All ``proposals`` must belong to ``agent_name`` — the swap predicate is
-    ``agent_name = '…'``, so the call replaces exactly this agent's rows and leaves
-    every other agent's untouched. A mixed-agent list is a programmer error and
-    raises (publish each agent separately so an agent-scoped REPLACE never clobbers
-    another agent's proposals).
+    Existing keys are left untouched so a re-run cannot erase a preview, decision,
+    or apply status. An empty list is a no-op; it never clears the queue.
 
     Returns the number of rows written.
     """
@@ -339,8 +328,7 @@ def publish_agent_proposals(
     if mismatched:
         raise ValueError(
             f"publish_agent_proposals is scoped to agent {agent_name!r} but got proposals for "
-            f"{mismatched}; publish each agent separately so the agent-scoped REPLACE never "
-            "clobbers another agent."
+            f"{mismatched}; publish each agent separately."
         )
 
     mismatched_experiments = sorted(
@@ -349,8 +337,7 @@ def publish_agent_proposals(
     if mismatched_experiments:
         raise ValueError(
             f"publish_agent_proposals is scoped to experiment {experiment_id!r} but got "
-            f"{mismatched_experiments}; publish each experiment independently so an "
-            "experiment-scoped REPLACE never clobbers another experiment."
+            f"{mismatched_experiments}; publish each experiment independently."
         )
 
     stamp = generated_at or datetime.now(UTC).isoformat()
@@ -358,16 +345,13 @@ def publish_agent_proposals(
     for ddl in _ddl(catalog, schema):
         _execute(client, warehouse_id, ddl)
 
-    rows = [_proposal_row(p, generated_at=stamp) for p in proposals]
-    return _atomic_replace_table(
-        client,
-        warehouse_id,
-        fqn,
-        PROPOSALS_TABLE,
-        PROPOSAL_COLUMNS,
-        rows,
-        f"agent_name = {_lit(agent_name)} AND experiment_id = {_lit(experiment_id)}",
-    )
+    for proposal in proposals:
+        _execute(
+            client,
+            warehouse_id,
+            _insert_if_absent_statement(fqn, proposal, generated_at=stamp),
+        )
+    return len(proposals)
 
 
 def publish_proposals(
@@ -380,10 +364,10 @@ def publish_proposals(
     client: Any | None = None,
     generated_at: str | None = None,
 ) -> dict[str, int]:
-    """Publish proposals for **any number of agents**, one atomic swap per agent.
+    """Publish proposals for **any number of agents**, preserving every queue.
 
-    Groups by ``agent_name`` and calls :func:`publish_agent_proposals` for each, so
-    every agent's slice is replaced independently. Builds a workspace client (the
+    Groups by agent/experiment and calls :func:`publish_agent_proposals` for each.
+    Builds a workspace client (the
     :mod:`ail.publish` way) when one is not injected. Returns ``{agent_name: rows}``.
     """
     by_agent: dict[tuple[str, str], list[ProposedAction]] = defaultdict(list)
@@ -426,16 +410,25 @@ def insert_proposal_if_absent(
     stamp = generated_at or datetime.now(UTC).isoformat()
     for ddl in _ddl(catalog, schema):
         _execute(client, warehouse_id, ddl)
-    row = _proposal_row(proposal, generated_at=stamp)
-    fqn = f"`{catalog}`.`{schema}`.{PROPOSALS_TABLE}"
+    fqn = f"`{catalog}`.`{schema}`"
+    _execute(
+        client,
+        warehouse_id,
+        _insert_if_absent_statement(fqn, proposal, generated_at=stamp),
+    )
+    return True
+
+
+def _insert_if_absent_statement(fqn: str, proposal: ProposedAction, *, generated_at: str) -> str:
+    """Escaped idempotent INSERT for one proposal, preserving an existing row."""
+    row = _proposal_row(proposal, generated_at=generated_at)
     columns = ", ".join(PROPOSAL_COLUMNS)
     values = ", ".join(_lit(v) for v in row)
-    statement = (
-        f"INSERT INTO {fqn} ({columns}) SELECT {values} "
-        f"WHERE NOT EXISTS (SELECT 1 FROM {fqn} "
+    table = f"{fqn}.{PROPOSALS_TABLE}"
+    return (
+        f"INSERT INTO {table} ({columns}) SELECT {values} "
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table} "
         f"WHERE agent_name = {_lit(proposal.agent_name)} "
         f"AND experiment_id = {_lit(proposal.experiment_id)} "
         f"AND proposal_id = {_lit(proposal.proposal_id)})"
     )
-    _execute(client, warehouse_id, statement)
-    return True

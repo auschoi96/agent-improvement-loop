@@ -199,9 +199,9 @@ def _poll_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--plan-every",
         type=int,
-        default=1,
+        default=0,
         metavar="ITERATIONS",
-        help="Run planner every N poll iterations (default 1); 0 explicitly disables planning.",
+        help="Legacy local planner cadence (default 0); hosted planning is a Databricks Job.",
     )
     parser.add_argument(
         "--experiment",
@@ -450,7 +450,7 @@ def _usage() -> str:
         "  plan     evidence-first proposal planning (delegates to ail.jobs.companion_planner)\n"
         "  execute  one executor pass: preview pending, commit approved\n"
         "  prove    opt-in frozen-suite Phase-2 verification\n"
-        "  poll     bounded loop over executor work, optionally planning on cadence\n"
+        "  poll     bounded local executor loop; planning is hosted by Databricks Jobs\n"
         "  run      alias for poll\n"
     )
 

@@ -132,7 +132,16 @@ def _referenced_tables(sql_text: str) -> tuple[set[str], set[str]]:
     aliases = _alias_names(no_comments)
     tables: set[str] = set()
     unclassified: set[str] = set()
-    for ref in re.findall(r'(?:\bFROM\b|\bJOIN\b)\s+([`"\w.]+)', no_comments, re.IGNORECASE):
+    for match in re.finditer(
+        r'(?:\bFROM\b|\bJOIN\b)\s+([`"\w.]+)', no_comments, re.IGNORECASE
+    ):
+        ref = match.group(1)
+        # Databricks parameterized queries use FROM IDENTIFIER(:table_param).
+        # The target is an externally supplied OTEL table, not a framework table
+        # bootstrap can or should create, so it is neither queried coverage nor an
+        # unqualified missing-table blind spot.
+        if ref.upper() == "IDENTIFIER" and no_comments[match.end() :].lstrip().startswith("("):
+            continue
         if "." in ref:
             tables.add(ref.split(".")[-1].strip('`"'))
             continue
@@ -251,6 +260,14 @@ def test_drift_guard_ignores_qualified_ref_with_alias() -> None:
         "SELECT t.a FROM cat.sch.real_table AS t WHERE t.a > 0"
     )
     assert tables == {"real_table"}
+    assert unclassified == set()
+
+
+def test_drift_guard_ignores_parameterized_identifier_table() -> None:
+    tables, unclassified = _referenced_tables(
+        "SELECT COUNT(*) FROM IDENTIFIER(:otel_spans_table) WHERE trace_id IS NOT NULL"
+    )
+    assert tables == set()
     assert unclassified == set()
 
 

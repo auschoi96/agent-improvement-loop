@@ -355,6 +355,30 @@ def test_gepa_approve_without_bound_local_spec_refuses() -> None:
     assert not h.any_capability_called
 
 
+def test_agent_task_approve_authorizes_exact_preview_for_local_companion() -> None:
+    h = Harness()
+    proposal = _agent_task_proposal(
+        preview_diff="--- a/tool.py\n+++ b/tool.py\n@@ -1 +1,2 @@\n+read_cache()\n",
+        produced_change_ref="/Volumes/cat/sch/ail_snapshots/prop-1/change",
+    ).model_copy(update={"proof": None})
+    result = _decide(proposal, _approve(proposal), h=h)
+    assert result.outcome is ApplyServiceOutcome.APPROVED
+    assert result.status == ProposalStatus.APPROVED.value
+    assert h.status_calls == [("claude_code", "prop-1", ProposalStatus.APPROVED)]
+    assert result.decision_recorded is True
+    assert not h.any_capability_called
+
+
+def test_agent_task_approve_waits_for_concrete_preview() -> None:
+    h = Harness()
+    proposal = _agent_task_proposal().model_copy(update={"proof": None})
+    result = _decide(proposal, _approve(proposal), h=h)
+    assert result.outcome is ApplyServiceOutcome.REFUSED
+    assert "no concrete sandbox preview" in (result.refused_reason or "")
+    assert h.status_calls == []
+    assert not h.any_capability_called
+
+
 def test_reject_records_reason_and_calls_no_capability() -> None:
     h = Harness()
     proposal = _metric_view_proposal()

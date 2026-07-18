@@ -1,20 +1,18 @@
 import { WorkspaceClient } from '@databricks/sdk-experimental';
 
-// The framework's registered Databricks jobs, discovered BY NAME (never by a
+// The framework's hosted Databricks jobs, discovered BY NAME (never by a
 // workspace-specific numeric job id — job ids differ per workspace; discovering by
-// name keeps the app reusable). These are the ONLY two things that run as tracked
-// jobs today (resources/apply_service.job.yml, resources/l0_publish.job.yml;
-// docs/LOOP_CONTROLLER.md): `ail-apply-service` (on-demand, one run per human
-// approve/reject decision) and `ail-l0-publish-scheduled` (scheduled L0 publish).
-// GEPA / RLM-HALO / MemAlign / asset-generation do NOT run as tracked jobs yet, so
-// they are intentionally absent here and surfaced client-side as "not tracked".
+// name keeps the app reusable). This includes ingestion/evaluation, alignment,
+// recommendation planning, and the on-demand approval service.
+// Local execution is intentionally absent because it is not a Databricks Job.
 export const REGISTERED_JOB_NAMES = [
   'ail-apply-service',
   'ail-l0-publish-scheduled',
-  'ail-continuous-rlm-scheduled',
+  'ail-continuous-rlm-trace-arrival',
   'ail-judge-backfill',
   'ail-auto-align',
   'ail-advisory-memory-distiller',
+  'ail-recommendation-planner',
   'ail-onboarding-service',
 ] as const;
 

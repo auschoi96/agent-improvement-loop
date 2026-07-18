@@ -140,6 +140,8 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
   const provable = isProvable(row.action_kind);
   const evidence = verifyEvidence(row);
   const localSpec = localApplySpec(row);
+  const approvalReady =
+    row.action_kind !== 'agent_task' || Boolean(row.change_preview_diff && row.change_produced_change_ref);
 
   async function decide(decision: DecisionKind) {
     setMessage(null);
@@ -222,6 +224,7 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
             {riskClassLabel(row.risk_class)}
           </Badge>
           <Badge variant="outline">objective: {row.objective_metric}</Badge>
+          {row.trigger_asset_type && <Badge variant="secondary">category: {row.trigger_asset_type}</Badge>}
         </div>
 
         <div className="space-y-1 text-sm">
@@ -299,7 +302,11 @@ function ProposalCard({ row, onDecided }: { row: ProposedActionRow; onDecided: (
             rows={2}
           />
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => void decide('approve')} disabled={busy !== null}>
+            <Button
+              onClick={() => void decide('approve')}
+              disabled={busy !== null || !approvalReady}
+              title={approvalReady ? undefined : 'Waiting for the local companion to produce the exact diff.'}
+            >
               {busy === 'approve' ? 'Approving…' : 'Approve'}
             </Button>
             <Button

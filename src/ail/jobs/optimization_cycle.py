@@ -458,7 +458,7 @@ def _default_prover(args: argparse.Namespace) -> Prover:
 
 
 def _default_publish(agent: Agent, args: argparse.Namespace) -> PublishFn:
-    """Real publish: atomically replace this agent's slice of the proposals table."""
+    """Real publish: append idempotently to this agent's durable approval queue."""
 
     def _publish(proposals: list[ProposedAction]) -> int:
         from ail.publish import _build_workspace_client

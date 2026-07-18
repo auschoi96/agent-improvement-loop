@@ -8,7 +8,7 @@ Covers the piece-2/piece-3 hard constraints:
   cycle still runs, proves, gates, and publishes.
 * **One cadence over one set**: the RLM step runs *before* the feedback is read.
 * **Propose-only + idempotent publish**: the cycle publishes PENDING proposals (and
-  publishes the empty set to clear a superseded slice) — it applies nothing.
+  publishes the empty set as a queue-preserving no-op) — it applies nothing.
 * **Real feedback assembly (pure mappers)**: reading back attached RLM verdicts,
   recurrence-ranking assets, and mapping the L0 redundancy diagnosis.
 """
@@ -242,9 +242,9 @@ def test_review_error_recorded_but_cycle_continues() -> None:
     assert report.n_published == 1
 
 
-def test_zero_proposals_still_publishes_to_clear_slice() -> None:
+def test_zero_proposals_still_calls_queue_preserving_publish() -> None:
     # A blocked prove -> zero proposals; publish is still called (with the empty set)
-    # so a superseded pending slice is atomically cleared (idempotent).
+    # while the queue-preserving publisher leaves existing rows untouched.
     published: list[Any] = []
 
     report = oc.run_optimization_cycle(

@@ -27,6 +27,7 @@ SELECT
   trigger_threshold,
   trigger_n_traces,
   trigger_judge_name,
+  trigger_asset_type,
   -- what (the concrete change the human is approving)
   change_kind,
   change_summary,
@@ -34,6 +35,9 @@ SELECT
   change_diff,
   change_evolved_body_ref,
   change_revert_target,
+  change_plan,
+  change_preview_diff,
+  change_produced_change_ref,
   change_local_apply_spec_json,
   local_apply_status,
   local_apply_error,

@@ -67,6 +67,8 @@ from ail.publish_versions import (
     VERSION_READINESS_TABLE,
 )
 from ail.publish_versions import _ddl as _versions_ddl
+from ail.recommendations.schema import RECOMMENDATION_TABLES
+from ail.recommendations.schema import _ddl as _recommendation_ddl
 from ail.requirements.persistence import COMPILED_GOAL_TABLE
 from ail.requirements.persistence import _ddl as _compiled_goal_ddl
 
@@ -82,6 +84,7 @@ _DDL_PRODUCERS: tuple[Callable[[str, str], list[str]], ...] = (
     _lineage_ddl,  # agent_prompt_lineage
     _proposals_ddl,  # agent_proposed_actions
     _memory_ddl,  # agent_memory, agent_memory_watermark (framework, not app-read)
+    _recommendation_ddl,  # cohort evidence, patterns, action lineage, outcomes
     _compiled_goal_ddl,  # agent_compiled_goals (framework: intake->loop goal bridge)
 )
 
@@ -118,7 +121,9 @@ APP_QUERY_TABLES: frozenset[str] = frozenset(
 #: :data:`~ail.requirements.persistence.COMPILED_GOAL_TABLE` is the intake→loop goal
 #: bridge — written by the confirmed-intake step, read by the optimization loop's
 #: goal-load, never ``SELECT``ed by AppKit typegen, so it too is a framework table.
-FRAMEWORK_TABLES: frozenset[str] = frozenset({MEMORY_TABLE, WATERMARK_TABLE, COMPILED_GOAL_TABLE})
+FRAMEWORK_TABLES: frozenset[str] = frozenset(
+    {MEMORY_TABLE, WATERMARK_TABLE, COMPILED_GOAL_TABLE} | set(RECOMMENDATION_TABLES)
+)
 
 
 #: The ONLY statement shapes the bootstrap is ever allowed to execute against a

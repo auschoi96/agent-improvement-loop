@@ -154,8 +154,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--plan-every",
         type=int,
-        default=1,
-        help="Run autonomous planning every N cycles (default 1; 0 disables).",
+        default=0,
+        help=(
+            "Legacy local planning cadence (default 0/disabled; hosted planning runs "
+            "as a Databricks Job)."
+        ),
     )
     args = parser.parse_args(argv)
     if args.interval_seconds < 0:

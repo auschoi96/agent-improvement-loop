@@ -2,8 +2,9 @@
 
 Fired by a table-update trigger on the managed UC ``*_otel_spans`` Delta table
 (``resources/continuous_rlm.job.yml``). Each firing runs bounded
-:func:`ail.l3.continuous.run_continuous_rlm` batches until no eligible trace remains.
-Sampling, idempotency, and the fail-closed failed-review marker all live there.
+:func:`ail.l3.continuous.run_continuous_rlm` batches up to the configured per-run
+review cap. Sampling, idempotency, and the fail-closed failed-review marker all
+live there; traces beyond the cap remain eligible for later firings.
 
 Registry-driven multi-agent: with no ``--experiment`` it runs REGISTRY MODE — it
 reads every agent from the UC ``agent_registry`` (via :mod:`ail.jobs.multi_agent`)
@@ -276,14 +277,15 @@ def _run_rlm_for(
     total_reviewed = 0
     total_failed = 0
     batch = 0
-    while True:
+    while total_selected < args.max_reviews:
         batch += 1
+        remaining_reviews = args.max_reviews - total_selected
         report = run_continuous_rlm(
             experiment,
             judge_model=args.judge_model,
             sql_warehouse_id=args.warehouse_id,
             max_results=args.max_results,
-            max_reviews=args.max_reviews,
+            max_reviews=remaining_reviews,
             sample_rate=args.sample_rate,
             min_tokens=args.min_tokens,
             rubric=rubric,

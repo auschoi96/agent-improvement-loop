@@ -1,0 +1,62 @@
+resources:
+  jobs:
+    recommendation_planner:
+      name: ail-recommendation-planner
+      description: >-
+        Hosted Claude Agent SDK planner. On each firing it reads every registered
+        agent's new RLM/HALO verdicts plus L2 judge scores/rationales. It buffers a
+        configurable multi-trace cohort, maintains persistent pattern memory, ranks
+        recurring root causes against the existing queue, and appends only the top
+        distinct AGENT_TASK actions. Categories remain open-ended; only the local
+        companion previews/implements an approved action.
+      tags:
+        project: agent-improvement-loop
+        tier: recommendation-planner
+        managed_by: dab
+        agent: claude-agent-sdk
+
+      schedule:
+        quartz_cron_expression: ${var.recommendation_planner_cron}
+        timezone_id: ${var.schedule_timezone}
+        pause_status: ${var.recommendation_planner_pause_status}
+
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      queue:
+        # A successful run drains every assessment after the watermark. When Opus
+        # takes longer than the five-minute cadence, a later firing sees the same
+        # remaining window; stacking periodic runs only creates lag.
+        enabled: false
+
+      tasks:
+        - task_key: plan_recommendations
+          environment_key: serverless
+          spark_python_task:
+            python_file: ../src/ail/jobs/recommendation_planner.py
+            parameters:
+              - --warehouse-id=${var.warehouse_id}
+              - --catalog=${var.catalog}
+              - --schema=${var.schema}
+              - --model=${var.recommendation_planner_model}
+              - --max-turns=${var.recommendation_planner_max_turns}
+              - --max-assessments=${var.recommendation_planner_max_assessments}
+              - --min-traces=${var.recommendation_planner_min_traces}
+              - --max-traces=${var.recommendation_planner_max_traces}
+              - --judge-grace-minutes=${var.recommendation_judge_grace_minutes}
+              - --max-recommendations=${var.recommendation_planner_max_recommendations}
+              - --pattern-min-current-traces=${var.recommendation_pattern_min_current_traces}
+              - --pattern-min-total-traces=${var.recommendation_pattern_min_total_traces}
+              - --pattern-min-cohorts=${var.recommendation_pattern_min_cohorts}
+              - --task-suite-version=${var.memory_task_suite_version}
+              - --groundtruth-root=${var.memory_groundtruth_root}
+              - --token-secret-scope=${var.token_secret_scope}
+              - --token-secret-key=${var.token_secret_key}
+
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: '3'
+            dependencies:
+              - ../dist/*.whl
+              - claude-agent-sdk>=0.2.114,<0.3
+              - nest_asyncio

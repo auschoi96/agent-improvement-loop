@@ -39,9 +39,10 @@ import asyncio
 import functools
 import hashlib
 import json
+import logging
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -55,6 +56,8 @@ from ail.l3.adapter import OtlpExport, mlflow_trace_to_otlp_jsonl
 from ail.l3.contract import AssetType, GuidelineAssessment, HaloReviewVerdict
 from ail.l3.parser import parse_halo_report
 from ail.l3.rubric import DEFAULT_RUBRIC, ReviewRubric
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from engine.engine_config import EngineConfig
@@ -163,9 +166,26 @@ def _databricks_claude_chat_compatibility(enabled: bool) -> Iterator[None]:
 
     import engine.agents.agent_context as agent_context_module
     import engine.agents.compactor as compactor_module
+    from agents.models.chatcmpl_converter import Converter
     from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from openai import RateLimitError
 
     original_fetch = OpenAIChatCompletionsModel._fetch_response
+    original_stream_response = OpenAIChatCompletionsModel.stream_response
+    original_tool_to_openai = Converter.tool_to_openai
+    original_tool_descriptor = Converter.__dict__["tool_to_openai"]
+    consecutive_rate_limits = 0
+
+    def compatible_tool_to_openai(cls: Any, tool: Any) -> Any:
+        converted = original_tool_to_openai(tool)
+        function = converted.get("function") if isinstance(converted, dict) else None
+        if isinstance(function, dict):
+            # Databricks Claude accepts the standard function name/description/
+            # parameters shape but rejects OpenAI's nested ``strict`` extension.
+            function.pop("strict", None)
+        return converted
+
+    Converter.tool_to_openai = classmethod(compatible_tool_to_openai)
 
     @functools.wraps(original_fetch)
     async def patched_fetch(
@@ -186,10 +206,13 @@ def _databricks_claude_chat_compatibility(enabled: bool) -> Iterator[None]:
             parallel_tool_calls=None,
             temperature=None,
         )
+        compatible_input = (
+            _normalize_databricks_responses_input(input) if isinstance(input, list) else input
+        )
         return await original_fetch(
             self,
             system_instructions,
-            input,
+            compatible_input,
             compatible,
             tools,
             output_schema,
@@ -200,7 +223,39 @@ def _databricks_claude_chat_compatibility(enabled: bool) -> Iterator[None]:
             prompt,
         )
 
-    OpenAIChatCompletionsModel._fetch_response = patched_fetch  # type: ignore[method-assign]
+    OpenAIChatCompletionsModel._fetch_response = patched_fetch
+
+    async def compatible_stream_response(
+        self: Any, *args: Any, **kwargs: Any
+    ) -> AsyncIterator[Any]:
+        """Delay HALO's safe history replay when FMAPI rate-limits a stream."""
+        nonlocal consecutive_rate_limits
+        try:
+            async for event in original_stream_response(self, *args, **kwargs):
+                yield event
+        except RateLimitError as exc:
+            consecutive_rate_limits += 1
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", {})
+            raw_retry_after = headers.get("retry-after") if headers else None
+            try:
+                retry_after = float(raw_retry_after) if raw_retry_after is not None else 0.0
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            exponential = min(60.0, 15.0 * (2 ** min(consecutive_rate_limits - 1, 2)))
+            delay = min(120.0, max(exponential, retry_after))
+            logger.warning(
+                "Databricks Claude FMAPI rate limited a HALO stream; "
+                "cooling down %.1fs before history replay (consecutive=%s)",
+                delay,
+                consecutive_rate_limits,
+            )
+            await asyncio.sleep(delay)
+            raise
+        else:
+            consecutive_rate_limits = 0
+
+    OpenAIChatCompletionsModel.stream_response = compatible_stream_response
     original_compact = compactor_module.compact
 
     async def compatible_compact(*, client: Any, compaction_model: Any, item: Any) -> str:
@@ -212,7 +267,9 @@ def _databricks_claude_chat_compatibility(enabled: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        OpenAIChatCompletionsModel._fetch_response = original_fetch  # type: ignore[method-assign]
+        OpenAIChatCompletionsModel._fetch_response = original_fetch
+        OpenAIChatCompletionsModel.stream_response = original_stream_response
+        Converter.tool_to_openai = original_tool_descriptor
         compactor_module.compact = original_compact
         agent_context_module.compact = original_compact
 
@@ -286,7 +343,7 @@ def _normalize_databricks_responses_input(items: list[Any]) -> list[Any]:
                         "type": "function_call",
                         "call_id": short_call_id,
                         "name": function.get("name", ""),
-                        "arguments": function.get("arguments", "{}"),
+                        "arguments": function.get("arguments") or "{}",
                     }
                 )
             continue
@@ -340,7 +397,7 @@ REVIEW_SPAN_NAME = "rlm_review"
 # deliberately for a deeper review.
 _DEFAULT_MAX_TURNS = 40
 _DEFAULT_MAX_DEPTH = 2
-_DEFAULT_MAX_PARALLEL = 4
+_DEFAULT_MAX_PARALLEL = 1
 
 
 # The review prompt is built from the rubric (HALO returns free text, so the

@@ -4,17 +4,17 @@ resources:
       name: ail-continuous-rlm-trace-arrival
       description: >-
         L3 — the dedicated, high-powered RLM (HALO) deep-reviewer. Each trace-table
-        update drains the eligible traces that have not yet been reviewed: it skips any
+        update reviews a bounded set of eligible traces that have not yet been reviewed: it skips any
         trace that already carries an rlm_* assessment (idempotent), deterministically
-        samples the rest, ranks the sample by token count, reviews bounded batches
-        until the experiment is quiet,
+        samples the rest, ranks the sample by token count, and reviews at most the
+        configured per-run cap; excess traces remain eligible for later firings,
         and attaches per-guideline / assets / overall LLM_JUDGE feedback (fail-closed:
         a degenerate review is marked rlm_review_failed, never a fabricated pass).
-        The review runs on the most powerful VIABLE judge (databricks-gpt-5-5-pro) and
+        The review runs on Databricks Claude Opus 4.8 and
         is STEERED BY THE USER'S GOAL (objective_metric/direction/target/guardrails →
         a goal-derived rubric) rather than a fixed rubric. This is the standalone
-        arrival-triggered reviewer that feeds the local companion's plan/propose lane on the
-        top model + goal-steering. Idempotency keeps it from double-reviewing traces
+        arrival-triggered reviewer that feeds the hosted recommendation-planner Job.
+        Idempotency keeps it from double-reviewing traces
         that already carry RLM feedback.
       tags:
         project: agent-improvement-loop
@@ -42,8 +42,8 @@ resources:
 
       # Idempotent (successfully reviewed traces are skipped; never-attempted traces are
       # processed before failed retries). HALO is expensive; never overlap runs and do
-      # not accumulate queued trigger runs. One active run drains bounded batches until
-      # quiet, so a burst creates work inside the current run instead of a Jobs queue.
+      # not accumulate queued trigger runs. One active run processes the configured
+      # review cap; excess traces remain idempotently eligible for a later arrival.
       max_concurrent_runs: 1
       timeout_seconds: ${var.continuous_rlm_timeout_seconds}
       queue:
@@ -65,9 +65,8 @@ resources:
               warehouse-id: ${var.warehouse_id}
               catalog: ${var.catalog}
               schema: ${var.schema}
-              # Most powerful VIABLE judge. Effort is auto-resolved from this alias
-              # (databricks-gpt-5-5-pro => xhigh) unless continuous_rlm_reasoning_effort
-              # is set to override it explicitly.
+              # Claude Opus 4.8 uses Databricks Chat Completions; HALO removes
+              # unsupported OpenAI-only fields at the model boundary.
               judge-model: ${var.continuous_rlm_judge_model}
               reasoning-effort: ${var.continuous_rlm_reasoning_effort}
               # RLM sampling knobs (the existing ail.l3.continuous scheme; shared vars).

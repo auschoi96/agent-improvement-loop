@@ -533,6 +533,82 @@ class TestEngineSeam:
         assert "token_efficiency" in asyncio.run(invoke())
 
 
+def test_databricks_claude_chat_omits_rejected_openai_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("engine", reason="needs HALO")
+    from agents import ModelSettings
+    from agents.models.chatcmpl_converter import Converter
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from agents.tool import FunctionTool
+
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(
+        self: Any,
+        system_instructions: Any,
+        input: Any,
+        model_settings: ModelSettings,
+        tools: Any,
+        output_schema: Any,
+        handoffs: Any,
+        span: Any,
+        tracing: Any,
+        stream: bool = False,
+        prompt: Any = None,
+    ) -> str:
+        captured["settings"] = model_settings
+        captured["input"] = input
+        return "ok"
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", fake_fetch)
+    with rv._databricks_claude_chat_compatibility(True):
+
+        async def invoke_noop(context: Any, arguments: str) -> str:
+            return "ok"
+
+        converted = Converter.tool_to_openai(
+            FunctionTool(
+                name="noop",
+                description="noop",
+                params_json_schema={"type": "object", "properties": {}},
+                on_invoke_tool=invoke_noop,
+            )
+        )
+        assert "strict" not in converted["function"]
+        result = asyncio.run(
+            OpenAIChatCompletionsModel._fetch_response(
+                None,
+                None,
+                [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "function": {"name": "noop", "arguments": ""},
+                            }
+                        ],
+                    }
+                ],
+                ModelSettings(parallel_tool_calls=False, temperature=0.2),
+                [object()],
+                None,
+                [],
+                None,
+                None,
+            )
+        )
+    assert result == "ok"
+    assert captured["settings"].parallel_tool_calls is None
+    assert captured["settings"].temperature is None
+    assert captured["input"] == [
+        {"role": "assistant", "content": ""},
+        {"type": "function_call", "call_id": "call_1", "name": "noop", "arguments": "{}"},
+    ]
+
+
 class TestReasoningEffort:
     """The gpt-5-5-pro effort fix: normalize the Databricks alias so HALO's own
     family→effort table applies, then set it as an EXPLICIT ModelConfig override

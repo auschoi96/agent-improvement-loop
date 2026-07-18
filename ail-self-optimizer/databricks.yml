@@ -41,6 +41,9 @@ variables:
   memory_job_id:
     description: Numeric job id of ail-advisory-memory-distiller.
     default: ''
+  recommendation_planner_job_id:
+    description: Numeric job id of ail-recommendation-planner.
+    default: ''
   catalog:
     description: Unity Catalog catalog that holds the L0/app write-path tables.
     default: ''
@@ -187,6 +190,10 @@ resources:
         - name: memory-job
           job:
             id: ${var.memory_job_id}
+            permission: CAN_VIEW
+        - name: recommendation-planner-job
+          job:
+            id: ${var.recommendation_planner_job_id}
             permission: CAN_VIEW
 
 targets:

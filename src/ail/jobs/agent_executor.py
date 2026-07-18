@@ -141,6 +141,8 @@ def list_agent_task_proposals(
     client: Any,
     warehouse_id: str,
     *,
+    agent_name: str,
+    experiment_id: str,
     status: ProposalStatus,
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
@@ -155,6 +157,8 @@ def list_agent_task_proposals(
     sql = (
         f"SELECT * FROM {fqn} "
         f"WHERE action_kind = {_lit(ActionKind.AGENT_TASK.value)} "
+        f"AND agent_name = {_lit(agent_name)} "
+        f"AND experiment_id = {_lit(experiment_id)} "
         f"AND status = {_lit(status.value)}"
     )
     return [_row_to_proposal(row) for row in _query_rows(client, warehouse_id, sql)]
@@ -563,6 +567,8 @@ def run(args: argparse.Namespace) -> int:
         pending = list_agent_task_proposals(
             client,
             args.warehouse_id,
+            agent_name=agent.agent_name,
+            experiment_id=agent.experiment_id,
             status=ProposalStatus.PENDING,
             catalog=args.catalog,
             schema=args.schema,
@@ -570,6 +576,8 @@ def run(args: argparse.Namespace) -> int:
         approved = list_agent_task_proposals(
             client,
             args.warehouse_id,
+            agent_name=agent.agent_name,
+            experiment_id=agent.experiment_id,
             status=ProposalStatus.APPROVED,
             catalog=args.catalog,
             schema=args.schema,

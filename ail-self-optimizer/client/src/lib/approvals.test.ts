@@ -37,12 +37,16 @@ function row(overrides: Partial<Record<keyof ProposedActionRow, unknown>> = {}):
     trigger_threshold: 0,
     trigger_n_traces: 12,
     trigger_judge_name: '',
+    trigger_asset_type: '',
     change_kind: 'metric_view_sql',
     change_summary: 'token waste view',
     change_sql: 'CREATE OR REPLACE VIEW cat.sch.v AS SELECT 1',
     change_diff: '',
     change_evolved_body_ref: '',
     change_revert_target: '',
+    change_plan: '',
+    change_preview_diff: '',
+    change_produced_change_ref: '',
     change_local_apply_spec_json: '',
     local_apply_status: '',
     local_apply_error: '',
@@ -83,6 +87,7 @@ describe('isPending', () => {
 describe('labels', () => {
   it('humanizes action kinds and risk classes, passing unknowns through', () => {
     expect(actionKindLabel('gepa_prompt')).toMatch(/gepa/i);
+    expect(actionKindLabel('agent_task')).toMatch(/recommendation/i);
     expect(actionKindLabel('mystery')).toBe('mystery');
     expect(riskClassLabel('agent_change')).toMatch(/higher blast radius/);
   });
@@ -106,6 +111,15 @@ describe('proofSummary — honest by construction', () => {
   it('renders an em dash rather than a fake 0% when savings is missing', () => {
     const s = proofSummary(row({ proof_realized_savings_pct: null }));
     expect(s).toMatch(/—/);
+  });
+
+  it('describes agent recommendations as prediction-first instead of broken proof', () => {
+    const s = proofSummary(
+      row({ action_kind: 'agent_task', proof_proved_improvement: false, change_preview_diff: '+++ b' }),
+    );
+    expect(s).toMatch(/Prediction only/);
+    expect(s).toMatch(/concrete preview/);
+    expect(s).not.toMatch(/should never/);
   });
 });
 
@@ -133,6 +147,24 @@ describe('changeUnderReview', () => {
     const revert = changeUnderReview(row({ change_sql: '', change_kind: 'revert_ref', change_revert_target: 'v3' }));
     expect(revert.label).toMatch(/Revert/);
     expect(revert.body).toBe('v3');
+  });
+
+  it('shows the agent plan until the concrete sandbox preview arrives', () => {
+    const plan = changeUnderReview(
+      row({ action_kind: 'agent_task', change_sql: '', change_plan: 'Implement a context index.' }),
+    );
+    expect(plan.label).toMatch(/plan/i);
+    expect(plan.body).toContain('context index');
+    const preview = changeUnderReview(
+      row({
+        action_kind: 'agent_task',
+        change_sql: '',
+        change_plan: 'Implement a context index.',
+        change_preview_diff: '--- a\n+++ b',
+      }),
+    );
+    expect(preview.label).toMatch(/sandbox preview/i);
+    expect(preview.body).toContain('+++ b');
   });
 });
 

@@ -201,6 +201,30 @@ def _proposal(
 # ---------------------------------------------------------------------------
 
 
+def test_agent_task_query_is_scoped_to_one_agent_and_experiment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[str] = []
+
+    def query(client, warehouse_id, statement):  # type: ignore[no-untyped-def]
+        captured.append(statement)
+        return []
+
+    monkeypatch.setattr(ax, "_query_rows", query)
+    assert (
+        ax.list_agent_task_proposals(
+            object(),
+            "wh",
+            agent_name="claude_code",
+            experiment_id="exp-1",
+            status=ProposalStatus.PENDING,
+        )
+        == []
+    )
+    assert "agent_name = 'claude_code'" in captured[0]
+    assert "experiment_id = 'exp-1'" in captured[0]
+
+
 def test_refuses_without_static_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
     monkeypatch.delenv("DATABRICKS_HOST", raising=False)
@@ -274,7 +298,9 @@ def test_run_uc_agent_without_target_workspace_fails_closed(
 
     pending = _proposal(plan="preview me", status=ProposalStatus.PENDING)
 
-    def _list(client, wh, *, status, catalog, schema):  # type: ignore[no-untyped-def]
+    def _list(  # type: ignore[no-untyped-def]
+        client, wh, *, agent_name, experiment_id, status, catalog, schema
+    ):
         return [pending] if status is ProposalStatus.PENDING else []
 
     monkeypatch.setattr(ax, "list_agent_task_proposals", _list)
@@ -347,7 +373,9 @@ def test_run_dry_run_previews_and_commits_nothing(
         plan="do b", status=ProposalStatus.APPROVED, produced_change_ref=f"{VOLUME_ROOT}/ref"
     )
 
-    def _list(client, wh, *, status, catalog, schema):  # type: ignore[no-untyped-def]
+    def _list(  # type: ignore[no-untyped-def]
+        client, wh, *, agent_name, experiment_id, status, catalog, schema
+    ):
         return [pending] if status is ProposalStatus.PENDING else [approved]
 
     monkeypatch.setattr(ax, "list_agent_task_proposals", _list)
@@ -407,7 +435,9 @@ def test_run_previews_pending_skips_previewed_and_commits_approved(
         produced_change_ref=f"{VOLUME_ROOT}/already",
     )
 
-    def _list(client, wh, *, status, catalog, schema):  # type: ignore[no-untyped-def]
+    def _list(  # type: ignore[no-untyped-def]
+        client, wh, *, agent_name, experiment_id, status, catalog, schema
+    ):
         if status is ProposalStatus.PENDING:
             return [pending_new, pending_done]
         return [approved]
@@ -585,7 +615,9 @@ def test_commit_zero_row_status_mark_is_committed_but_unrecorded(
     )
     approved = pre.proposal.model_copy(update={"status": ProposalStatus.APPROVED})
 
-    def _list(client, wh, *, status, catalog, schema):  # type: ignore[no-untyped-def]
+    def _list(  # type: ignore[no-untyped-def]
+        client, wh, *, agent_name, experiment_id, status, catalog, schema
+    ):
         return [approved] if status is ProposalStatus.APPROVED else []
 
     monkeypatch.setattr(ax, "_resolve_agent", lambda *a, **k: agent)
