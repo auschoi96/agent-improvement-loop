@@ -227,6 +227,18 @@ variables:
   recommendation_pattern_min_cohorts:
     description: Cross-cohort recurrence floor required with total trace support.
     default: '2'
+  recommendation_managed_memory_store:
+    description: >-
+      Short or catalog.schema.name Unity Catalog Managed Memory store used as a
+      supplemental long-term recommendation context. The planner creates it on first
+      use when its run-as identity has CREATE MEMORY STORE; empty disables the Beta feature.
+    default: ail_recommendation_memory
+  recommendation_managed_memory_top_k:
+    description: Maximum current-state plus recent Managed Memory entries retrieved for one cohort.
+    default: '10'
+  recommendation_managed_memory_max_chars:
+    description: Hard character budget for Managed Memory content injected into one planner prompt.
+    default: '12000'
   # Advisory-memory distiller — the standalone scheduled ail-advisory-memory-distiller
   # job (resources/memory_distiller.job.yml). WRITE side only; the Lakebase sync +
   # read/injection side are separate. Reuses the shared catalog/schema/experiment_id/

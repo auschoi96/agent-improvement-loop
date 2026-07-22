@@ -242,6 +242,42 @@ The App's own `CAN_USE` is **not** done here — it is granted natively by the A
 platform from the `permission: CAN_USE` declaration in
 `ail-self-optimizer/databricks.yml`.
 
+### Managed recommendation memory (Beta)
+
+The recommendation planner enables Unity Catalog Managed Memory by default with the
+short store name `ail_recommendation_memory` in the configured framework catalog and
+schema. The feature must be enabled from the workspace **Previews** page.
+
+The planner first gets the store and creates it only when it receives a documented
+not-found response. Therefore either:
+
+1. grant the planner run-as identity `CREATE MEMORY STORE` on the parent schema for
+   first-run creation; after creation it owns the store; or
+2. create the store once as an administrator, then grant the framework service
+   principal `READ MEMORY STORE` and `WRITE MEMORY STORE` on that store plus
+   `USE CATALOG` and `USE SCHEMA` on its parent objects.
+
+Least privilege favors option 2. The REST create request is:
+
+```bash
+curl -X POST "${DATABRICKS_HOST}/api/2.1/unity-catalog/memory-stores" \
+  -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "ail_recommendation_memory",
+    "catalog_name": "<CATALOG>",
+    "schema_name": "<SCHEMA>",
+    "description": "Governed long-term recommendation decision memory for AIL"
+  }'
+```
+
+Memory is supplemental. If the Beta is disabled or permissions are missing, the job
+logs that Managed Memory is unavailable and continues from the authoritative Delta
+evidence/pattern/action tables. Set
+`--var recommendation_managed_memory_store=''` to disable it explicitly. The scope is
+derived inside trusted planner code per registered agent; never accept a scope from a
+model or browser request.
+
 > [!IMPORTANT]
 > **The table-ensure must run before the app is deployed/started.** The app's
 > build runs AppKit typegen (`appkit generate-types`), which performs a **live**

@@ -1,8 +1,9 @@
 # Cohort recommendation planner and decision memory
 
-> **Status: core implementation deployed.** The hosted planner now uses governed
+> **Status: core implementation plus Managed Memory bridge implemented.** The hosted planner uses governed
 > evidence, cohort, pattern-event/state, action-lineage, and outcome tables plus a
-> structured planning tool. The former opaque
+> structured planning tool. A Unity Catalog Managed Memory store now supplies bounded,
+> supplemental cross-cohort retrieval; the Delta tables remain authoritative. The former opaque
 > `agent_recommendation_memory.memory_json` snapshot is no longer read or written.
 > Embedding-based retrieval, organic version-outcome attribution, and the pattern UI
 > are follow-on slices; current queue coverage uses canonical keys plus conservative
@@ -35,7 +36,7 @@ The planner must:
 An empty recommendation batch is a successful and expected result. It means the
 cohort was learned from but did not justify another interruption for the user.
 
-## 2. Two different kinds of memory
+## 2. Three complementary memory layers
 
 The existing `agent_memory` table and the new recommendation memory solve different
 problems and must remain separate.
@@ -43,12 +44,32 @@ problems and must remain separate.
 | Memory | Purpose | Unit | Consumer |
 |---|---|---|---|
 | Advisory memory (`agent_memory`) | Distilled behavioral guidance that may be injected into an agent | guideline | target agent / intervention |
-| Recommendation decision memory | What the planner observed, how patterns evolved, what it proposed, what the human decided, and what happened afterward | cohort, pattern, action, outcome | hosted recommendation planner and approval UI |
+| Recommendation decision memory (Delta) | Authoritative record of what the planner observed, proposed, what the human decided, and what happened afterward | cohort, pattern, action, outcome | hosted recommendation planner and approval UI |
+| UC Managed Memory | Bounded retrieval summaries of prior cohorts, decisions, rejection reasons, and measured outcomes | current state + compact cohort summary | hosted recommendation planner only |
 
 The recommendation layer should reuse `ail.memory.assessments`, the reserved-pool
 provenance wall, SQL execution helpers, deterministic IDs, and fail-closed MERGE
 semantics. It should not store its state in `agent_memory` or inject planner decision
 history into the target agent.
+
+### Managed Memory safety boundary
+
+Managed Memory is a Beta, REST-only retrieval layer, not a replacement database:
+
+- the framework derives one stable opaque scope from `agent_name + experiment_id` in
+  trusted code; the model can never choose a scope;
+- `/memories/recommendations/state.md` is an idempotently replaced summary of current
+  patterns plus every proposal kind (skills, metric views, prompts, reverts, and
+  open-ended tasks), decisions, rejection reasons, applied artifacts, and measured outcomes;
+- `/memories/recommendations/cohorts/<cohort_id>.md` records compact learned patterns
+  and candidate actions without raw trace bodies or trace IDs;
+- retrieval follows the Beta-safe list/get pattern: it always fetches the state entry,
+  lists bounded cohort metadata, gets the most recently updated entries, and then
+  enforces a hard prompt character budget;
+- the prompt labels retrieved text as potentially stale, untrusted historical data;
+  it cannot override current evidence or the human-owned queue; and
+- Managed Memory errors are fail-soft. The governed Delta cohort still commits and a
+  later run can rebuild the state summary from authoritative tables.
 
 ## 3. Data flow
 
@@ -323,6 +344,9 @@ but which kinds of recommendations humans accepted and which changes actually he
 | `recommendation_pattern_min_current_traces` | `3` | normal current-cohort support floor |
 | `recommendation_pattern_min_total_traces` | `5` | cross-cohort support floor |
 | `recommendation_pattern_min_cohorts` | `2` | cross-cohort recurrence floor |
+| `recommendation_managed_memory_store` | `ail_recommendation_memory` | short or three-level UC Managed Memory store; empty disables it |
+| `recommendation_managed_memory_top_k` | `10` | maximum state + recent cohort entries retrieved per planning cohort |
+| `recommendation_managed_memory_max_chars` | `12000` | hard prompt budget for retrieved memory contents |
 | `recommendation_pattern_window_cohorts` | `6` | recent window used for trend features |
 | `recommendation_rejection_cooldown_cohorts` | `3` | minimum wait before reconsidering a rejected action |
 | `recommendation_outcome_min_traces` | `20` | organic evidence floor before outcome classification |

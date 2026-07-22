@@ -7,8 +7,9 @@ resources:
         agent's new RLM/HALO verdicts plus L2 judge scores/rationales. It buffers a
         configurable multi-trace cohort, maintains persistent pattern memory, ranks
         recurring root causes against the existing queue, and appends only the top
-        distinct AGENT_TASK actions. Categories remain open-ended; only the local
-        companion previews/implements an approved action.
+        distinct AGENT_TASK actions. Governed Unity Catalog Managed Memory supplies
+        supplemental cross-cohort decision and outcome context. Categories remain
+        open-ended; only the local companion previews/implements an approved action.
       tags:
         project: agent-improvement-loop
         tier: recommendation-planner
@@ -47,6 +48,9 @@ resources:
               - --pattern-min-current-traces=${var.recommendation_pattern_min_current_traces}
               - --pattern-min-total-traces=${var.recommendation_pattern_min_total_traces}
               - --pattern-min-cohorts=${var.recommendation_pattern_min_cohorts}
+              - --managed-memory-store=${var.recommendation_managed_memory_store}
+              - --managed-memory-top-k=${var.recommendation_managed_memory_top_k}
+              - --managed-memory-max-chars=${var.recommendation_managed_memory_max_chars}
               - --task-suite-version=${var.memory_task_suite_version}
               - --groundtruth-root=${var.memory_groundtruth_root}
               - --token-secret-scope=${var.token_secret_scope}
